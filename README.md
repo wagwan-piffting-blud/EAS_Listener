@@ -26,7 +26,7 @@
 
 ## Installation, configuration, usage, technical details
 
-[Please refer to the wiki](./wiki) for detailed instructions on installation, configuration, usage, and more that this README cannot cover in-depth.
+[Please refer to the wiki](https://github.com/wagwan-piffting-blud/EAS_Listener/wiki) for detailed instructions on installation, configuration, usage, and more that this README cannot cover in-depth.
 
 ---
 
