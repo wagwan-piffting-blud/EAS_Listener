@@ -8,6 +8,7 @@ pub enum FilterAction {
     Ignore,
     Relay,
     Log,
+    Forward,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,7 @@ pub fn match_filter<'a>(filters: &'a [FilterRule], event_code: &str) -> Option<&
     filters.iter().find(|rule| rule.matches(&normalized))
 }
 
+#[allow(dead_code)]
 pub fn should_relay_alert(event_code: &str) -> bool {
     let filters = GLOBAL_FILTERS.read();
     match_filter(&filters, event_code)
@@ -134,11 +136,19 @@ pub fn should_log_alert(event_code: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn should_forward_alert(event_code: &str) -> bool {
+    let filters = GLOBAL_FILTERS.read();
+    match_filter(&filters, event_code)
+        .map(|rule| rule.action == FilterAction::Forward)
+        .unwrap_or(false)
+}
+
 fn parse_action(action: &str, filter_name: &str) -> FilterAction {
     match action.trim().to_ascii_lowercase().as_str() {
         "ignore" => FilterAction::Ignore,
         "relay" => FilterAction::Relay,
         "log" => FilterAction::Log,
+        "forward" => FilterAction::Forward,
         other => {
             error!(
                 "Filter '{}' has unsupported action '{}'; defaulting to relay",

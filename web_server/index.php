@@ -118,8 +118,9 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
         <header>
             <h1><img src="assets/favicon-96x96.png" alt="EAS Logo" class="logo" />EAS Monitoring Dashboard</h1>
             <div id="header-right">
-                <span id="wsStatus" class="ws-status">Connecting…</span>
+                <span id="wsStatus" class="ws-status">Connecting...</span>
                 <div id="logout-container">
+                    <a class="custom-button" href="reload.php" class="button">Reload Rust Backend</a>
                     <a class="custom-button" href="logout.php" class="button">Logout</a>
                 </div>
             </div>

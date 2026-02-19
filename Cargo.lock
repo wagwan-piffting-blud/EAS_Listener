@@ -79,38 +79,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
-name = "asmara_rust"
-version = "0.30.0"
-dependencies = [
- "Inflector",
- "anyhow",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "chrono-tz",
- "crossbeam-channel",
- "dotenvy",
- "hound",
- "lazy_static",
- "parking_lot",
- "phf",
- "reqwest",
- "rubato",
- "sameold",
- "serde",
- "serde_json",
- "symphonia",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "assert_approx_eq"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -406,6 +374,38 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "eas_listener"
+version = "0.1.0"
+dependencies = [
+ "Inflector",
+ "anyhow",
+ "axum",
+ "base64",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "crossbeam-channel",
+ "dotenvy",
+ "hound",
+ "lazy_static",
+ "parking_lot",
+ "phf",
+ "reqwest",
+ "rubato",
+ "sameold",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "encoding_rs"

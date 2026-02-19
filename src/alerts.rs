@@ -37,16 +37,41 @@ fn is_alert_relevant(alert_data: &EasAlertData, watched_fips: &HashSet<String>) 
 }
 
 pub async fn run_alert_manager(
-    config: Config,
+    mut config: Config,
     state: Arc<Mutex<AppState>>,
     mut rx: Receiver<(String, String, String, String, Duration, String)>,
     recording_state: Arc<Mutex<Option<RecordingState>>>,
     nnnn_rx: BroadcastReceiver<()>,
     monitoring: MonitoringHub,
+    mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
-    while let Some((event, locations, originator, raw_header, purge_time, stream_id)) =
-        rx.recv().await
-    {
+    let mut reload_enabled = true;
+    loop {
+        let (event, locations, originator, raw_header, purge_time, stream_id) = tokio::select! {
+            maybe_alert = rx.recv() => {
+                let Some(alert) = maybe_alert else {
+                    break;
+                };
+                alert
+            }
+            reload_result = reload_rx.recv(), if reload_enabled => {
+                match reload_result {
+                    Ok(new_config) => {
+                        info!("Alert manager loaded updated configuration.");
+                        config = new_config;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("Alert manager reload channel lagged; skipped {} update(s).", skipped);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        warn!("Alert manager reload channel closed; keeping current configuration.");
+                        reload_enabled = false;
+                    }
+                }
+                continue;
+            }
+        };
+
         info!("Processing alert: {}", &raw_header);
 
         let dsame_result = get_eas_details_and_log(&config, &raw_header).await;
@@ -193,6 +218,20 @@ async fn handle_recording_and_webhook(
         .await;
     }
 
+    if filter::should_forward_alert(&event_code) {
+        info!("Forwarding alert {} to configured webhook(s)", event_code);
+        let recording_path_for_webhook = recorded_state.as_ref().map(|(path, _)| path.clone());
+        send_alert_webhook(
+            &stream_id,
+            &alert,
+            &dsame_text,
+            &raw_header,
+            recording_path_for_webhook,
+        )
+        .await;
+        return;
+    }
+
     if config.should_relay {
         if let Some((ref recording_path, ref source_stream)) = recorded_state {
             let filters = {
@@ -214,6 +253,7 @@ async fn handle_recording_and_webhook(
                     filters.as_slice(),
                     recording_path,
                     Some(source_stream.as_str()),
+                    &raw_header,
                 )
                 .await
             {

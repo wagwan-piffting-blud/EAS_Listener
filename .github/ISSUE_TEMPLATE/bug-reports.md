@@ -1,6 +1,6 @@
 ---
 name: Bug Reports
-about: For issues with ASMARA_Rust.
+about: For issues with eas_listener.
 title: "[BUG] - "
 labels: bug
 assignees: wagwan-piffting-blud

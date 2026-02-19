@@ -1,6 +1,6 @@
 ---
 name: Feature Requests
-about: How can we improve ASMARA_Rust?
+about: How can we improve eas_listener?
 title: "[FEAT] - "
 labels: feature request
 assignees: wagwan-piffting-blud

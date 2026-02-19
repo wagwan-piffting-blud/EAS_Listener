@@ -50,7 +50,7 @@ RUN mkdir -p /data /var/www/html && touch /var/www/html/index.php
 
 WORKDIR /data
 
-COPY --from=builder /usr/src/app/target/release/asmara_rust /usr/local/bin/asmara_rust
+COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
 COPY ./web_server/index.php /var/www/html/index.php

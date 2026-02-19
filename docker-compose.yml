@@ -1,7 +1,7 @@
 services:
-    asmara_rust:
+    eas_listener:
         build: .
-        container_name: asmara_rust
+        container_name: eas_listener
         restart: unless-stopped
         volumes:
             - ./data:/data

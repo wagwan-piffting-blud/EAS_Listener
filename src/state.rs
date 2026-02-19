@@ -56,4 +56,9 @@ impl AppState {
     pub fn cloned_filters(&self) -> Vec<FilterRule> {
         self.filters.clone()
     }
+
+    pub fn update_filters(&mut self, filters: Vec<FilterRule>) {
+        filter::install_filters(filters.clone());
+        self.filters = filters;
+    }
 }

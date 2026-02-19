@@ -2,6 +2,9 @@ const alertList = document.getElementById("oldAlertList");
 const alertCount = document.getElementById("oldAlertCount");
 const filterStatus = document.getElementById("filterStatus");
 const filterOptions = document.getElementById("filterOptions");
+const fipsFilterToggle = document.getElementById("fipsFilterToggle");
+const WATCHED_FIPS_FILTER_DEFAULT = true;
+let filterWatchedFips = WATCHED_FIPS_FILTER_DEFAULT;
 
 function formatTimestamp(ts, withTime = true) {
     if (ts === null || ts === undefined) return "—";
@@ -25,7 +28,12 @@ function formatTimestamp(ts, withTime = true) {
 }
 
 async function fetchArchivedAlerts() {
-    return fetch("archive.php?fetch_alerts=true")
+    const params = new URLSearchParams({ fetch_alerts: "true" });
+    if (filterWatchedFips) {
+        params.set("filter_alerts", "watched_fips");
+    }
+
+    return fetch(`archive.php?${params.toString()}`)
         .then((response) => response.json())
         .catch(() => []);
 }
@@ -48,7 +56,15 @@ async function renderAlerts() {
 
     for (const alert of alerts) {
         const card = document.createElement("article");
-        card.className = `alert-card ${alert.data.alert_severity.toLowerCase()}`;
+        const severityClass = alert?.data?.alert_severity ? alert.data.alert_severity.toLowerCase() : "unknown";
+        const recordingMarkup = filterWatchedFips && alert.data.audio_recording
+            ? `
+                <br>
+                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)}</div>
+            `
+            : "";
+
+        card.className = `alert-card ${severityClass}`;
         card.innerHTML = `
             <div class="event-code">${alert.data.event_code}</div>
             <div class="headline">${alert.data.event_text}</div>
@@ -67,7 +83,8 @@ async function renderAlerts() {
                 <br>
                 <div><strong>Length:</strong> ${alert.data.length ? `${Math.floor(alert.data.length / 100)}h ${alert.data.length % 100}m` : "—"}</div>
                 <br>
-                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)} </div>
+                <div><strong>Raw ZCZC String:</strong> <pre>${alert.data.raw_zczc || "—"}</pre></div>
+                ${recordingMarkup}
             </div>
         `;
         container.appendChild(card);
@@ -237,5 +254,29 @@ function applyFilter() {
 
 let currentFilter = "ALL";
 filterOptions.onclick = filterDialog;
+
+function updateFipsFilterToggle() {
+    if (!fipsFilterToggle) return;
+    const label = filterWatchedFips ? "Showing Watched FIPS" : "Showing All Alerts";
+    fipsFilterToggle.textContent = label;
+    fipsFilterToggle.setAttribute("aria-pressed", filterWatchedFips ? "true" : "false");
+}
+
+function toggleFipsFilter() {
+    filterWatchedFips = !filterWatchedFips;
+    updateFipsFilterToggle();
+    renderAlerts();
+}
+
+if (fipsFilterToggle) {
+    fipsFilterToggle.addEventListener("click", toggleFipsFilter);
+    fipsFilterToggle.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleFipsFilter();
+        }
+    });
+    updateFipsFilterToggle();
+}
 
 renderAlerts();

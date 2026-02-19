@@ -1,11 +1,9 @@
 use crate::filter;
 use crate::state::ActiveAlert;
 use crate::Config;
-use base64::Engine;
 use chrono::Local;
 use inflector::Inflector;
 use lazy_static::lazy_static;
-use reqwest::header::AUTHORIZATION;
 use reqwest::{multipart, Client};
 use serde_json::json;
 use std::collections::HashMap;
@@ -13,7 +11,7 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::warn;
 
 lazy_static! {
     static ref json_config: Config =
@@ -25,6 +23,7 @@ lazy_static! {
         .enumerate()
         .map(|(idx, url)| (url.clone(), idx + 1))
         .collect();
+    static ref github_url: String = "https://github.com/wagwan-piffting-blud/EAS_Listener".to_string();
 }
 
 pub async fn send_alert_webhook(
@@ -65,8 +64,6 @@ pub async fn send_alert_webhook(
             return;
         }
     };
-    let should_relay_dasdec = json_config.should_relay_dasdec;
-    let dasdec_url = json_config.dasdec_url.clone();
     let data = &alert.data;
     let event_title = data.event_text.to_title_case();
     let apprise_title = format!("{} has just been issued/received", event_title.as_str());
@@ -115,104 +112,6 @@ pub async fn send_alert_webhook(
         &data.eas_text,
         &alert.raw_header,
     );
-
-    let filter_relay = filter::should_relay_alert(&alert.raw_header[9..12]);
-
-    if should_relay_dasdec && !dasdec_url.trim().is_empty() && filter_relay {
-        let client = Client::new();
-
-        let use_reverse_proxy = json_config.use_reverse_proxy;
-
-        let latest_url = format!(
-            "http{}://{}:{}/archive.php?latest_id=true",
-            if use_reverse_proxy { "s" } else { "" },
-            if use_reverse_proxy {
-                json_config.reverse_proxy_url.clone()
-            } else {
-                json_config.monitoring_bind_host.clone()
-            },
-            if use_reverse_proxy {
-                "443".to_string()
-            } else {
-                json_config.web_server_port.clone()
-            }
-        );
-
-        let bearer_token =
-            json_config.dashboard_username.clone() + ":" + &json_config.dashboard_password.clone();
-        let bearer_token = Engine::encode(&base64::engine::general_purpose::STANDARD, bearer_token);
-
-        let latest_id = match client
-            .get(&latest_url)
-            .header(AUTHORIZATION, format!("Bearer {}", bearer_token))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => match response.text().await {
-                Ok(text) => text.trim().to_string(),
-                Err(err) => {
-                    warn!("Failed to read latest ID response body: {}", err);
-                    "0".to_string()
-                }
-            },
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                warn!(
-                    "Failed to fetch latest recording ID with status {}: body='{}'",
-                    status, body
-                );
-                "0".to_string()
-            }
-            Err(err) => {
-                warn!("Failed to send latest ID request: {}", err);
-                "0".to_string()
-            }
-        };
-
-        let audio_deeplink = {
-            format!(
-                "http{}://{}:{}/archive.php?recording_id={}",
-                if use_reverse_proxy { "s" } else { "" },
-                if use_reverse_proxy {
-                    json_config.reverse_proxy_url.clone()
-                } else {
-                    json_config.monitoring_bind_host.clone()
-                },
-                if use_reverse_proxy {
-                    "443".to_string()
-                } else {
-                    json_config.web_server_port.clone()
-                },
-                latest_id
-            )
-        };
-
-        let blank_string = String::new();
-
-        let dasdec_payload = [
-            ("eas_header", &alert.raw_header),
-            ("description", &blank_string),
-            ("audio_deeplink", &audio_deeplink),
-        ];
-
-        match client.post(&dasdec_url).form(&dasdec_payload).send().await {
-            Ok(response) if response.status().is_success() => {
-                info!("Successfully relayed alert to DASDEC");
-            }
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                warn!(
-                    "DASDEC relay failed with status {}: body='{}'",
-                    status, body
-                );
-            }
-            Err(err) => {
-                warn!("Failed to send DASDEC relay request: {}", err);
-            }
-        }
-    }
 
     let discord_urls: Vec<&str> = apprise_urls_from_config_array
         .iter()
@@ -377,7 +276,7 @@ fn build_discord_embed_body(
         "author": {
             "name": format!("{} - Software ENDEC Logs", station_name.as_str()),
             "icon_url": format!("https://wagspuzzle.space/assets/eas-icons/index.php?code={}&hex=0x{}", img_name, img_color),
-            "url": "https://github.com/wagwan-piffting-blud/ASMARA_Rust"
+            "url": github_url.as_str()
         },
         "fields": [
             {
@@ -424,13 +323,14 @@ fn build_markdown_body(
     raw_header: &str,
 ) -> String {
     format!(
-        "**{} - Software ENDEC Logs**\n\n**{}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```\n\nPowered by [Wags' Software ENDEC](https://github.com/wagwan-piffting-blud/ASMARA_Rust)",
+        "**{} - Software ENDEC Logs**\n\n**{}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```\n\nPowered by [Wags' Software ENDEC]({})",
         station_name.as_str(),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
-        raw_header.trim_end()
+        raw_header.trim_end(),
+        github_url.as_str()
     )
 }
 
@@ -449,13 +349,14 @@ fn build_html_body(
          <pre>{}</pre>\
          <p><strong>EAS Protocol Data:</strong></p>\
          <pre>{}</pre>\
-         <p>Powered by <a href=\"https://github.com/wagwan-piffting-blud/ASMARA_Rust\">Wags' Software ENDEC</a></p>",
+         <p>Powered by <a href=\"{}\">Wags' Software ENDEC</a></p>",
         html_escape(&station_name.as_str()),
         html_escape(title),
         html_escape(originator),
         html_escape(received_timestamp),
         html_escape(eas_text.trim_end()),
-        html_escape(raw_header.trim_end())
+        html_escape(raw_header.trim_end()),
+        github_url.as_str()
     )
 }
 
@@ -467,13 +368,14 @@ fn build_plain_body(
     raw_header: &str,
 ) -> String {
     format!(
-        "{} - Software ENDEC Logs\n\n{} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}\n\nPowered by Wags' Software ENDEC (https://github.com/wagwan-piffting-blud/ASMARA_Rust)",
+        "{} - Software ENDEC Logs\n\n{} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}\n\nPowered by Wags' Software ENDEC ({})",
         station_name.as_str(),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
-        raw_header.trim_end()
+        raw_header.trim_end(),
+        github_url.as_str()
     )
 }
 

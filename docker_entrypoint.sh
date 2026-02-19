@@ -32,11 +32,22 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     su -www-data -s /bin/bash -c "printf 'env[RECORDING_DIR] = \"${RECORDING_DIR}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "echo 'env[DEDICATED_ALERT_LOG_FILE] = ${DEDICATED_ALERT_LOG_FILE}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "echo 'env[MONITORING_MAX_LOGS] = ${MONITORING_MAX_LOGS}' >> /etc/php/8.4/fpm/pool.d/www.conf"
+    su -www-data -s /bin/bash -c "echo 'env[WATCHED_FIPS] = ${WATCHED_FIPS:-,}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "echo 'env[TZ] = ${TZ}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     sed -i "s/session.gc_maxlifetime = .*/session.gc_maxlifetime = 259200/" /etc/php/8.4/fpm/php.ini
+
     export ALREADY_SET_UP=true
 fi
 
+sed -i '/^env\[WATCHED_FIPS\] = *$/d' /etc/php/8.4/fpm/pool.d/www.conf
+if ! grep -q '^env\[WATCHED_FIPS\] = ' /etc/php/8.4/fpm/pool.d/www.conf; then
+    echo 'env[WATCHED_FIPS] = ,' >> /etc/php/8.4/fpm/pool.d/www.conf
+fi
+
+chmod -R 777 /app
+
 php-fpm8.4 -R
 nginx
-asmara_rust
+eas_listener
+
+tail -f /dev/null

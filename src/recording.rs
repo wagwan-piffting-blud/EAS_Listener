@@ -3,6 +3,7 @@ use crate::header;
 use anyhow::Result;
 use chrono::Local;
 use hound::{WavSpec, WavWriter};
+use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -22,12 +23,20 @@ pub fn start_encoding_task(
     header_text: &str,
     source_stream: &str,
 ) -> Result<(tokio::task::JoinHandle<Result<()>>, RecordingState)> {
+    start_encoding_task_with_timestamp(config, header_text, source_stream, None)
+}
+
+pub fn start_encoding_task_with_timestamp(
+    config: &Config,
+    header_text: &str,
+    source_stream: &str,
+    filename_timestamp: Option<&str>,
+) -> Result<(tokio::task::JoinHandle<Result<()>>, RecordingState)> {
     std::fs::create_dir_all(&config.recording_dir)?;
-    let filename = format!(
-        "EAS_Recording_{}.wav",
-        Local::now().format("%Y-%m-%d_%H-%M-%S")
-    );
-    let output_path = config.recording_dir.join(filename);
+    let timestamp = filename_timestamp
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
+    let output_path = next_available_recording_path(&config.recording_dir, &timestamp);
     let output_path_clone = output_path.clone();
 
     let header_samples =
@@ -92,4 +101,21 @@ pub fn start_encoding_task(
         source_stream: source_stream.to_string(),
     };
     Ok((handle, state))
+}
+
+fn next_available_recording_path(recording_dir: &Path, timestamp: &str) -> PathBuf {
+    let base = format!("EAS_Recording_{timestamp}");
+    let mut index = 0usize;
+    loop {
+        let filename = if index == 0 {
+            format!("{base}.wav")
+        } else {
+            format!("{base}_{index}.wav")
+        };
+        let candidate = recording_dir.join(filename);
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
 }

@@ -1,6 +1,6 @@
 [package]
-name = "asmara_rust"
-version = "0.30.0"
+name = "eas_listener"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
