@@ -8,7 +8,11 @@ function get_watched_fips_lookup(): array {
     }
 
     $lookup = [];
-    $watched_fips_env = getenv("WATCHED_FIPS") ?: "";
+    $watched_fips_env = trim(getenv("WATCHED_FIPS") ?: "");
+
+    if($watched_fips_env === "" || $watched_fips_env === "000000") {
+        return $lookup;
+    }
 
     foreach(explode(",", $watched_fips_env) as $watched_fip) {
         $watched_fip = trim($watched_fip);
