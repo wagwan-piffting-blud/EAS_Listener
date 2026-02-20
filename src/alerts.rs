@@ -27,6 +27,9 @@ fn is_alert_relevant(alert_data: &EasAlertData, watched_fips: &HashSet<String>) 
     if watched_fips.is_empty() {
         return true;
     }
+    if watched_fips.contains("000000") || watched_fips.contains("") {
+        return true;
+    }
     if alert_data.fips.iter().any(|fips| fips == "000000") {
         return true;
     }
