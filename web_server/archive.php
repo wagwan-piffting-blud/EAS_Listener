@@ -264,7 +264,11 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
         $alert_severity_raw = preg_match('/has issued (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
         $alert_severity_words_array = preg_split('/(?=[A-Z])/', $alert_severity_raw, -1, PREG_SPLIT_NO_EMPTY);
 
-        if($alert_severity_words_array[2]) {
+        if($alert_severity_words_array[3]) {
+            $alert_severity = strtolower($alert_severity_words_array[3]);
+        }
+
+        else if($alert_severity_words_array[2]) {
             $alert_severity = strtolower($alert_severity_words_array[2]);
         }
 
