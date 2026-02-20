@@ -158,8 +158,7 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
             }
 
             else {
-                $port = getenv('MONITORING_BIND_PORT') ?: '8080';
-                print_r(getenv('MONITORING_BIND_HOST') . ':' . $port);
+                print_r("localhost:" . getenv('MONITORING_BIND_PORT') ?: '8080');
             }
             ?>";
 

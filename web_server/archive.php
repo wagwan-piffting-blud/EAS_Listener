@@ -52,6 +52,10 @@ function resolve_id($id) {
         return filemtime($a) - filemtime($b);
     });
 
+    if(!isset($files[$id])) {
+        return null;
+    }
+
     return $files[$id];
 }
 
@@ -94,10 +98,21 @@ if(!isset($_SESSION['authed'])) {
     exit();
 }
 
-if($_GET["recording_id"] !== null && isset($_GET["recording_id"]) && $_SESSION['authed'] === true) {
+if(isset($_GET["latest_id"]) && $_GET["latest_id"] !== null && $_SESSION['authed'] === true) {
+    $files = glob(getenv("RECORDING_DIR") . "/EAS_Recording_*.wav");
+
+    usort($files, function($a, $b) {
+        return filemtime($a) - filemtime($b);
+    });
+
+    echo count($files) - 1;
+    exit();
+}
+
+if(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null && $_SESSION['authed'] === true) {
     $file = resolve_id($_GET["recording_id"]);
 
-    if(!file_exists($file)) {
+    if($file === null || $file === false || !file_exists($file)) {
         http_response_code(404);
         echo "File not found.";
         exit();
@@ -182,17 +197,6 @@ if($_GET["recording_id"] !== null && isset($_GET["recording_id"]) && $_SESSION['
     exit();
 }
 
-if($_GET["latest_id"] !== null && isset($_GET["latest_id"]) && $_SESSION['authed'] === true) {
-    $files = glob(getenv("RECORDING_DIR") . "/EAS_Recording_*.wav");
-
-    usort($files, function($a, $b) {
-        return filemtime($a) - filemtime($b);
-    });
-
-    echo count($files) - 1;
-    exit();
-}
-
 if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
     date_default_timezone_set(getenv("TZ") ?: "UTC");
     header("Content-Type: application/json");
@@ -257,7 +261,7 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
         $length_as_secs = hhmmToSeconds($length);
         $expired_at = $received_at + $length_as_secs;
 
-        $alert_severity_raw = preg_match('/has issued a (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
+        $alert_severity_raw = preg_match('/has issued (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
         $alert_severity_words_array = preg_split('/(?=[A-Z])/', $alert_severity_raw, -1, PREG_SPLIT_NO_EMPTY);
 
         if($alert_severity_words_array[2]) {
@@ -323,7 +327,7 @@ else { ?><!DOCTYPE html>
                 <div id="oldAlertList" class="section-scroll"></div>
             </section>
         </main>
+        <script src="archive.js"></script>
     </body>
-    <script src="archive.js"></script>
 </html>
 <?php } ?>

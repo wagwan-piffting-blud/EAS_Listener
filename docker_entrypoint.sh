@@ -22,7 +22,6 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     export $(grep -v '^#' /app/.env | xargs)
 
     su -www-data -s /bin/bash -c "echo 'env[MONITORING_BIND_PORT] = ${MONITORING_BIND_PORT}' >> /etc/php/8.4/fpm/pool.d/www.conf"
-    su -www-data -s /bin/bash -c "echo 'env[MONITORING_BIND_HOST] = ${MONITORING_BIND_HOST}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[USE_REVERSE_PROXY] = \"${USE_REVERSE_PROXY}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "echo 'env[WS_REVERSE_PROXY_URL] = ${WS_REVERSE_PROXY_URL}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "echo 'env[REVERSE_PROXY_URL] = ${REVERSE_PROXY_URL}' >> /etc/php/8.4/fpm/pool.d/www.conf"

@@ -257,7 +257,7 @@ impl RelayState {
                 if use_reverse_proxy {
                     json_config.reverse_proxy_url.clone()
                 } else {
-                    json_config.monitoring_bind_host.clone()
+                    "localhost".to_string()
                 },
                 if use_reverse_proxy {
                     "443".to_string()
@@ -305,7 +305,7 @@ impl RelayState {
                     if use_reverse_proxy {
                         json_config.reverse_proxy_url.clone()
                     } else {
-                        json_config.monitoring_bind_host.clone()
+                        "localhost".to_string()
                     },
                     if use_reverse_proxy {
                         "443".to_string()

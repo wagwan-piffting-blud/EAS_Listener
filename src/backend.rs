@@ -88,7 +88,7 @@ fn cors_layer() -> CorsLayer {
     if json_config.as_ref().unwrap().use_reverse_proxy.to_string() != "true" {
         let origin: HeaderValue = format!(
             "http://{}:{}/",
-            json_config.as_ref().unwrap().monitoring_bind_host,
+            "localhost",
             json_config.as_ref().unwrap().monitoring_bind_port
         )
         .parse()

@@ -1,12 +1,22 @@
 (function () {
     const LOG_LIMIT = parseInt(window.MONITORING_MAX_LOGS, 10) || 500;
     const LOG_FETCH_TAIL = Math.min(LOG_LIMIT, 500);
+    const AUDIO_AVAILABILITY_POLL_MS = 10000;
+    const AUDIO_INITIAL_HOLDOFF_MS = 10000;
+    const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
 
     const state = {
         streams: new Map(),
         activeAlerts: [],
+        activeAlertSignature: "",
+        activeAlertsChangedAt: 0,
+        activeAlertAudioSrc: null,
+        nextAudioAvailabilityCheckAt: 0,
+        audioPollInFlight: false,
         logs: [],
     };
+    let audioAvailabilityPollTimer = null;
+    let audioUnavailableCountdownTimer = null;
 
     const elements = {
         wsStatus: document.getElementById("wsStatus"),
@@ -67,10 +77,95 @@
             });
         }
         if (payload.active_alerts) {
-            state.activeAlerts = payload.active_alerts.slice();
+            setActiveAlerts(payload.active_alerts);
         }
         renderStreams();
         renderAlerts();
+    }
+
+    function buildAlertSignature(alerts) {
+        return alerts
+            .map((alert) => `${alert.received_at || ""}:${alert.data?.event_code || ""}:${alert.raw_header || ""}`)
+            .join("|");
+    }
+
+    function startAudioAvailabilityPolling() {
+        if (audioAvailabilityPollTimer !== null) return;
+        audioAvailabilityPollTimer = setInterval(checkForAvailableAlertAudio, AUDIO_AVAILABILITY_POLL_MS);
+    }
+
+    function stopAudioAvailabilityPolling() {
+        if (audioAvailabilityPollTimer === null) return;
+        clearInterval(audioAvailabilityPollTimer);
+        audioAvailabilityPollTimer = null;
+    }
+
+    function getAudioUnavailableCountdownSeconds() {
+        const targetAt = state.nextAudioAvailabilityCheckAt;
+        if (!targetAt) return Math.round(AUDIO_AVAILABILITY_POLL_MS / 1000);
+        return Math.max(0, Math.ceil((targetAt - Date.now()) / 1000));
+    }
+
+    function getAudioUnavailableText() {
+        return AUDIO_NOT_AVAILABLE_TEXT.replace("__SECOND__", getAudioUnavailableCountdownSeconds());
+    }
+
+    function refreshAudioUnavailableCountdown() {
+        const unavailable = getAudioUnavailableText();
+        elements.alertList
+            .querySelectorAll("[data-audio-unavailable='true']")
+            .forEach((el) => {
+                el.textContent = unavailable;
+            });
+    }
+
+    function startAudioUnavailableCountdown() {
+        if (audioUnavailableCountdownTimer !== null) return;
+        refreshAudioUnavailableCountdown();
+        audioUnavailableCountdownTimer = setInterval(refreshAudioUnavailableCountdown, 1000);
+    }
+
+    function stopAudioUnavailableCountdown() {
+        if (audioUnavailableCountdownTimer === null) return;
+        clearInterval(audioUnavailableCountdownTimer);
+        audioUnavailableCountdownTimer = null;
+    }
+
+    function updateAudioAvailabilityPolling() {
+        if (state.activeAlerts.length > 0 && !state.activeAlertAudioSrc) {
+            if (!state.nextAudioAvailabilityCheckAt) {
+                state.nextAudioAvailabilityCheckAt = Date.now() + AUDIO_INITIAL_HOLDOFF_MS;
+            }
+            startAudioAvailabilityPolling();
+            startAudioUnavailableCountdown();
+            return;
+        }
+        state.nextAudioAvailabilityCheckAt = 0;
+        stopAudioAvailabilityPolling();
+        stopAudioUnavailableCountdown();
+    }
+
+    function setActiveAlerts(alerts) {
+        const nextAlerts = Array.isArray(alerts) ? alerts.slice() : [];
+        const nextSignature = buildAlertSignature(nextAlerts);
+        const changed = nextSignature !== state.activeAlertSignature;
+
+        state.activeAlerts = nextAlerts;
+        if (changed) {
+            state.activeAlertSignature = nextSignature;
+            state.activeAlertsChangedAt = Date.now();
+            state.activeAlertAudioSrc = null;
+            state.nextAudioAvailabilityCheckAt = nextAlerts.length
+                ? state.activeAlertsChangedAt + AUDIO_INITIAL_HOLDOFF_MS
+                : 0;
+        }
+
+        updateAudioAvailabilityPolling();
+        if (changed && nextAlerts.length) {
+            precheckAvailableAlertAudio();
+        }
+
+        return changed;
     }
 
     function applyLogs(logs) {
@@ -155,6 +250,207 @@
         return `${hoursPart}${hoursPart && minutesPart ? ' ' : ''}${minutesPart}`;
     }
 
+    function fetch_audio(src) {
+        if (!src) {
+            return `<span data-audio-unavailable="true">${getAudioUnavailableText()}</span>`;
+        }
+        return `<audio controls preload="metadata" data-alert-audio="true"><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
+    }
+
+    async function fetchAudioUrl() {
+        try {
+            const response = await fetch(`/archive.php?latest_id=true`, {
+                headers: {
+                    Authorization: `Bearer ${window.TOKEN}`,
+                },
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const text = await response.text();
+            const id = parseInt(text.trim(), 10);
+            if (isNaN(id) || id < 0) return null;
+            return id;
+        } catch (err) {
+            console.error("Failed to fetch latest recording ID", err);
+            return null;
+        }
+    }
+
+    async function isAudioAvailable(src) {
+        const headers = {
+            Authorization: `Bearer ${window.TOKEN}`,
+            Range: "bytes=44-45",
+        };
+
+        try {
+            const response = await fetch(`/${src}`, {
+                method: "GET",
+                headers,
+                cache: "no-store",
+            });
+
+            if (!response.ok && response.status !== 206) return false;
+
+            const contentType = (response.headers.get("content-type") || "").toLowerCase();
+            if (
+                contentType &&
+                (contentType.startsWith("text/") ||
+                contentType.includes("html") ||
+                contentType.includes("json"))
+            ) {
+                return false;
+            }
+
+            const chunk = await response.arrayBuffer();
+            if (chunk.byteLength <= 0) return false;
+
+            return true;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    async function isAudioPlayable(src, timeoutMs = 5000) {
+        return await new Promise((resolve) => {
+            const audio = document.createElement("audio");
+            let settled = false;
+
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+                audio.removeEventListener("canplay", onCanPlay);
+                audio.removeEventListener("error", onError);
+                audio.pause();
+                audio.removeAttribute("src");
+                audio.load();
+                resolve(ok);
+            };
+
+            const onLoadedMetadata = () => {
+                const duration = audio.duration;
+                finish(Number.isFinite(duration) && duration > 0);
+            };
+            const onCanPlay = () => finish(true);
+            const onError = () => finish(false);
+
+            const timer = setTimeout(() => finish(false), timeoutMs);
+
+            audio.preload = "metadata";
+            audio.addEventListener("loadedmetadata", onLoadedMetadata, { once: true });
+            audio.addEventListener("canplay", onCanPlay, { once: true });
+            audio.addEventListener("error", onError, { once: true });
+            audio.src = src;
+            audio.load();
+        });
+    }
+
+    async function checkForAvailableAlertAudio() {
+        if (!state.activeAlerts.length || state.activeAlertAudioSrc || state.audioPollInFlight) {
+            updateAudioAvailabilityPolling();
+            return;
+        }
+        if (
+            state.activeAlertsChangedAt &&
+            Date.now() - state.activeAlertsChangedAt < AUDIO_INITIAL_HOLDOFF_MS
+        ) {
+            state.nextAudioAvailabilityCheckAt = state.activeAlertsChangedAt + AUDIO_INITIAL_HOLDOFF_MS;
+            refreshAudioUnavailableCountdown();
+            return;
+        }
+
+        state.nextAudioAvailabilityCheckAt = Date.now() + AUDIO_AVAILABILITY_POLL_MS;
+        refreshAudioUnavailableCountdown();
+        state.audioPollInFlight = true;
+        try {
+            const alertSignatureAtStart = state.activeAlertSignature;
+            const availableAudioSrc = await fetchAvailableAudioSrc(1, 0);
+            if (!availableAudioSrc) return;
+
+            const playable = await isAudioPlayable(availableAudioSrc);
+            if (!playable) return;
+            if (state.activeAlertSignature !== alertSignatureAtStart) return;
+
+            if (availableAudioSrc !== state.activeAlertAudioSrc) {
+                state.activeAlertAudioSrc = availableAudioSrc;
+                renderAlerts();
+                updateAudioAvailabilityPolling();
+            }
+        } finally {
+            state.audioPollInFlight = false;
+        }
+    }
+
+    async function precheckAvailableAlertAudio() {
+        if (!state.activeAlerts.length || state.activeAlertAudioSrc || state.audioPollInFlight) {
+            return;
+        }
+
+        state.audioPollInFlight = true;
+        try {
+            const alertSignatureAtStart = state.activeAlertSignature;
+            const availableAudioSrc = await fetchAvailableAudioSrc(1, 0);
+            if (!availableAudioSrc) return;
+
+            const playable = await isAudioPlayable(availableAudioSrc);
+            if (!playable) return;
+            if (state.activeAlertSignature !== alertSignatureAtStart) return;
+
+            if (availableAudioSrc !== state.activeAlertAudioSrc) {
+                state.activeAlertAudioSrc = availableAudioSrc;
+                renderAlerts();
+                updateAudioAvailabilityPolling();
+            }
+        } finally {
+            state.audioPollInFlight = false;
+        }
+    }
+
+    function bindAudioUnavailableFallback(card) {
+        const audioEl = card.querySelector("audio[data-alert-audio='true']");
+        if (!audioEl) return;
+        const sourceEl = audioEl.querySelector("source");
+        const failedSrc = sourceEl?.getAttribute("src") || "";
+
+        const showUnavailable = () => {
+            const unavailable = document.createElement("span");
+            unavailable.dataset.audioUnavailable = "true";
+            state.nextAudioAvailabilityCheckAt = Date.now() + AUDIO_AVAILABILITY_POLL_MS;
+            unavailable.textContent = getAudioUnavailableText();
+            audioEl.replaceWith(unavailable);
+            startAudioUnavailableCountdown();
+            if (failedSrc && state.activeAlertAudioSrc === failedSrc) {
+                state.activeAlertAudioSrc = null;
+                updateAudioAvailabilityPolling();
+            }
+        };
+
+        audioEl.addEventListener("error", showUnavailable, { once: true });
+        if (sourceEl) {
+            sourceEl.addEventListener("error", showUnavailable, { once: true });
+        }
+    }
+
+    async function fetchAvailableAudioSrc(maxAttempts = 4, delayMs = 600) {
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const latestRecordingId = await fetchAudioUrl();
+            if (latestRecordingId !== null) {
+                const src = `archive.php?recording_id=${latestRecordingId}`;
+                if (await isAudioAvailable(src)) {
+                    return src;
+                }
+            }
+
+            if (attempt < maxAttempts - 1) {
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
+        }
+
+        return null;
+    }
+
     function renderAlerts() {
         const container = elements.alertList;
         container.innerHTML = "";
@@ -167,6 +463,8 @@
             container.innerHTML = '<div class="empty-state">No active alerts.</div>';
             return;
         }
+
+        const availableAudioSrc = state.activeAlertAudioSrc;
 
         for (const alert of alerts) {
             const card = document.createElement("article");
@@ -189,9 +487,14 @@
                     <div><strong>Expires:</strong> ${formatTimestamp(alert.expires_at * 1000)}</div>
                     <br>
                     <div><strong>Length:</strong> ${alert.purge_time.secs ? secondsToHM(alert.purge_time.secs) : "—"}</div>
+                    <br>
+                    <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "—"}</pre></div>
+                    <br>
+                    <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(availableAudioSrc)}</div>
                 </div>
             `;
             container.appendChild(card);
+            bindAudioUnavailableFallback(card);
         }
     }
 
@@ -295,7 +598,7 @@
                     break;
                 case "Alerts":
                     if (Array.isArray(payload.payload)) {
-                        state.activeAlerts = payload.payload.slice();
+                        setActiveAlerts(payload.payload);
                         renderAlerts();
                     }
                     break;
@@ -314,7 +617,7 @@
     function connectWebSocket() {
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
         const url = `${protocol}://${window.API_BASE}/ws?auth=${encodeURIComponent(window.TOKEN)}`;
-        setWsStatus("Connecting…", "");
+        setWsStatus("Connecting...", "");
 
         try {
             ws = new WebSocket(url);
@@ -343,7 +646,7 @@
     }
 
     function scheduleReconnect() {
-        setWsStatus(`Reconnecting in ${Math.round(reconnectDelay / 1000)}s…`, "reconnecting");
+        setWsStatus(`Reconnecting in ${Math.round(reconnectDelay / 1000)}s...`, "reconnecting");
         setTimeout(connectWebSocket, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 1.8, MAX_DELAY);
     }
@@ -351,6 +654,7 @@
     function bootstrap() {
         loadInitialData().finally(connectWebSocket);
         setInterval(loadInitialData, 60000);
+        updateAudioAvailabilityPolling();
     }
 
     document.addEventListener("visibilitychange", () => {

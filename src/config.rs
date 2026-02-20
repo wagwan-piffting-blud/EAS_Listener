@@ -25,7 +25,6 @@ pub struct Config {
     pub monitoring_bind_addr: SocketAddr,
     pub monitoring_max_log_entries: usize,
     pub monitoring_activity_window_secs: u64,
-    pub monitoring_bind_host: String,
     pub use_reverse_proxy: bool,
     pub monitoring_bind_port: u16,
     pub ws_reverse_proxy_url: String,
@@ -155,12 +154,6 @@ impl Config {
             .unwrap_or(45)
             .max(1);
 
-        let monitoring_bind_host: String = config_json
-            .get("MONITORING_BIND_HOST")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("MONITORING_BIND_HOST must be set in config file"))?
-            .to_string();
-
         let use_reverse_proxy: bool = config_json
             .get("USE_REVERSE_PROXY")
             .and_then(|v| v.as_bool())
@@ -247,7 +240,6 @@ impl Config {
             monitoring_bind_addr,
             monitoring_max_log_entries,
             monitoring_activity_window_secs,
-            monitoring_bind_host,
             use_reverse_proxy,
             monitoring_bind_port,
             ws_reverse_proxy_url,
