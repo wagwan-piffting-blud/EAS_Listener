@@ -37,6 +37,8 @@ This project is licensed under the **GNU GPL-3.0** (see [`LICENSE`](LICENSE)).
 ---
 
 ## Acknowledgments
+- [\@\_spchalethorpe09\_](https://sterlingvaspc.neocities.org/) on Discord for thorough testing, feedback, and suggestions
+- Global Weather and EAS Society (GWES) for their overall support and resources
 - SAME decoders and EAS/NWR community research
 - Rust ecosystem maintainers
 
