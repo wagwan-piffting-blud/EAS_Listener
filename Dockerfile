@@ -46,16 +46,16 @@ RUN pip3 install -r /requirements.txt --break-system-packages
 COPY decoder.py /usr/local/bin/decoder.py
 
 RUN chmod +x /usr/local/bin/decoder.py
-RUN mkdir -p /data /var/www/html && touch /var/www/html/index.php
+RUN mkdir -p /data /var/www/html
 
 WORKDIR /data
 
 COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
-COPY ./web_server/index.php /var/www/html/index.php
+COPY ./web_server/ /var/www/html
 
-RUN chmod +x /docker_entrypoint.sh && chmod 777 /var/www/html/index.php
+RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /var/www/html
 
 HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl --fail http://localhost:${MONITORING_BIND_PORT}/api/health || exit 1
 
