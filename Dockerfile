@@ -54,6 +54,7 @@ COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
 COPY ./web_server/ /var/www/html
+COPY ./Cargo.toml /app/Cargo.toml
 
 RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /var/www/html
 
