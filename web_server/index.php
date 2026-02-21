@@ -151,7 +151,7 @@ if (!isset($_SESSION['authed'])) {
             </section>
         </main>
         <footer>
-            <span>Powered by <a id="updateLink" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a></span>
+            <span>Powered by <a id="updateLink" data-text="Wags' Rust EAS Listener" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a></span>
         </footer>
         <script>
             async function fetchGitHubCargoVersion({owner, repo, branch = "main", path = "Cargo.toml", timeoutMs = 8000}) {
@@ -258,7 +258,8 @@ if (!isset($_SESSION['authed'])) {
                         localStorage.setItem(dismissKey, "1");
                     }
                     document.getElementById("updateLink")?.classList.add("pulse");
-                    document.getElementById("updateLink").innerHTML += `(Update Available: v${remoteVersion})`;
+                    document.getElementById("updateLink").innerHTML += ` (Update Available: v${remoteVersion})`;
+                    document.getElementById("updateLink").dataset.text += ` (Update Available: v${remoteVersion})`;
                 }
             })().catch((err) => {
                 console.warn("Update check failed:", err);
