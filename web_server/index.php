@@ -254,7 +254,7 @@ if (!isset($_SESSION['authed'])) {
                 if (isNewerVersionAvailable(localVersion, remoteVersion)) {
                     const dismissKey = `dismiss_update_${remoteVersion}`;
                     if (!localStorage.getItem(dismissKey)) {
-                        alert(`A new version of EAS_Listener is available: ${remoteVersion}! (You are currently on version ${localVersion}.)`);
+                        alert(`A new version of EAS_Listener is available: ${remoteVersion}! (You are currently on version ${localVersion}.) See the EAS_Listener GitHub Wiki for update instructions for your version.`);
                         localStorage.setItem(dismissKey, "1");
                     }
                     document.getElementById("updateLink")?.classList.add("pulse");
@@ -268,7 +268,7 @@ if (!isset($_SESSION['authed'])) {
             window.API_BASE = "<?php if (getenv('USE_REVERSE_PROXY') == 'true') {
                 print_r(getenv('WS_REVERSE_PROXY_URL'));
             } else {
-                print_r("localhost:" . getenv('MONITORING_BIND_PORT') ?: '8080');
+                print_r(substr($_SERVER['HTTP_HOST'], 0, strpos($_SERVER['HTTP_HOST'], ':') ?: strlen($_SERVER['HTTP_HOST'])) . ":" . getenv('MONITORING_BIND_PORT') ?: '8080');
             }
             ?>";
 

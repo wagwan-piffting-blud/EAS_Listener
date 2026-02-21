@@ -109,7 +109,7 @@ pub async fn run_alert_manager(
 
                 app_state_guard.active_alerts.clone()
             };
-            monitoring.broadcast_alerts(active_snapshot);
+            monitoring.broadcast_alerts(active_snapshot, Some(stream_id.as_str()));
 
             let dsame_text = match dsame_result {
                 Ok(data) => data.eas_text,
@@ -296,7 +296,7 @@ pub async fn run_state_cleanup(
         drop(app_state_guard);
 
         if removed_count > 0 {
-            monitoring.broadcast_alerts(alert_snapshot);
+            monitoring.broadcast_alerts(alert_snapshot, None);
         }
     }
 }

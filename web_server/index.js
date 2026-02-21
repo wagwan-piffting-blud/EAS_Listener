@@ -226,6 +226,8 @@
                     <div><strong>Last disconnect:</strong> ${lastDisconnect}</div>
                     <div><strong>Attempts:</strong> ${stream.connection_attempts}</div>
                     <div><strong>Last error:</strong> ${stream.last_error || "—"}</div>
+                    <div><strong>Alerts received:</strong> ${stream.alerts_received}</div>
+                    <div><strong>Last alert received:</strong> ${stream.last_alert_received ? formatTimestamp(stream.last_alert_received * 1000) : "—"}</div>
                 </div>
             `;
             container.appendChild(card);
