@@ -228,7 +228,7 @@ if (!isset($_SESSION['authed'])) {
             }
 
             const localVersion = <?php
-                $cargoToml = file_get_contents(__DIR__ . "/app/Cargo.toml");
+                $cargoToml = file_get_contents("/app/Cargo.toml");
                 preg_match('/^\s*\[package\]\s*$([\s\S]*?)(^\s*\[|\s*\Z)/m', $cargoToml, $pkgMatch);
                 if ($pkgMatch) {
                     $pkgBody = $pkgMatch[1];
