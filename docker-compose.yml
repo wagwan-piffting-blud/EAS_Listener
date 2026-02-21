@@ -1,14 +1,13 @@
 services:
     eas_listener:
-        build: .
+        image: ghcr.io/wagwan-piffting-blud/eas-listener:latest
         container_name: eas_listener
         restart: unless-stopped
         volumes:
             - ./data:/data
             - ./apprise.yml:/app/apprise.yml
-            - ./web_server:/var/www/html
-            - ./leadin.mp3:/app/leadin.mp3
-            - ./leadout.mp3:/app/leadout.mp3
+            # - ./leadin.mp3:/app/leadin.mp3         # Include if you have lead-in audio and want to use it when relaying
+            # - ./leadout.mp3:/app/leadout.mp3       # Include if you have lead-out audio and want to use it when relaying
             - ./config.json:/app/config.json
         env_file:
             - .env

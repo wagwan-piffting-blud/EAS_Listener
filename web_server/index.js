@@ -464,11 +464,14 @@
             return;
         }
 
-        const availableAudioSrc = state.activeAlertAudioSrc;
-
-        for (const alert of alerts) {
+        alerts.forEach((alert, index) => {
             const card = document.createElement("article");
             const severity = RegExp(/(warning|watch|advisory|emergency|test)/i).exec(alert.data.event_text)?.[1]?.toLowerCase();
+            var availableAudioSrc = state.activeAlertAudioSrc;
+            availableAudioSrc = availableAudioSrc.replace(/(\d+)$/, function(match, p1) {
+                return (parseInt(p1, 10) - index).toString();
+            });
+
             card.className = `alert-card ${severity || "unknown"}`;
             card.innerHTML = `
                 <div class="event-code">${alert.data.event_code}</div>
@@ -493,9 +496,10 @@
                     <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(availableAudioSrc)}</div>
                 </div>
             `;
+
             container.appendChild(card);
             bindAudioUnavailableFallback(card);
-        }
+        });
     }
 
     function renderLogs() {

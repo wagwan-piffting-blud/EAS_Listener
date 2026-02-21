@@ -28,3 +28,4 @@ eas-icons/same_codes_cache.json
 *.wav
 config.json
 data/
+docker-compose-local.yml

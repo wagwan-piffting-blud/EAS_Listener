@@ -1,8 +1,9 @@
 <?php
 
-function handle_redirect($current_url, $redirect_url = null) {
-    if(!empty($redirect_url) && isset($redirect_url)) {
-        if($current_url !== $redirect_url) {
+function handle_redirect($current_url, $redirect_url = null)
+{
+    if (!empty($redirect_url) && isset($redirect_url)) {
+        if ($current_url !== $redirect_url) {
             unset($_SESSION["redirect"]);
             header("Location: " . basename($redirect_url));
             exit();
@@ -10,34 +11,32 @@ function handle_redirect($current_url, $redirect_url = null) {
     }
 }
 
-if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
+if (!session_id()) {
+    if (getenv('USE_REVERSE_PROXY') === 'true') {
         session_set_cookie_params(259200, "/", "", true, true);
-    }
-
-    else {
+    } else {
         session_set_cookie_params(259200, "/", "", false, true);
     }
 
     session_start();
 }
 
-if(!empty($_POST["username"]) && !empty($_POST["password"])) {
+if (!empty($_POST["username"]) && !empty($_POST["password"])) {
     $valid_user = getenv('DASHBOARD_USERNAME');
     $valid_pass = getenv('DASHBOARD_PASSWORD');
 
-    if($_POST["username"] === $valid_user && $_POST["password"] === $valid_pass) {
+    if ($_POST["username"] === $valid_user && $_POST["password"] === $valid_pass) {
         $_SESSION['authed'] = true;
-    }
-
-    else {
+    } else {
         echo "<script>alert('Invalid username or password.'); window.location='" . basename($_SERVER["SCRIPT_FILENAME"]) . "';</script>";
         exit();
     }
 }
 
-if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? null; ?><!DOCTYPE html>
-<html lang="en">
+if (!isset($_SESSION['authed'])) {
+    $_SESSION["redirect"] = $_GET["redirect"] ?? null; ?><!DOCTYPE html>
+    <html lang="en">
+
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -57,7 +56,7 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
                 --border: rgba(243, 245, 249, 0.12);
                 font-family: "Segoe UI", "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
                 background: radial-gradient(circle at top, rgba(79, 157, 255, 0.12), transparent) no-repeat,
-                var(--bg);
+                    var(--bg);
                 color: var(--fg);
             }
 
@@ -96,7 +95,8 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
             }
         </style>
     </head>
-        <body>
+
+    <body>
         <div class="container">
             <h1>Please login to view the EAS Monitoring Dashboard.</h1>
             <form method="POST" action="<?php print_r(basename($_SERVER["SCRIPT_FILENAME"])); ?>">
@@ -106,7 +106,8 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
             </form>
         </div>
     </body>
-</html><?php } else { handle_redirect($_SERVER["REQUEST_URI"], $_SESSION['redirect'] ?? null); ?><!DOCTYPE html>
+</html><?php } else {
+    handle_redirect($_SERVER["REQUEST_URI"], $_SESSION['redirect'] ?? null); ?><!DOCTYPE html>
 <html lang="en">
     <head>
         <meta charset="utf-8" />
@@ -150,14 +151,122 @@ if(!isset($_SESSION['authed'])) { $_SESSION["redirect"] = $_GET["redirect"] ?? n
             </section>
         </main>
         <footer>
-            Data provided by the container's monitoring backend. Updates in real time.
+            <span>Powered by <a id="updateLink" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a></span>
         </footer>
         <script>
-            window.API_BASE = "<?php if(getenv('USE_REVERSE_PROXY') == 'true') {
-                print_r(getenv('WS_REVERSE_PROXY_URL'));
+            async function fetchGitHubCargoVersion({owner, repo, branch = "main", path = "Cargo.toml", timeoutMs = 8000}) {
+                const url = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(branch)}/${path
+                .split("/")
+                .map(encodeURIComponent)
+                .join("/")}`;
+
+                const controller = new AbortController();
+                const t = setTimeout(() => controller.abort(), timeoutMs);
+
+                try {
+                    const res = await fetch(url, {
+                        signal: controller.signal,
+                        cache: "no-store",
+                        headers: {
+                            "Accept": "text/plain",
+                        },
+                    });
+                    if (!res.ok) {
+                        throw new Error(`GitHub raw fetch failed: ${res.status} ${res.statusText}`);
+                    }
+                    const toml = await res.text();
+                    const version = parseCargoTomlPackageVersion(toml);
+                    if (!version) throw new Error("Could not find [package] version in Cargo.toml");
+                    return version;
+                } finally {
+                    clearTimeout(t);
+                }
             }
 
-            else {
+            function parseCargoTomlPackageVersion(tomlText) {
+                const pkgMatch = tomlText.match(/^\s*\[package\]\s*$([\s\S]*?)(^\s*\[|\s*\Z)/m);
+                if (!pkgMatch) return null;
+
+                const pkgBody = pkgMatch[1];
+
+                const verMatch = pkgBody.match(/^\s*version\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m);
+                return verMatch ? verMatch[1].trim() : null;
+            }
+
+            function compareSemver(a, b) {
+                const A = parseSemver(a);
+                const B = parseSemver(b);
+
+                if (!A || !B) return a === b ? 0 : (a < b ? -1 : 1);
+
+                for (const k of ["major", "minor", "patch"]) {
+                    if (A[k] !== B[k]) return A[k] < B[k] ? -1 : 1;
+                }
+
+                if (A.prerelease && !B.prerelease) return -1;
+                if (!A.prerelease && B.prerelease) return 1;
+
+                return 0;
+            }
+
+            function parseSemver(v) {
+                const m = String(v).trim().match(
+                    /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/
+                );
+                if (!m) return null;
+                return {
+                    major: Number(m[1]),
+                    minor: Number(m[2]),
+                    patch: Number(m[3]),
+                    prerelease: m[4] || "",
+                    build: m[5] || "",
+                };
+            }
+
+            function isNewerVersionAvailable(localVersion, remoteVersion) {
+                return compareSemver(localVersion, remoteVersion) < 0;
+            }
+
+            const localVersion = <?php
+                $cargoToml = file_get_contents(__DIR__ . "/app/Cargo.toml");
+                preg_match('/^\s*\[package\]\s*$([\s\S]*?)(^\s*\[|\s*\Z)/m', $cargoToml, $pkgMatch);
+                if ($pkgMatch) {
+                    $pkgBody = $pkgMatch[1];
+                    preg_match('/^\s*version\s*=\s*["\']([^"\']+)["\']\s*(?:#.*)?$/m', $pkgBody, $verMatch);
+                    if ($verMatch) {
+                        echo json_encode(trim($verMatch[1]));
+                    } else {
+                        echo json_encode("unknown");
+                    }
+                } else {
+                    echo json_encode("unknown");
+                }
+            ?>;
+
+            (async () => {
+                const remoteVersion = await fetchGitHubCargoVersion({
+                    owner: "wagwan-piffting-blud",
+                    repo: "EAS_Listener",
+                    branch: "main",
+                    path: "Cargo.toml",
+                });
+
+                if (isNewerVersionAvailable(localVersion, remoteVersion)) {
+                    const dismissKey = `dismiss_update_${remoteVersion}`;
+                    if (!localStorage.getItem(dismissKey)) {
+                        alert(`A new version of EAS_Listener is available: ${remoteVersion}! (You are currently on version ${localVersion}.)`);
+                        localStorage.setItem(dismissKey, "1");
+                    }
+                    document.getElementById("updateLink")?.classList.add("pulse");
+                    document.getElementById("updateLink").innerHTML += `(Update Available: v${remoteVersion})`;
+                }
+            })().catch((err) => {
+                console.warn("Update check failed:", err);
+            });
+
+            window.API_BASE = "<?php if (getenv('USE_REVERSE_PROXY') == 'true') {
+                print_r(getenv('WS_REVERSE_PROXY_URL'));
+            } else {
                 print_r("localhost:" . getenv('MONITORING_BIND_PORT') ?: '8080');
             }
             ?>";

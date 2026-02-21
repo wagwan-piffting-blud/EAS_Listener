@@ -30,6 +30,12 @@
 
 ---
 
+## Versioning
+
+This project uses [Semantic Versioning](https://semver.org/). The dashboard will check for updates on GitHub and notify users when a new version is available. Patch versions are for bug fixes and minor improvements to the frontend, minor versions are for new features or bug fixes to the backend, and major versions are mostly unused (per Rust ecosystem tradition). Please refer to the project's commit history for detailed changes and updates.
+
+---
+
 ## License
 
 This project is licensed under the **GNU GPL-3.0** (see [`LICENSE`](LICENSE)).
