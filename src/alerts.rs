@@ -21,8 +21,54 @@ use tokio::sync::{mpsc::Receiver, Mutex};
 use tokio::time::interval;
 use tracing::{error, info, instrument, warn};
 
-const RAINY_DAY_FILE: &str = "rainy_day.txt";
+const IMPACT_DAY_FILE: &str = "impact_day.txt";
 const SEVERE_DAY_FILE: &str = "severe_day.txt";
+
+#[inline]
+fn is_severe_alert_event_code(event_code: &str) -> bool {
+    matches!(
+        event_code,
+        "AVW"
+            | "BZW"
+            | "CFW"
+            | "DSW"
+            | "EWW"
+            | "FFW"
+            | "FLW"
+            | "FRW"
+            | "FSW"
+            | "FZW"
+            | "HUW"
+            | "HWW"
+            | "SMW"
+            | "SQW"
+            | "SSW"
+            | "SVR"
+            | "TOR"
+            | "TRW"
+            | "TSW"
+            | "WSW"
+    )
+}
+
+#[inline]
+fn is_impact_day_event_code(event_code: &str) -> bool {
+    matches!(
+        event_code,
+        "AVA"
+            | "CFA"
+            | "FFA"
+            | "FLA"
+            | "HUA"
+            | "HWA"
+            | "SSA"
+            | "SVA"
+            | "TOA"
+            | "TRA"
+            | "TSA"
+            | "WSA"
+    )
+}
 
 fn is_alert_relevant(alert_data: &EasAlertData, watched_fips: &HashSet<String>) -> bool {
     if watched_fips.is_empty() {
@@ -360,38 +406,38 @@ async fn get_eas_details_and_log(config: &Config, raw_header: &str) -> Result<Ea
 
 #[instrument(skip(state_dir, app_state))]
 async fn update_alert_files(state_dir: &Path, app_state: &AppState) -> Result<()> {
-    let has_severe_warning = app_state
-        .active_alerts
-        .iter()
-        .any(|a| matches!(a.data.event_code.trim(), "SVR" | "TOR"));
-    let has_severe_watch = app_state
-        .active_alerts
-        .iter()
-        .any(|a| a.data.event_code.trim() == "TOA");
-    let has_moderate_watch = app_state
-        .active_alerts
-        .iter()
-        .any(|a| a.data.event_code.trim() == "SVA");
+    let mut has_severe_alert = false;
+    let mut has_impact_day_alert = false;
+    for alert in &app_state.active_alerts {
+        let event_code = alert.data.event_code.trim();
+        if is_severe_alert_event_code(event_code) {
+            has_severe_alert = true;
+            break;
+        }
+        if is_impact_day_event_code(event_code) {
+            has_impact_day_alert = true;
+        }
+    }
 
-    let rainy_path = state_dir.join(RAINY_DAY_FILE);
+    let impact_path = state_dir.join(IMPACT_DAY_FILE);
     let severe_path = state_dir.join(SEVERE_DAY_FILE);
 
-    if has_severe_warning || has_severe_watch {
+    if has_severe_alert {
         info!("Severe alert active. Ensuring `severe_day.txt` exists.");
         fs::write(&severe_path, "").await?;
-        if fs::try_exists(&rainy_path).await? {
-            fs::remove_file(&rainy_path).await?;
+        if fs::try_exists(&impact_path).await? {
+            fs::remove_file(&impact_path).await?;
         }
-    } else if has_moderate_watch {
-        info!("Moderate watch active. Ensuring `rainy_day.txt` exists.");
-        fs::write(&rainy_path, "").await?;
+    } else if has_impact_day_alert {
+        info!("Impact day alert active. Ensuring `impact_day.txt` exists.");
+        fs::write(&impact_path, "").await?;
         if fs::try_exists(&severe_path).await? {
             fs::remove_file(&severe_path).await?;
         }
     } else {
         info!("No relevant alerts active. Cleaning up state files.");
-        if fs::try_exists(&rainy_path).await? {
-            fs::remove_file(&rainy_path).await?;
+        if fs::try_exists(&impact_path).await? {
+            fs::remove_file(&impact_path).await?;
         }
         if fs::try_exists(&severe_path).await? {
             fs::remove_file(&severe_path).await?;

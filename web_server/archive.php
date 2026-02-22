@@ -49,18 +49,212 @@ function match_watched_fips(string $locations_string, ?array $watched_fips_looku
     return false;
 }
 
-function resolve_id($id) {
-    $files = glob(getenv("RECORDING_DIR") . "/EAS_Recording_*.wav");
+function get_recording_dir(): string {
+    return rtrim((string) (getenv("RECORDING_DIR") ?: ""), "/\\");
+}
 
-    usort($files, function($a, $b) {
-        return filemtime($a) - filemtime($b);
+function get_recording_manifest_path(string $recording_dir): string {
+    return $recording_dir . DIRECTORY_SEPARATOR . ".recording_manifest.json";
+}
+
+function scan_recording_files(string $recording_dir): array {
+    $pattern = $recording_dir . DIRECTORY_SEPARATOR . "EAS_Recording_*.wav";
+    $files = glob($pattern);
+    if($files === false) {
+        $files = [];
+    }
+
+    $entries = [];
+    foreach($files as $file) {
+        $mtime = @filemtime($file);
+        if($mtime === false) {
+            continue;
+        }
+
+        $entries[] = [
+            "path" => $file,
+            "mtime" => (int) $mtime,
+        ];
+    }
+
+    usort($entries, function($a, $b) {
+        return $a["mtime"] <=> $b["mtime"];
     });
 
-    if(!isset($files[$id])) {
+    return array_values(array_map(function($entry) {
+        return $entry["path"];
+    }, $entries));
+}
+
+function build_recording_manifest(string $recording_dir): array {
+    $files = scan_recording_files($recording_dir);
+    return [
+        "version" => 1,
+        "generated_at" => time(),
+        "directory_mtime" => (int) (@filemtime($recording_dir) ?: 0),
+        "count" => count($files),
+        "files" => $files,
+    ];
+}
+
+function read_recording_manifest(string $manifest_path): ?array {
+    if(!is_readable($manifest_path)) {
         return null;
     }
 
-    return $files[$id];
+    $raw = @file_get_contents($manifest_path);
+    if($raw === false || $raw === "") {
+        return null;
+    }
+
+    $decoded = json_decode($raw, true);
+    if(!is_array($decoded) || !isset($decoded["files"]) || !is_array($decoded["files"])) {
+        return null;
+    }
+
+    $files = [];
+    foreach($decoded["files"] as $file) {
+        if(is_string($file) && $file !== "") {
+            $files[] = $file;
+        }
+    }
+
+    $decoded["files"] = array_values($files);
+    $decoded["count"] = count($decoded["files"]);
+    $decoded["directory_mtime"] = (int) ($decoded["directory_mtime"] ?? 0);
+    return $decoded;
+}
+
+function write_recording_manifest(string $manifest_path, array $manifest): void {
+    $payload = json_encode($manifest, JSON_UNESCAPED_SLASHES);
+    if($payload === false) {
+        return;
+    }
+
+    $tmp_path = $manifest_path . ".tmp." . getmypid() . "." . mt_rand(1000, 9999);
+    $handle = @fopen($tmp_path, "wb");
+    if($handle === false) {
+        return;
+    }
+
+    $write_ok = false;
+    if(@flock($handle, LOCK_EX)) {
+        $written = @fwrite($handle, $payload);
+        @fflush($handle);
+        @flock($handle, LOCK_UN);
+        $write_ok = ($written !== false);
+    }
+
+    fclose($handle);
+
+    if(!$write_ok) {
+        @unlink($tmp_path);
+        return;
+    }
+
+    if(!@rename($tmp_path, $manifest_path)) {
+        @unlink($tmp_path);
+    }
+}
+
+function get_recording_manifest(bool $force_refresh = false): array {
+    static $request_cache = null;
+
+    if(!$force_refresh && is_array($request_cache)) {
+        return $request_cache;
+    }
+
+    $recording_dir = get_recording_dir();
+    if($recording_dir === "" || !is_dir($recording_dir)) {
+        $request_cache = [
+            "version" => 1,
+            "generated_at" => time(),
+            "directory_mtime" => 0,
+            "count" => 0,
+            "files" => [],
+        ];
+        return $request_cache;
+    }
+
+    $manifest_path = get_recording_manifest_path($recording_dir);
+    $directory_mtime = (int) (@filemtime($recording_dir) ?: 0);
+    $manifest = null;
+
+    if(!$force_refresh) {
+        $manifest = read_recording_manifest($manifest_path);
+        if(
+            $manifest !== null
+            && (int) ($manifest["directory_mtime"] ?? -1) !== $directory_mtime
+        ) {
+            $manifest = null;
+        }
+    }
+
+    if($manifest === null) {
+        $manifest = build_recording_manifest($recording_dir);
+        write_recording_manifest($manifest_path, $manifest);
+    }
+
+    $request_cache = $manifest;
+    return $request_cache;
+}
+
+function resolve_id($id) {
+    $recording_id = filter_var($id, FILTER_VALIDATE_INT, [
+        "options" => [
+            "min_range" => 0,
+        ],
+    ]);
+    if($recording_id === false) {
+        return null;
+    }
+
+    $manifest = get_recording_manifest();
+    if(!isset($manifest["files"][$recording_id])) {
+        return null;
+    }
+
+    return $manifest["files"][$recording_id];
+}
+
+function get_latest_recording_id(): int {
+    $manifest = get_recording_manifest();
+    return (int) ($manifest["count"] ?? 0) - 1;
+}
+
+function is_finalized_wav_recording(string $file): bool {
+    $filesize = @filesize($file);
+    if($filesize === false || $filesize < 44) {
+        return false;
+    }
+
+    $handle = @fopen($file, "rb");
+    if($handle === false) {
+        return false;
+    }
+
+    $header = @fread($handle, 44);
+    fclose($handle);
+
+    if($header === false || strlen($header) < 44) {
+        return false;
+    }
+
+    if(substr($header, 0, 4) !== "RIFF" || substr($header, 8, 4) !== "WAVE") {
+        return false;
+    }
+
+    // hound writes canonical PCM WAV where "data" chunk begins at offset 36.
+    if(substr($header, 36, 4) !== "data") {
+        return false;
+    }
+
+    $riff_size = unpack("V", substr($header, 4, 4))[1];
+    $data_size = unpack("V", substr($header, 40, 4))[1];
+    $expected_riff_size = (int) $filesize - 8;
+    $expected_data_size = (int) $filesize - 44;
+
+    return $riff_size === $expected_riff_size && $data_size === $expected_data_size;
 }
 
 function hhmmToSeconds(string $hhmmString): int {
@@ -102,23 +296,32 @@ if(!isset($_SESSION['authed'])) {
     exit();
 }
 
+if(session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
 if(isset($_GET["latest_id"]) && $_GET["latest_id"] !== null && $_SESSION['authed'] === true) {
-    $files = glob(getenv("RECORDING_DIR") . "/EAS_Recording_*.wav");
-
-    usort($files, function($a, $b) {
-        return filemtime($a) - filemtime($b);
-    });
-
-    echo count($files) - 1;
+    echo get_latest_recording_id();
     exit();
 }
 
 if(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null && $_SESSION['authed'] === true) {
+    $is_head_request = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD';
     $file = resolve_id($_GET["recording_id"]);
 
     if($file === null || $file === false || !file_exists($file)) {
         http_response_code(404);
-        echo "File not found.";
+        if(!$is_head_request) {
+            echo "File not found.";
+        }
+        exit();
+    }
+
+    if(!is_finalized_wav_recording($file)) {
+        http_response_code(425);
+        if(!$is_head_request) {
+            echo "Recording is still in progress.";
+        }
         exit();
     }
 
@@ -166,11 +369,17 @@ if(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null && $_SESSION['
     header("Accept-Ranges: bytes");
     header("Content-Length: " . $length);
 
+    if($is_head_request) {
+        exit();
+    }
+
     $handle = fopen($file, 'rb');
 
     if($handle === false) {
         http_response_code(500);
-        echo "Failed to open recording.";
+        if(!$is_head_request) {
+            echo "Failed to open recording.";
+        }
         exit();
     }
 

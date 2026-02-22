@@ -3,6 +3,10 @@
     const LOG_FETCH_TAIL = Math.min(LOG_LIMIT, 500);
     const AUDIO_AVAILABILITY_POLL_MS = 10000;
     const AUDIO_INITIAL_HOLDOFF_MS = 10000;
+    const AUDIO_PROBE_BATCH_SIZE = 4;
+    const AUDIO_PROBE_CONCURRENCY = 2;
+    const AUDIO_PROBE_BACKOFF_BASE_MS = 3000;
+    const AUDIO_PROBE_BACKOFF_MAX_MS = 60000;
     const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
 
     const state = {
@@ -10,7 +14,8 @@
         activeAlerts: [],
         activeAlertSignature: "",
         activeAlertsChangedAt: 0,
-        activeAlertAudioSrc: null,
+        activeAlertAudioSrcByAlert: new Map(),
+        audioProbeStateByRecordingId: new Map(),
         nextAudioAvailabilityCheckAt: 0,
         audioPollInFlight: false,
         logs: [],
@@ -89,6 +94,69 @@
             .join("|");
     }
 
+    function getAlertKey(alert) {
+        return `${alert.received_at || ""}:${alert.data?.event_code || ""}:${alert.raw_header || ""}`;
+    }
+
+    function getSortedActiveAlerts(alerts = state.activeAlerts) {
+        return alerts.slice().sort((a, b) => b.received_at - a.received_at);
+    }
+
+    function hasPendingAlertAudio() {
+        return state.activeAlerts.some((alert) => !state.activeAlertAudioSrcByAlert.has(getAlertKey(alert)));
+    }
+
+    function shouldProbeRecordingId(recordingId, now = Date.now()) {
+        const probeState = state.audioProbeStateByRecordingId.get(recordingId);
+        return !probeState || probeState.nextTryAt <= now;
+    }
+
+    function markRecordingIdProbeFailure(recordingId) {
+        const previous = state.audioProbeStateByRecordingId.get(recordingId) || { failures: 0, nextTryAt: 0 };
+        const failures = previous.failures + 1;
+        const backoffMs = Math.min(
+            AUDIO_PROBE_BACKOFF_MAX_MS,
+            AUDIO_PROBE_BACKOFF_BASE_MS * (2 ** (failures - 1))
+        );
+        state.audioProbeStateByRecordingId.set(recordingId, {
+            failures,
+            nextTryAt: Date.now() + backoffMs,
+        });
+    }
+
+    function markRecordingIdProbeSuccess(recordingId) {
+        state.audioProbeStateByRecordingId.delete(recordingId);
+    }
+
+    function pruneProbeState(latestRecordingId, alertCount) {
+        if (state.audioProbeStateByRecordingId.size <= 256) return;
+        const windowSize = Math.max(alertCount * 2, 32);
+        const minRelevantRecordingId = Math.max(0, latestRecordingId - windowSize);
+        state.audioProbeStateByRecordingId.forEach((_value, recordingId) => {
+            if (recordingId < minRelevantRecordingId || recordingId > latestRecordingId) {
+                state.audioProbeStateByRecordingId.delete(recordingId);
+            }
+        });
+    }
+
+    async function mapWithConcurrency(items, concurrency, task) {
+        if (!items.length) return [];
+        const results = new Array(items.length);
+        const workerCount = Math.min(Math.max(1, concurrency), items.length);
+        let nextIndex = 0;
+
+        async function worker() {
+            while (nextIndex < items.length) {
+                const currentIndex = nextIndex;
+                nextIndex += 1;
+                results[currentIndex] = await task(items[currentIndex], currentIndex);
+            }
+        }
+
+        await Promise.all(Array.from({ length: workerCount }, worker));
+        return results;
+    }
+
     function startAudioAvailabilityPolling() {
         if (audioAvailabilityPollTimer !== null) return;
         audioAvailabilityPollTimer = setInterval(checkForAvailableAlertAudio, AUDIO_AVAILABILITY_POLL_MS);
@@ -132,7 +200,7 @@
     }
 
     function updateAudioAvailabilityPolling() {
-        if (state.activeAlerts.length > 0 && !state.activeAlertAudioSrc) {
+        if (state.activeAlerts.length > 0 && hasPendingAlertAudio()) {
             if (!state.nextAudioAvailabilityCheckAt) {
                 state.nextAudioAvailabilityCheckAt = Date.now() + AUDIO_INITIAL_HOLDOFF_MS;
             }
@@ -154,7 +222,11 @@
         if (changed) {
             state.activeAlertSignature = nextSignature;
             state.activeAlertsChangedAt = Date.now();
-            state.activeAlertAudioSrc = null;
+            const activeKeys = new Set(nextAlerts.map(getAlertKey));
+            state.activeAlertAudioSrcByAlert = new Map(
+                Array.from(state.activeAlertAudioSrcByAlert.entries()).filter(([key]) => activeKeys.has(key))
+            );
+            state.audioProbeStateByRecordingId.clear();
             state.nextAudioAvailabilityCheckAt = nextAlerts.length
                 ? state.activeAlertsChangedAt + AUDIO_INITIAL_HOLDOFF_MS
                 : 0;
@@ -260,7 +332,7 @@
         if (!src) {
             return `<span data-audio-unavailable="true">${getAudioUnavailableText()}</span>`;
         }
-        return `<audio controls preload="metadata" data-alert-audio="true"><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
+        return `<audio controls preload="none" data-alert-audio="true"><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
     }
 
     async function fetchAudioUrl() {
@@ -286,17 +358,16 @@
     async function isAudioAvailable(src) {
         const headers = {
             Authorization: `Bearer ${window.TOKEN}`,
-            Range: "bytes=44-45",
         };
 
         try {
             const response = await fetch(`/${src}`, {
-                method: "GET",
+                method: "HEAD",
                 headers,
                 cache: "no-store",
             });
 
-            if (!response.ok && response.status !== 206) return false;
+            if (!response.ok) return false;
 
             const contentType = (response.headers.get("content-type") || "").toLowerCase();
             if (
@@ -308,8 +379,8 @@
                 return false;
             }
 
-            const chunk = await response.arrayBuffer();
-            if (chunk.byteLength <= 0) return false;
+            const contentLength = parseInt(response.headers.get("content-length") || "", 10);
+            if (Number.isFinite(contentLength) && contentLength <= 0) return false;
 
             return true;
         } catch (err) {
@@ -354,7 +425,7 @@
     }
 
     async function checkForAvailableAlertAudio() {
-        if (!state.activeAlerts.length || state.activeAlertAudioSrc || state.audioPollInFlight) {
+        if (!state.activeAlerts.length || !hasPendingAlertAudio() || state.audioPollInFlight) {
             updateAudioAvailabilityPolling();
             return;
         }
@@ -372,49 +443,59 @@
         state.audioPollInFlight = true;
         try {
             const alertSignatureAtStart = state.activeAlertSignature;
-            const availableAudioSrc = await fetchAvailableAudioSrc(1, 0);
-            if (!availableAudioSrc) return;
-
-            const playable = await isAudioPlayable(availableAudioSrc);
-            if (!playable) return;
+            const availableAudioByAlert = await fetchAvailableAlertAudio(1, 0);
+            if (!availableAudioByAlert) return;
             if (state.activeAlertSignature !== alertSignatureAtStart) return;
 
-            if (availableAudioSrc !== state.activeAlertAudioSrc) {
-                state.activeAlertAudioSrc = availableAudioSrc;
+            let changed = false;
+            availableAudioByAlert.forEach((src, key) => {
+                if (!src) return;
+                if (state.activeAlertAudioSrcByAlert.get(key) !== src) {
+                    state.activeAlertAudioSrcByAlert.set(key, src);
+                    changed = true;
+                }
+            });
+
+            if (changed) {
                 renderAlerts();
-                updateAudioAvailabilityPolling();
             }
+            updateAudioAvailabilityPolling();
         } finally {
             state.audioPollInFlight = false;
         }
     }
 
     async function precheckAvailableAlertAudio() {
-        if (!state.activeAlerts.length || state.activeAlertAudioSrc || state.audioPollInFlight) {
+        if (!state.activeAlerts.length || !hasPendingAlertAudio() || state.audioPollInFlight) {
             return;
         }
 
         state.audioPollInFlight = true;
         try {
             const alertSignatureAtStart = state.activeAlertSignature;
-            const availableAudioSrc = await fetchAvailableAudioSrc(1, 0);
-            if (!availableAudioSrc) return;
-
-            const playable = await isAudioPlayable(availableAudioSrc);
-            if (!playable) return;
+            const availableAudioByAlert = await fetchAvailableAlertAudio(1, 0);
+            if (!availableAudioByAlert) return;
             if (state.activeAlertSignature !== alertSignatureAtStart) return;
 
-            if (availableAudioSrc !== state.activeAlertAudioSrc) {
-                state.activeAlertAudioSrc = availableAudioSrc;
+            let changed = false;
+            availableAudioByAlert.forEach((src, key) => {
+                if (!src) return;
+                if (state.activeAlertAudioSrcByAlert.get(key) !== src) {
+                    state.activeAlertAudioSrcByAlert.set(key, src);
+                    changed = true;
+                }
+            });
+
+            if (changed) {
                 renderAlerts();
-                updateAudioAvailabilityPolling();
             }
+            updateAudioAvailabilityPolling();
         } finally {
             state.audioPollInFlight = false;
         }
     }
 
-    function bindAudioUnavailableFallback(card) {
+    function bindAudioUnavailableFallback(card, alertKey) {
         const audioEl = card.querySelector("audio[data-alert-audio='true']");
         if (!audioEl) return;
         const sourceEl = audioEl.querySelector("source");
@@ -427,8 +508,12 @@
             unavailable.textContent = getAudioUnavailableText();
             audioEl.replaceWith(unavailable);
             startAudioUnavailableCountdown();
-            if (failedSrc && state.activeAlertAudioSrc === failedSrc) {
-                state.activeAlertAudioSrc = null;
+            if (
+                alertKey &&
+                failedSrc &&
+                state.activeAlertAudioSrcByAlert.get(alertKey) === failedSrc
+            ) {
+                state.activeAlertAudioSrcByAlert.delete(alertKey);
                 updateAudioAvailabilityPolling();
             }
         };
@@ -439,13 +524,60 @@
         }
     }
 
-    async function fetchAvailableAudioSrc(maxAttempts = 4, delayMs = 600) {
+    async function fetchAvailableAlertAudio(maxAttempts = 4, delayMs = 600) {
+        const alerts = getSortedActiveAlerts();
+        if (!alerts.length) {
+            return new Map();
+        }
+
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
             const latestRecordingId = await fetchAudioUrl();
             if (latestRecordingId !== null) {
-                const src = `archive.php?recording_id=${latestRecordingId}`;
-                if (await isAudioAvailable(src)) {
-                    return src;
+                pruneProbeState(latestRecordingId, alerts.length);
+                const now = Date.now();
+                const entries = [];
+                const probeTargets = [];
+
+                alerts.forEach((alert, index) => {
+                    const key = getAlertKey(alert);
+                    const existingSrc = state.activeAlertAudioSrcByAlert.get(key);
+                    if (existingSrc) {
+                        entries.push([key, existingSrc]);
+                        return;
+                    }
+
+                    const recordingId = latestRecordingId - index;
+                    if (recordingId < 0) {
+                        entries.push([key, null]);
+                        return;
+                    }
+
+                    if (shouldProbeRecordingId(recordingId, now)) {
+                        probeTargets.push({ key, recordingId });
+                    }
+                });
+
+                const limitedTargets = probeTargets.slice(0, AUDIO_PROBE_BATCH_SIZE);
+                const probedEntries = await mapWithConcurrency(
+                    limitedTargets,
+                    AUDIO_PROBE_CONCURRENCY,
+                    async ({ key, recordingId }) => {
+                        const src = `archive.php?recording_id=${recordingId}`;
+                        const available = await isAudioAvailable(src);
+                        if (available) {
+                            markRecordingIdProbeSuccess(recordingId);
+                            return [key, src];
+                        }
+                        markRecordingIdProbeFailure(recordingId);
+                        return [key, null];
+                    }
+                );
+
+                entries.push(...probedEntries);
+
+                const available = new Map(entries);
+                if (Array.from(available.values()).some(Boolean)) {
+                    return available;
                 }
             }
 
@@ -460,9 +592,7 @@
     function renderAlerts() {
         const container = elements.alertList;
         container.innerHTML = "";
-        const alerts = state.activeAlerts.slice().sort((a, b) =>
-            b.received_at - a.received_at
-        );
+        const alerts = getSortedActiveAlerts();
         elements.alertCount.textContent = alerts.length ? `${alerts.length} active` : "None";
 
         if (!alerts.length) {
@@ -470,13 +600,11 @@
             return;
         }
 
-        alerts.forEach((alert, index) => {
+        alerts.forEach((alert) => {
             const card = document.createElement("article");
             const severity = RegExp(/(warning|watch|advisory|emergency|test)/i).exec(alert.data.event_text)?.[1]?.toLowerCase();
-            var availableAudioSrc = state.activeAlertAudioSrc ? state.activeAlertAudioSrc : "";
-            availableAudioSrc = availableAudioSrc.replace(/(\d+)$/, function(match, p1) {
-                return (parseInt(p1, 10) - index).toString();
-            });
+            const alertKey = getAlertKey(alert);
+            const availableAudioSrc = state.activeAlertAudioSrcByAlert.get(alertKey) || "";
 
             card.className = `alert-card ${severity || "unknown"}`;
             card.innerHTML = `
@@ -504,7 +632,7 @@
             `;
 
             container.appendChild(card);
-            bindAudioUnavailableFallback(card);
+            bindAudioUnavailableFallback(card, alertKey);
         });
     }
 
