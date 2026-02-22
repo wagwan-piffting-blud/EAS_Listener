@@ -139,7 +139,7 @@ if (!isset($_SESSION['authed'])) {
                     Active Alerts
                     <span id="alertCount" class="pill">None</span>
                 </h2>
-                <a class="smalltext" href="archive.php">(click here to view all archived alerts)</a>
+                <p class="smalltext" id="activetext">Alerts are shown in reverse chronological order (newest to oldest, top to bottom) here. <a href="archive.php">Click here to view all archived alerts.</a></p>
                 <div id="alertList" class="section-scroll"></div>
             </section>
             <section id="logSection">

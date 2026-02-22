@@ -315,14 +315,16 @@ else { ?><!DOCTYPE html>
         <header>
             <h1><img src="assets/favicon-96x96.png" alt="EAS Logo" class="logo" />EAS Archived Alerts</h1>
             <div id="header-right">
-                <a class="custom-button" href="index.php" class="button">Back to Dashboard</a>
-                <a class="custom-button" href="logout.php" class="button">Logout</a>
+                <div id="logout-container">
+                    <a class="custom-button" href="index.php">Back to Dashboard</a>
+                    <a class="custom-button" href="logout.php">Logout</a>
+                </div>
             </div>
         </header>
         <main id="oldAlerts">
             <section id="oldAlertSection">
                 <h2>
-                    Archived/Old Alerts
+                    <span class="section-title">Archived/Old Alerts</span>
                     <span id="filterStatus" class="pill">Showing All</span>
                     <span id="filterOptions" class="pill">
                         Filter by...
@@ -332,6 +334,7 @@ else { ?><!DOCTYPE html>
                     </span>
                     <span id="oldAlertCount" class="pill">None</span>
                 </h2>
+                <p class="smalltext">Note: Alerts are shown in chronological order (old to new, top to bottom) on this page.</p>
                 <div id="oldAlertList" class="section-scroll"></div>
             </section>
         </main>

@@ -1,4 +1,4 @@
-/* Pulsating animation for update notification, similar to the decoration Pi-Hole has for their update links */
+/* Pulsating animation for update notification, taken from Pi-Hole dashboard */
 @keyframes pulse {
     from {
         opacity: 0;
@@ -9,6 +9,38 @@
     }
 
     to {
+        opacity: 0;
+    }
+}
+
+@-webkit-keyframes online {
+    0% {
+        -webkit-transform: scale(.1);
+        opacity: 1;
+    }
+
+    70% {
+        -webkit-transform: scale(2.5);
+        opacity: 0;
+    }
+
+    100% {
+        opacity: 0;
+    }
+}
+
+@keyframes online {
+    0% {
+        transform: scale(.1);
+        opacity: 1;
+    }
+
+    70% {
+        transform: scale(2.5);
+        opacity: 0;
+    }
+
+    100% {
         opacity: 0;
     }
 }
@@ -130,14 +162,37 @@ footer {
     color: var(--muted);
 }
 
+a {
+    text-decoration: underline !important;
+}
+
 /* IDs */
-#filterOptions {
+#oldAlertSection .section-title {
+    margin-right: auto;
+}
+
+#filterOptions,
+#fipsFilterToggle {
     cursor: pointer;
 }
 
-#filterOptions:hover {
+#filterOptions:hover,
+#fipsFilterToggle:hover {
     background: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.15);
+}
+
+#activetext {
+    padding: 0;
+    margin: 0;
+}
+
+#activetext {
+    text-decoration: none !important;
+}
+
+#activetext a {
+    text-decoration: underline !important;
 }
 
 /* Classes */
@@ -211,6 +266,7 @@ footer {
 .ws-status {
     font-size: 0.95rem;
     display: inline-flex;
+    position: relative;
     align-items: center;
     gap: 0.6rem;
     padding: 0.35rem 0.85rem;
@@ -234,7 +290,29 @@ footer {
     color: var(--success);
 }
 
+.ws-status.connected::after {
+    content: "";
+    position: absolute;
+    left: calc(0.85rem + 5px);
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    margin-top: -6px;
+    border: 1px solid var(--success);
+    border-radius: 50%;
+    box-shadow: 0 0 4px rgba(61, 208, 104, 0.55);
+    pointer-events: none;
+    z-index: 0;
+    -webkit-transform: scale(0);
+    transform: scale(0);
+    -webkit-animation: online 2.5s ease-in-out infinite;
+    animation: online 2.5s ease-in-out infinite;
+}
+
 .ws-status.connected::before {
+    position: relative;
+    z-index: 1;
     background: var(--success);
     box-shadow: 0 0 0 4px rgba(61, 208, 104, 0.15);
 }
@@ -430,6 +508,21 @@ footer {
     font-size: 0.78rem;
     color: var(--muted);
     line-height: 1.4;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.alert-card .meta>div {
+    min-width: 0;
+}
+
+.alert-card pre {
+    margin: 0.35rem 0 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .logs-container {
@@ -530,10 +623,6 @@ footer {
     text-decoration: none;
 }
 
-.smalltext:hover {
-    text-decoration: underline;
-}
-
 .bigtext {
     font-size: 2.05rem;
     font-weight: 600;
@@ -561,6 +650,11 @@ footer {
         width: 100%;
         min-height: auto;
     }
+
+    .alert-card .headline,
+    .alert-card .meta {
+        max-inline-size: min(62ch, 100%);
+    }
 }
 
 @media (min-width: 900px) and (max-width: 1319px) {
@@ -587,6 +681,36 @@ footer {
     header {
         padding: 0.9rem 0.95rem 1.15rem;
         gap: 0.6rem;
+        justify-content: center;
+        text-align: center;
+    }
+
+    header h1 {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    #header-right {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.6rem;
+    }
+
+    #logout-container {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+
+    #header-right .custom-button {
+        top: 0;
+        right: auto;
+        margin-top: 0;
     }
 
     main {
@@ -610,5 +734,35 @@ footer {
 
     .stream-card {
         padding: clamp(0.7rem, 5vw, 0.9rem);
+    }
+
+    #alertSection {
+        order: 0;
+    }
+
+    #streamSection {
+        order: 1;
+    }
+
+    #logSection {
+        order: 2;
+    }
+
+    #oldAlertSection h2 {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        align-items: flex-start;
+        gap: 0.45rem 0.5rem;
+    }
+
+    #oldAlertSection .section-title {
+        flex: 1 0 100%;
+        margin-right: 0;
+    }
+
+    #oldAlertSection h2 .pill {
+        font-size: 0.68rem;
+        padding: 0.22rem 0.5rem;
+        max-width: 100%;
     }
 }
