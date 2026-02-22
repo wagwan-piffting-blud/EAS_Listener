@@ -23,7 +23,8 @@ lazy_static! {
         .enumerate()
         .map(|(idx, url)| (url.clone(), idx + 1))
         .collect();
-    static ref github_url: String = "https://github.com/wagwan-piffting-blud/EAS_Listener".to_string();
+    static ref github_url: String =
+        "https://github.com/wagwan-piffting-blud/EAS_Listener".to_string();
 }
 
 pub async fn send_alert_webhook(

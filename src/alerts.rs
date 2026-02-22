@@ -7,6 +7,7 @@ use crate::state::{ActiveAlert, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::Result;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,8 +44,8 @@ pub async fn run_alert_manager(
     mut config: Config,
     state: Arc<Mutex<AppState>>,
     mut rx: Receiver<(String, String, String, String, Duration, String)>,
-    recording_state: Arc<Mutex<Option<RecordingState>>>,
-    nnnn_rx: BroadcastReceiver<()>,
+    recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
+    nnnn_rx: BroadcastReceiver<String>,
     monitoring: MonitoringHub,
     mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
@@ -146,24 +147,24 @@ pub async fn run_alert_manager(
 async fn handle_recording_and_webhook(
     config: Config,
     state: Arc<Mutex<AppState>>,
-    recording_state: Arc<Mutex<Option<RecordingState>>>,
+    recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     alert: ActiveAlert,
     dsame_text: String,
     raw_header: String,
     _purge_time: Duration,
     stream_id: String,
-    mut nnnn_rx: BroadcastReceiver<()>,
+    mut nnnn_rx: BroadcastReceiver<String>,
 ) {
     let event_code = alert.data.event_code.clone();
     let mut recorded_state: Option<(PathBuf, String)> = None;
     let mut join_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
     let mut recorder = recording_state.lock().await;
-    if recorder.is_none() {
+    if !recorder.contains_key(stream_id.as_str()) {
         match recording::start_encoding_task(&config, &raw_header, &stream_id) {
             Ok((handle, new_state)) => {
                 info!("Recording started for alert: {}", event_code);
-                *recorder = Some(new_state);
+                recorder.insert(stream_id.clone(), new_state);
                 join_handle = Some(handle);
             }
             Err(e) => warn!("Failed to start recording: {}", e),
@@ -178,15 +179,28 @@ async fn handle_recording_and_webhook(
             sleep_duration.as_secs()
         );
 
-        tokio::select! {
-            _ = tokio::time::sleep(sleep_duration) => {
-                info!("Recording timer expired for alert: {}", event_code);
-            }
-            res = nnnn_rx.recv() => {
-                if res.is_ok() {
-                    info!("NNNN received, stopping recording for alert: {}", event_code);
-                } else {
-                    warn!("NNNN broadcast channel closed.");
+        let deadline = tokio::time::Instant::now() + sleep_duration;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    info!("Recording timer expired for alert: {}", event_code);
+                    break;
+                }
+                res = nnnn_rx.recv() => {
+                    match res {
+                        Ok(nnnn_stream_id) if nnnn_stream_id == stream_id => {
+                            info!("NNNN received for stream {}, stopping recording for alert: {}", stream_id, event_code);
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!("NNNN channel lagged; skipped {} message(s).", skipped);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("NNNN broadcast channel closed.");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -197,7 +211,7 @@ async fn handle_recording_and_webhook(
             audio_tx,
             output_path,
             source_stream,
-        }) = recording_state.lock().await.take()
+        }) = recording_state.lock().await.remove(&stream_id)
         {
             drop(audio_tx);
             recorded_state = Some((output_path, source_stream));

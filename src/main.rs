@@ -1,12 +1,13 @@
 use anyhow::Result;
 use monitoring::{MonitoringHub, MonitoringLayer};
 use recording::RecordingState;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tracing::{error, info, warn};
 use tracing::level_filters::LevelFilter;
+use tracing::{error, info, warn};
 use tracing_subscriber::filter as other_filter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::prelude::*;
@@ -74,10 +75,10 @@ async fn main() -> Result<()> {
     info!("Starting EAS Listener...");
 
     let app_state = Arc::new(Mutex::new(AppState::new(config.filters.clone())));
-    let recording_state = Arc::new(Mutex::new(Option::<RecordingState>::None));
+    let recording_state = Arc::new(Mutex::new(HashMap::<String, RecordingState>::new()));
 
     let (tx, rx) = mpsc::channel::<(String, String, String, String, Duration, String)>(32);
-    let (nnnn_tx, _nnnn_rx) = broadcast::channel::<()>(1);
+    let (nnnn_tx, _nnnn_rx) = broadcast::channel::<String>(16);
     let (reload_tx, _reload_rx) = broadcast::channel::<Config>(16);
 
     let audio_processor_handle = tokio::spawn(audio::run_audio_processor(
@@ -172,7 +173,10 @@ async fn run_reload_handler(
                 }
             }
             Err(err) => {
-                error!("Failed to reload configuration from {}: {:?}", CONFIG_PATH, err);
+                error!(
+                    "Failed to reload configuration from {}: {:?}",
+                    CONFIG_PATH, err
+                );
             }
         }
 

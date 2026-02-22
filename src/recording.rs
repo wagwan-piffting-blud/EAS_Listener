@@ -36,7 +36,14 @@ pub fn start_encoding_task_with_timestamp(
     let timestamp = filename_timestamp
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
-    let output_path = next_available_recording_path(&config.recording_dir, &timestamp);
+    let event_code = event_code_from_header(header_text);
+    let stream_label = stream_label_from_source(source_stream);
+    let output_path = next_available_recording_path(
+        &config.recording_dir,
+        event_code.as_str(),
+        &timestamp,
+        stream_label.as_str(),
+    );
     let output_path_clone = output_path.clone();
 
     let header_samples =
@@ -103,8 +110,13 @@ pub fn start_encoding_task_with_timestamp(
     Ok((handle, state))
 }
 
-fn next_available_recording_path(recording_dir: &Path, timestamp: &str) -> PathBuf {
-    let base = format!("EAS_Recording_{timestamp}");
+fn next_available_recording_path(
+    recording_dir: &Path,
+    event_code: &str,
+    timestamp: &str,
+    stream_label: &str,
+) -> PathBuf {
+    let base = format!("EAS_Recording_{event_code}_{timestamp}_{stream_label}");
     let mut index = 0usize;
     loop {
         let filename = if index == 0 {
@@ -117,5 +129,56 @@ fn next_available_recording_path(recording_dir: &Path, timestamp: &str) -> PathB
             return candidate;
         }
         index += 1;
+    }
+}
+
+fn event_code_from_header(header_text: &str) -> String {
+    let trimmed = header_text.trim();
+    let mut parts = trimmed.split('-');
+    if matches!(parts.next(), Some("ZCZC")) {
+        let _originator = parts.next();
+        if let Some(event_code) = parts.next() {
+            return sanitize_filename_label(event_code);
+        }
+    }
+    "UNK".to_string()
+}
+
+fn stream_label_from_source(source_stream: &str) -> String {
+    let without_query_or_fragment = source_stream
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source_stream);
+
+    let segment = without_query_or_fragment
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("UNKNOWN");
+
+    let label = match segment.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => stem,
+        _ => segment,
+    };
+
+    sanitize_filename_label(label)
+}
+
+fn sanitize_filename_label(label: &str) -> String {
+    let mut output = String::new();
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            output.push(c.to_ascii_uppercase());
+        } else if matches!(c, '-' | '_') {
+            output.push(c);
+        } else {
+            output.push('_');
+        }
+    }
+
+    let trimmed = output.trim_matches('_');
+    if trimmed.is_empty() {
+        "UNKNOWN".to_string()
+    } else {
+        trimmed.to_string()
     }
 }

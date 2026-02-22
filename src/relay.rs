@@ -1,14 +1,14 @@
 use crate::config::Config;
 use crate::filter::{self, FilterAction, FilterRule};
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
+use lazy_static::lazy_static;
+use reqwest::header::AUTHORIZATION;
+use reqwest::Client;
 use std::path::{Path, PathBuf};
 use tempfile::Builder;
 use tokio::process::Command;
-use reqwest::Client;
-use base64::Engine;
-use reqwest::header::AUTHORIZATION;
 use tracing::{info, warn};
-use lazy_static::lazy_static;
 
 lazy_static! {
     static ref json_config: Config =
@@ -266,9 +266,11 @@ impl RelayState {
                 }
             );
 
+            let bearer_token = json_config.dashboard_username.clone()
+                + ":"
+                + &json_config.dashboard_password.clone();
             let bearer_token =
-                json_config.dashboard_username.clone() + ":" + &json_config.dashboard_password.clone();
-            let bearer_token = Engine::encode(&base64::engine::general_purpose::STANDARD, bearer_token);
+                Engine::encode(&base64::engine::general_purpose::STANDARD, bearer_token);
 
             let latest_id = match client
                 .get(&latest_url)

@@ -6,9 +6,10 @@ use crate::state::{ActiveAlert, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use chrono::{Utc, Local};
+use chrono::{Local, Utc};
 use rubato::{Resampler, SincFixedIn};
 use sameold::{Message as SameMessage, SameReceiverBuilder};
+use std::collections::HashMap;
 use std::io::{Read, Result as IoResult};
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -20,8 +21,8 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
+use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender as TokioSender;
 use tokio::sync::Mutex;
@@ -39,7 +40,10 @@ fn stream_inactivity_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(120)
 }
 
-fn nwr_tone_header_for_recording(current_same_header: Option<&str>, julian_timestamp: &str) -> String {
+fn nwr_tone_header_for_recording(
+    current_same_header: Option<&str>,
+    julian_timestamp: &str,
+) -> String {
     if let Some(header) =
         current_same_header.filter(|header| header.starts_with("ZCZC-") && header.ends_with('-'))
     {
@@ -135,8 +139,8 @@ impl Read for ChannelReader {
 pub async fn run_audio_processor(
     config: Config,
     tx: TokioSender<(String, String, String, String, Duration, String)>,
-    recording_state: Arc<Mutex<Option<RecordingState>>>,
-    nnnn_tx: BroadcastSender<()>,
+    recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
+    nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
     mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
@@ -220,8 +224,8 @@ async fn run_stream_task(
     stream_url: String,
     client: reqwest::Client,
     tx: TokioSender<(String, String, String, String, Duration, String)>,
-    recording_state: Arc<Mutex<Option<RecordingState>>>,
-    nnnn_tx: BroadcastSender<()>,
+    recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
+    nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
 ) -> Result<()> {
     let mut last_log_time = Instant::now() - Duration::from_secs(61);
@@ -370,8 +374,8 @@ fn process_stream(
     content_type: Option<String>,
     config: &Arc<RwLock<Config>>,
     tx: &TokioSender<(String, String, String, String, Duration, String)>,
-    recording_state: &Arc<Mutex<Option<RecordingState>>>,
-    nnnn_tx: &BroadcastSender<()>,
+    recording_state: &Arc<Mutex<HashMap<String, RecordingState>>>,
+    nnnn_tx: &BroadcastSender<String>,
     stream_label: &str,
 ) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
@@ -517,8 +521,7 @@ fn process_stream(
                     if let Some(audio_tx) = {
                         let recorder = recording_state.blocking_lock();
                         recorder
-                            .as_ref()
-                            .filter(|state| state.source_stream == stream_label)
+                            .get(stream_label)
                             .map(|state| state.audio_tx.clone())
                     } {
                         if let Err(e) = audio_tx.try_send(samples_f32.clone()) {
@@ -561,7 +564,7 @@ fn process_stream(
                                 same_tone_suppression_until = None;
                                 current_same_header = None;
                                 info!(stream = %stream_label, "NNNN (End of Message) detected");
-                                if let Err(e) = nnnn_tx.send(()) {
+                                if let Err(e) = nnnn_tx.send(stream_label.to_string()) {
                                     error!(stream = %stream_label, "Failed to broadcast NNNN signal: {}", e);
                                 }
                             }
@@ -595,9 +598,10 @@ fn process_stream(
                     {
                         let tone_recording = {
                             let mut recorder = recording_state.blocking_lock();
-                            if recorder.is_none() {
+                            if !recorder.contains_key(stream_label) {
                                 let julian_timestamp = Utc::now().format("%j%H%M").to_string();
-                                let full_timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+                                let full_timestamp =
+                                    Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
                                 let config_snapshot =
                                     config.read().expect("audio config lock poisoned").clone();
                                 let tone_header = nwr_tone_header_for_recording(
@@ -612,7 +616,7 @@ fn process_stream(
                                 ) {
                                     Ok((handle, new_state)) => {
                                         let output_path = new_state.output_path.clone();
-                                        *recorder = Some(new_state);
+                                        recorder.insert(stream_label.to_string(), new_state);
                                         Some((handle, output_path))
                                     }
                                     Err(e) => {
@@ -652,12 +656,12 @@ fn process_stream(
 
                                 let stopped = {
                                     let mut recorder = recording_state_for_timeout.lock().await;
-                                    if recorder.as_ref().is_some_and(|state| {
-                                        state.source_stream == stream_for_timeout
-                                            && state.output_path == output_path
-                                    }) {
-                                        if let Some(RecordingState { audio_tx, .. }) =
-                                            recorder.take()
+                                    if recorder
+                                        .get(&stream_for_timeout)
+                                        .is_some_and(|state| state.output_path == output_path)
+                                    {
+                                        if let Some(RecordingState { audio_tx, .. }) = recorder
+                                            .remove(&stream_for_timeout)
                                         {
                                             drop(audio_tx);
                                             true
