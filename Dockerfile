@@ -48,15 +48,13 @@ COPY decoder.py /usr/local/bin/decoder.py
 RUN chmod +x /usr/local/bin/decoder.py
 RUN mkdir -p /data /var/www/html
 
-WORKDIR /data
-
 COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
 COPY ./web_server/ /var/www/html
 COPY ./Cargo.toml /app/Cargo.toml
 
-RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /var/www/html
+RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /data /var/www/html
 
 HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl --fail http://localhost:${MONITORING_BIND_PORT}/api/health || exit 1
 

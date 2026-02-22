@@ -40,7 +40,7 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     export ALREADY_SET_UP=true
 fi
 
-chmod -R 777 /app
+chmod -R 777 /app /data /var/www/html
 
 php-fpm8.4 -R
 nginx

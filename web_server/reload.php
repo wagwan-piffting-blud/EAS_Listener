@@ -31,8 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         exit;
     }
 
-    elseif (file_exists($reloadSignalPath)) { ?>
-<!DOCTYPE html>
+    elseif (file_exists($reloadSignalPath)) { ?><!DOCTYPE html>
 <html lang="en">
     <head>
         <meta charset="utf-8" />
@@ -53,9 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             }, 7000);
         </script>
     </body>
-</html>
-<?php }
-
+</html><?php }
     else {
         http_response_code(405);
         echo "Method Not Allowed";

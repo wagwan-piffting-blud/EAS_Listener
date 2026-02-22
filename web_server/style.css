@@ -161,6 +161,38 @@ footer {
     animation: 2s infinite pulse steps(20);
 }
 
+.button-danger {
+    background: #ff1a1a;
+    border: 1px solid rgba(255, 107, 107, 0.4);
+    color: black;
+    padding: 0.4rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.button-danger:hover {
+    cursor: pointer;
+    background: #c41a1a;
+    border-color: rgba(255, 82, 82, 0.6);
+}
+
+.button-safety {
+    background: #3dd068;
+    border: 1px solid rgba(61, 208, 104, 0.4);
+    cursor: pointer;
+    padding: 0.4rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    color: black;
+}
+
+.button-safety:hover {
+    cursor: pointer;
+    background: #2aa14a;
+    border-color: rgba(61, 208, 104, 0.6);
+}
+
 .filter-dialog {
     background: var(--panel);
     border: 1px solid var(--border);
