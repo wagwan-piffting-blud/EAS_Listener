@@ -116,7 +116,7 @@ fn next_available_recording_path(
     timestamp: &str,
     stream_label: &str,
 ) -> PathBuf {
-    let base = format!("EAS_Recording_{event_code}_{timestamp}_{stream_label}");
+    let base = format!("EAS_Recording_{timestamp}_{event_code}_{stream_label}");
     let mut index = 0usize;
     loop {
         let filename = if index == 0 {
