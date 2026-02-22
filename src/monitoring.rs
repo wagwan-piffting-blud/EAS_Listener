@@ -42,7 +42,8 @@ pub struct StreamStatusPayload {
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub last_disconnect: Option<DateTime<Utc>>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
-    pub last_alert_received: Option<DateTime<Utc>>,
+    pub last_alert_received_ts: Option<DateTime<Utc>>,
+    pub last_alert_received: Option<String>,
     pub last_error: Option<String>,
     pub uptime_seconds: Option<i64>,
 }
@@ -64,7 +65,8 @@ struct StreamTelemetry {
     last_error: Option<String>,
     attempts: u64,
     alerts_received: u64,
-    last_alert_received: Option<DateTime<Utc>>,
+    last_alert_received_ts: Option<DateTime<Utc>>,
+    last_alert_received: Option<String>,
 }
 
 impl StreamTelemetry {
@@ -78,6 +80,7 @@ impl StreamTelemetry {
             last_error: None,
             attempts: 0,
             alerts_received: 0,
+            last_alert_received_ts: None,
             last_alert_received: None,
         }
     }
@@ -126,11 +129,19 @@ impl MonitoringHub {
         self.max_logs
     }
 
-    pub fn broadcast_alerts(&self, alerts: Vec<ActiveAlert>, source_stream: Option<&str>) {
+    pub fn broadcast_alerts(
+        &self,
+        alerts: Vec<ActiveAlert>,
+        source_stream: Option<&str>,
+        event_code: Option<&str>,
+    ) {
         if let Some(stream) = source_stream {
             self.update_stream(stream, |state| {
                 state.alerts_received = state.alerts_received.saturating_add(1);
-                state.last_alert_received = Some(Utc::now());
+                state.last_alert_received_ts = Some(Utc::now());
+                if let Some(event_code) = event_code {
+                    state.last_alert_received = Some(event_code.to_string());
+                }
             });
         }
         let _ = self.events_tx.send(MonitoringEvent::Alerts(alerts));
@@ -275,7 +286,8 @@ impl MonitoringHub {
             connected_since: state.connected_since,
             last_activity: state.last_activity,
             last_disconnect: state.last_disconnect,
-            last_alert_received: state.last_alert_received,
+            last_alert_received_ts: state.last_alert_received_ts,
+            last_alert_received: state.last_alert_received.clone(),
             last_error: state.last_error.clone(),
             uptime_seconds,
         }

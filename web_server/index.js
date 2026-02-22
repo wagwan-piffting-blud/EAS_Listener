@@ -213,6 +213,10 @@
                 ? formatTimestamp(stream.connected_since * 1000)
                 : "—";
 
+            const lastAlertReceived = stream.last_alert_received_ts
+                ? formatTimestamp(stream.last_alert_received_ts * 1000)
+                : "—";
+
             card.innerHTML = `
                 <div class="stream-header">
                 <div class="status-tag">${statusLabel}</div>
@@ -227,7 +231,7 @@
                     <div><strong>Attempts:</strong> ${stream.connection_attempts}</div>
                     <div><strong>Last error:</strong> ${stream.last_error || "—"}</div>
                     <div><strong>Alerts received:</strong> ${stream.alerts_received}</div>
-                    <div><strong>Last alert received:</strong> ${stream.last_alert_received ? formatTimestamp(stream.last_alert_received * 1000) : "—"}</div>
+                    <div><strong>Last alert received:</strong> ${stream.last_alert_received ? stream.last_alert_received + " at " + lastAlertReceived : "—"} </div>
                 </div>
             `;
             container.appendChild(card);
@@ -469,7 +473,7 @@
         alerts.forEach((alert, index) => {
             const card = document.createElement("article");
             const severity = RegExp(/(warning|watch|advisory|emergency|test)/i).exec(alert.data.event_text)?.[1]?.toLowerCase();
-            var availableAudioSrc = state.activeAlertAudioSrc;
+            var availableAudioSrc = state.activeAlertAudioSrc ? state.activeAlertAudioSrc : "";
             availableAudioSrc = availableAudioSrc.replace(/(\d+)$/, function(match, p1) {
                 return (parseInt(p1, 10) - index).toString();
             });

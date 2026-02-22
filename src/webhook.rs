@@ -139,7 +139,8 @@ pub async fn send_alert_webhook(
 
         for discord_url in discord_urls {
             let payload_json = json!({ "embeds": [discord_embed_body.clone()] }).to_string();
-            let mut form = multipart::Form::new().text("payload_json", payload_json);
+            let mut form = multipart::Form::new().text("payload_json", payload_json.clone());
+            let mut attachment_included = false;
 
             if let (Some(path), Some(bytes)) = (attachment_path.as_ref(), attachment_bytes.as_ref())
             {
@@ -155,6 +156,7 @@ pub async fn send_alert_webhook(
                 {
                     Ok(part) => {
                         form = form.part("file", part);
+                        attachment_included = true;
                     }
                     Err(err) => {
                         warn!(
@@ -174,11 +176,31 @@ pub async fn send_alert_webhook(
             match client.post(&url).multipart(form).send().await {
                 Ok(response) if response.status().is_success() => {}
                 Ok(response) => {
-                    warn!(
-                        "Discord webhook responded with status {} for '{}'",
-                        response.status(),
-                        discord_url
-                    );
+                    let status = response.status();
+                    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE && attachment_included {
+                        let retry_form = multipart::Form::new().text("payload_json", payload_json);
+                        match client.post(&url).multipart(retry_form).send().await {
+                            Ok(retry_response) if retry_response.status().is_success() => {}
+                            Ok(retry_response) => {
+                                warn!(
+                                    "Discord webhook retry without attachment responded with status {} for '{}'",
+                                    retry_response.status(),
+                                    discord_url
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "Failed to retry Discord webhook '{}' without attachment: {}",
+                                    discord_url, err
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "Discord webhook responded with status {} for '{}'",
+                            status, discord_url
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!("Failed to send Discord webhook '{}': {}", discord_url, e);
