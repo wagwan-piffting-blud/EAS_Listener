@@ -467,7 +467,7 @@ a {
     --accent: #4f9dff;
 }
 
-.alert-card.advisory {
+.alert-card.advisory, .alert-card.message {
     border-color: rgba(238, 255, 0, 0.8);
     background: rgba(238, 255, 0, 0.3);
     --accent: #ffeb3b;
@@ -479,7 +479,7 @@ a {
     --accent: #ff9800;
 }
 
-.alert-card.warning {
+.alert-card.warning, .alert-card.alert {
     border-color: rgba(255, 72, 0, 0.8);
     background: rgba(255, 72, 0, 0.3);
     --accent: #ff5722;

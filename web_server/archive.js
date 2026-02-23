@@ -65,15 +65,17 @@ async function renderAlerts() {
             : "";
 
         card.className = `alert-card ${severityClass}`;
+        const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
+        const eventText = alert?.data?.event_text || parsedEventText?.[1] || "No headline available";
         card.innerHTML = `
             <div class="event-code">${alert.data.event_code}</div>
-            <div class="headline">${alert.data.event_text}</div>
+            <div class="headline">${eventText}</div>
             <div class="meta">
                 <div>${alert.data.eas_text || "Alert received."}</div>
                 <br>
                 <div><strong>Originator:</strong> ${alert.data.originator}</div>
                 <br>
-                <div><strong>Severity:</strong> ${alert.data.alert_severity.toUpperCase()}</div>
+                <div><strong>Severity:</strong> ${alert.data.alert_severity ? alert.data.alert_severity.toUpperCase() : "Unknown"}</div>
                 <br>
                 <div><strong>Locations:</strong> ${alert.data.locations || "—"}</div>
                 <br>

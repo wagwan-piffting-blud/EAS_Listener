@@ -602,20 +602,23 @@
 
         alerts.forEach((alert) => {
             const card = document.createElement("article");
-            const severity = RegExp(/(warning|watch|advisory|emergency|test)/i).exec(alert.data.event_text)?.[1]?.toLowerCase();
+            const normalizedEventText = String(alert?.data?.event_text || "").replace(/^(?:a|an|the)\s+/i, "").trim();
+            const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
+            const eventText = normalizedEventText || parsedEventText?.[1] || "No headline available";
+            const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message)/i).exec(eventText)?.[1]?.toLowerCase();
             const alertKey = getAlertKey(alert);
             const availableAudioSrc = state.activeAlertAudioSrcByAlert.get(alertKey) || "";
 
             card.className = `alert-card ${severity || "unknown"}`;
             card.innerHTML = `
                 <div class="event-code">${alert.data.event_code}</div>
-                <div class="headline">${alert.data.event_text}</div>
+                <div class="headline">${eventText}</div>
                 <div class="meta">
                     <div>${alert.data.eas_text || "Alert received."}</div>
                     <br>
                     <div><strong>Originator:</strong> ${alert.data.originator}</div>
                     <br>
-                    <div><strong>Severity:</strong> ${severity.toUpperCase()}</div>
+                    <div><strong>Severity:</strong> ${severity ? severity.toUpperCase() : "Unknown"}</div>
                     <br>
                     <div><strong>Locations:</strong> ${alert.data.locations || "—"}</div>
                     <br>

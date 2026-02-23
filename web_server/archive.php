@@ -473,6 +473,7 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
         $length = preg_match('/\+(\d{4})-/', $alert, $matches) ? $matches[1] : null;
         $length_as_secs = hhmmToSeconds($length);
         $expired_at = $received_at + $length_as_secs;
+        $event_text = preg_match('/has issued(?: an?| the)? (.*?) for/i', $alert, $matches) ? trim($matches[1]) : null;
 
         $alert_severity_raw = preg_match('/has issued (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
         $alert_severity_words_array = preg_split('/(?=[A-Z])/', $alert_severity_raw, -1, PREG_SPLIT_NO_EMPTY);
@@ -494,7 +495,7 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
             "expired_at" => $expired_at,
             "data" => [
                 "event_code" => preg_match('/ZCZC-[A-Z]{3}-([A-Z]{3})-/', $alert, $matches) ? $matches[1] : null,
-                "event_text" => preg_match('/has issued a (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null,
+                "event_text" => $event_text,
                 "originator" => preg_match('/Message from (.*?)[.;]/', $alert, $matches) ? $matches[1] : null,
                 "locations" => preg_match('/for (.*?); beginning/', $alert, $matches) ? $matches[1] : null,
                 "alert_severity" => $alert_severity,
