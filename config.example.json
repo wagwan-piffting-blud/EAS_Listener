@@ -6,6 +6,7 @@
     "SHARED_STATE_DIR": "/data",
     "ALERT_LOG_FILE": "eas_alerts.log",
     "DEDICATED_ALERT_LOG_FILE": "EAS2Text.log",
+    "SHOULD_LOG_ALL_ALERTS": false,
     "TZ": "America/Chicago",
     "WATCHED_FIPS": "031055,031153",
     "RECORDING_DIR": "/data/recordings",

@@ -15,6 +15,7 @@ pub struct Config {
     pub icecast_intro: PathBuf,
     pub icecast_outro: PathBuf,
     pub should_relay: bool,
+    pub should_log_all_alerts: bool,
     pub icecast_stream_urls: Vec<String>,
     pub shared_state_dir: PathBuf,
     pub alert_log_file: String,
@@ -48,17 +49,24 @@ impl Config {
             .get("SHARED_STATE_DIR")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow!("SHARED_STATE_DIR must be set in config file"))?;
+            .ok_or_else(|| anyhow!("SHARED_STATE_DIR must be set in your config.json file"))?;
 
         let log_filename = config_json
             .get("DEDICATED_ALERT_LOG_FILE")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("DEDICATED_ALERT_LOG_FILE must be set in config file"))?;
+            .ok_or_else(|| anyhow!("DEDICATED_ALERT_LOG_FILE must be set in your config.json file"))?;
+
+        let should_log_all_alerts = config_json
+            .get("SHOULD_LOG_ALL_ALERTS")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| {
+                anyhow!("SHOULD_LOG_ALL_ALERTS must be either true or false in your config.json file")
+            })?;
 
         let should_relay = config_json
             .get("SHOULD_RELAY")
             .and_then(|v| v.as_bool())
-            .ok_or_else(|| anyhow!("SHOULD_RELAY must be either true or false in config file"))?;
+            .ok_or_else(|| anyhow!("SHOULD_RELAY must be either true or false in your config.json file"))?;
 
         let icecast_relay = config_json
             .get("ICECAST_RELAY")
@@ -73,7 +81,7 @@ impl Config {
             .get("SHOULD_RELAY_DASDEC")
             .and_then(|v| v.as_bool())
             .ok_or_else(|| {
-                anyhow!("SHOULD_RELAY_DASDEC must be either true or false in config file")
+                anyhow!("SHOULD_RELAY_DASDEC must be either true or false in your config.json file")
             })?;
 
         let dasdec_url = config_json
@@ -125,7 +133,7 @@ impl Config {
         let icecast_stream_urls: Vec<String> = config_json
             .get("ICECAST_STREAM_URL_ARRAY")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("ICECAST_STREAM_URL_ARRAY must be set in config file"))?
+            .ok_or_else(|| anyhow!("ICECAST_STREAM_URL_ARRAY must be set in your config.json file"))?
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
@@ -139,7 +147,7 @@ impl Config {
         let monitoring_bind_addr: SocketAddr = config_json
             .get("MONITORING_BIND_ADDR")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("MONITORING_BIND_ADDR must be set in config file"))?
+            .ok_or_else(|| anyhow!("MONITORING_BIND_ADDR must be set in your config.json file"))?
             .parse()
             .with_context(|| "MONITORING_BIND_ADDR must be a valid socket address")?;
 
@@ -158,19 +166,19 @@ impl Config {
             .get("USE_REVERSE_PROXY")
             .and_then(|v| v.as_bool())
             .ok_or_else(|| {
-                anyhow!("USE_REVERSE_PROXY must be either true or false in config file")
+                anyhow!("USE_REVERSE_PROXY must be either true or false in your config.json file")
             })?;
 
         let alert_log_file = config_json
             .get("ALERT_LOG_FILE")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("ALERT_LOG_FILE must be set in config file"))?
+            .ok_or_else(|| anyhow!("ALERT_LOG_FILE must be set in your config.json file"))?
             .to_string();
 
         let apprise_config_path = config_json
             .get("APPRISE_CONFIG_PATH")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("APPRISE_CONFIG_PATH must be set in config file"))?
+            .ok_or_else(|| anyhow!("APPRISE_CONFIG_PATH must be set in your config.json file"))?
             .to_string();
 
         let monitoring_bind_port = config_json
@@ -229,6 +237,7 @@ impl Config {
             icecast_intro,
             icecast_outro,
             should_relay,
+            should_log_all_alerts,
             should_relay_dasdec,
             dasdec_url,
             shared_state_dir: shared_dir.clone(),

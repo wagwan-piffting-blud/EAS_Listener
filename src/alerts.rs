@@ -381,7 +381,8 @@ async fn get_eas_details_and_log(config: &Config, raw_header: &str) -> Result<Ea
 
     if output.status.success() {
         let alert_data: EasAlertData = serde_json::from_slice(&output.stdout)?;
-
+        let watched_fips = &config.watched_fips;
+        let write_anyways = config.should_log_all_alerts;
         let received_at = Utc::now();
         let local_time = received_at.with_timezone(&config.timezone);
         let timestamp = local_time.format("%Y-%m-%d %l:%M:%S %p");
@@ -390,12 +391,21 @@ async fn get_eas_details_and_log(config: &Config, raw_header: &str) -> Result<Ea
             raw_header, alert_data.eas_text, timestamp
         );
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&config.dedicated_alert_log_file)
-            .await?;
-        file.write_all(log_line.as_bytes()).await?;
+        if is_alert_relevant(&alert_data, watched_fips) || write_anyways {
+            info!("Logging alert to file: {}", log_line.trim());
+
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&config.dedicated_alert_log_file)
+                .await?;
+            file.write_all(log_line.as_bytes()).await?;
+        } else {
+            info!(
+                "Alert not in watched FIPS (zones: {}). Skipping log write.",
+                alert_data.locations
+            );
+        }
 
         Ok(alert_data)
     } else {
