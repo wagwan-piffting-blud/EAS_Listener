@@ -35,6 +35,8 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     su -www-data -s /bin/bash -c "printf 'env[MONITORING_MAX_LOGS] = ${MONITORING_MAX_LOGS}\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[WATCHED_FIPS] = \"${WATCHED_FIPS:-}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[TZ] = \"${TZ}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
+    su -www-data -s /bin/bash -c "printf 'env[ALERT_SOUND_SRC] = \"${ALERT_SOUND_SRC}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
+    su -www-data -s /bin/bash -c "printf 'env[ALERT_SOUND_ENABLED] = \"${ALERT_SOUND_ENABLED}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     sed -i "s/session.gc_maxlifetime = .*/session.gc_maxlifetime = 259200/" /etc/php/8.4/fpm/php.ini
 
     export ALREADY_SET_UP=true

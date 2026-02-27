@@ -275,6 +275,10 @@ if (!isset($_SESSION['authed'])) {
             window.TOKEN = "<?php print_r(base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))); ?>";
 
             window.MONITORING_MAX_LOGS = <?php echo getenv('MONITORING_MAX_LOGS') ?: '500'; ?>;
+
+            window.ALERTSOUNDDATA = "<?php include 'alert_noise.php'; ?>";
+
+            window.ALERTSOUNDENABLED = <?php echo (getenv('ALERT_SOUND_ENABLED') === 'true') ? 'true' : 'false'; ?>;
         </script>
         <script src="index.js"></script>
     </body>

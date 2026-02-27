@@ -8,6 +8,8 @@
     const AUDIO_PROBE_BACKOFF_BASE_MS = 3000;
     const AUDIO_PROBE_BACKOFF_MAX_MS = 60000;
     const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
+    const NEW_ALERT_SOUND_SRC = window.ALERTSOUNDDATA || "";
+    const NEW_ALERT_SOUND_ENABLED = window.ALERTSOUNDENABLED === true;
 
     const state = {
         streams: new Map(),
@@ -22,6 +24,7 @@
     };
     let audioAvailabilityPollTimer = null;
     let audioUnavailableCountdownTimer = null;
+    let newAlertSound = null;
 
     const elements = {
         wsStatus: document.getElementById("wsStatus"),
@@ -213,8 +216,39 @@
         stopAudioUnavailableCountdown();
     }
 
+    function playNewAlertSound() {
+        if (!NEW_ALERT_SOUND_SRC || !NEW_ALERT_SOUND_ENABLED) {
+            return;
+        }
+
+        // Parse data uri to binary and play it as audio
+        if (NEW_ALERT_SOUND_SRC.startsWith("data:audio")) {
+            try {
+                const mime_type = NEW_ALERT_SOUND_SRC.substring(5, NEW_ALERT_SOUND_SRC.indexOf(";base64"));
+                const base64Data = NEW_ALERT_SOUND_SRC.split(";base64,").pop();
+                const binaryData = atob(base64Data);
+                const arrayBuffer = new ArrayBuffer(binaryData.length);
+                const uint8Array = new Uint8Array(arrayBuffer);
+                for (let i = 0; i < binaryData.length; i++) {
+                    uint8Array[i] = binaryData.charCodeAt(i);
+                }
+                const blob = new Blob([arrayBuffer], { type: mime_type });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play().catch((err) => {
+                    console.error("Failed to play alert sound:", err);
+                });
+            } catch (err) {
+                console.error("Failed to parse alert sound data URI:", err);
+            }
+            return;
+        }
+    }
+
     function setActiveAlerts(alerts) {
         const nextAlerts = Array.isArray(alerts) ? alerts.slice() : [];
+        const previousAlertKeys = new Set(state.activeAlerts.map(getAlertKey));
+        const hasNewAlert = nextAlerts.some((alert) => !previousAlertKeys.has(getAlertKey(alert)));
         const nextSignature = buildAlertSignature(nextAlerts);
         const changed = nextSignature !== state.activeAlertSignature;
 
@@ -233,6 +267,9 @@
         }
 
         updateAudioAvailabilityPolling();
+        if (hasNewAlert) {
+            playNewAlertSound();
+        }
         if (changed && nextAlerts.length) {
             precheckAvailableAlertAudio();
         }
