@@ -1,6 +1,6 @@
 [package]
 name = "eas_listener"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 
 [dependencies]
@@ -30,3 +30,4 @@ lazy_static = "1.5.0"
 base64 = "0.22.1"
 tower-http = { version = "0.6.6", features = ["cors"] }
 tempfile = "3.10"
+local-ip-address = "0.6.10"

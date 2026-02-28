@@ -8,6 +8,8 @@ if [ $(grep -c 'env\[MONITORING_BIND_PORT\]' /etc/php/8.4/fpm/pool.d/www.conf) -
 fi
 
 if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
+    ORIGINAL_LOCAL_DEEPLINK_HOST="${LOCAL_DEEPLINK_HOST:-}"
+
     convert_config_to_env() {
         local config_file="$1"
         local env_file="$2"
@@ -20,6 +22,9 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
 
     sed -i '/^FILTERS=/d' /app/.env
     export $(grep -v '^#' /app/.env | xargs)
+    if [ -n "${ORIGINAL_LOCAL_DEEPLINK_HOST:-}" ]; then
+        export LOCAL_DEEPLINK_HOST="${ORIGINAL_LOCAL_DEEPLINK_HOST}"
+    fi
 
     su -www-data -s /bin/bash -c "echo 'env[MONITORING_BIND_PORT] = ${MONITORING_BIND_PORT:-8080}' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[USE_REVERSE_PROXY] = \"${USE_REVERSE_PROXY}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"

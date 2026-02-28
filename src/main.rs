@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
         config.monitoring_bind_addr,
         app_state.clone(),
         monitoring,
+        config.clone(),
     ));
 
     tokio::select! {

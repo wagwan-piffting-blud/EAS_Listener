@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub struct Config {
     pub apprise_config_path: String,
+    pub should_relay_icecast: bool,
     pub icecast_relay: String,
     pub dasdec_url: String,
     pub should_relay_dasdec: bool,
@@ -33,6 +34,7 @@ pub struct Config {
     pub dashboard_password: String,
     pub eas_relay_name: String,
     pub reverse_proxy_url: String,
+    pub local_deeplink_host: String,
     pub web_server_port: String,
     pub filters: Vec<FilterRule>,
     pub log_level: String,
@@ -54,19 +56,34 @@ impl Config {
         let log_filename = config_json
             .get("DEDICATED_ALERT_LOG_FILE")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("DEDICATED_ALERT_LOG_FILE must be set in your config.json file"))?;
+            .ok_or_else(|| {
+                anyhow!("DEDICATED_ALERT_LOG_FILE must be set in your config.json file")
+            })?;
 
         let should_log_all_alerts = config_json
             .get("SHOULD_LOG_ALL_ALERTS")
             .and_then(|v| v.as_bool())
             .ok_or_else(|| {
-                anyhow!("SHOULD_LOG_ALL_ALERTS must be either true or false in your config.json file")
+                anyhow!(
+                    "SHOULD_LOG_ALL_ALERTS must be either true or false in your config.json file"
+                )
             })?;
 
         let should_relay = config_json
             .get("SHOULD_RELAY")
             .and_then(|v| v.as_bool())
-            .ok_or_else(|| anyhow!("SHOULD_RELAY must be either true or false in your config.json file"))?;
+            .ok_or_else(|| {
+                anyhow!("SHOULD_RELAY must be either true or false in your config.json file")
+            })?;
+
+        let should_relay_icecast = config_json
+            .get("SHOULD_RELAY_ICECAST")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| {
+                anyhow!(
+                    "SHOULD_RELAY_ICECAST must be either true or false in your config.json file"
+                )
+            })?;
 
         let icecast_relay = config_json
             .get("ICECAST_RELAY")
@@ -90,9 +107,11 @@ impl Config {
             .unwrap_or("")
             .to_string();
 
-        if should_relay {
+        if should_relay && should_relay_icecast {
             if icecast_relay.is_empty() {
-                return Err(anyhow!("ICECAST_RELAY must be set if SHOULD_RELAY is true"));
+                return Err(anyhow!(
+                    "ICECAST_RELAY must be set if SHOULD_RELAY and SHOULD_RELAY_ICECAST are true"
+                ));
             }
 
             icecast_intro = config_json
@@ -133,7 +152,9 @@ impl Config {
         let icecast_stream_urls: Vec<String> = config_json
             .get("ICECAST_STREAM_URL_ARRAY")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("ICECAST_STREAM_URL_ARRAY must be set in your config.json file"))?
+            .ok_or_else(|| {
+                anyhow!("ICECAST_STREAM_URL_ARRAY must be set in your config.json file")
+            })?
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
@@ -216,6 +237,19 @@ impl Config {
             .unwrap_or("localhost")
             .to_string();
 
+        let local_deeplink_host = std::env::var("LOCAL_DEEPLINK_HOST")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                config_json
+                    .get("LOCAL_DEEPLINK_HOST")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto")
+                    .trim()
+                    .to_string()
+            });
+
         let web_server_port = config_json
             .get("WEB_SERVER_PORT")
             .and_then(|v| v.as_str())
@@ -233,6 +267,7 @@ impl Config {
         Ok(Self {
             icecast_stream_urls,
             apprise_config_path,
+            should_relay_icecast,
             icecast_relay,
             icecast_intro,
             icecast_outro,
@@ -256,6 +291,7 @@ impl Config {
             dashboard_password,
             eas_relay_name,
             reverse_proxy_url,
+            local_deeplink_host,
             web_server_port,
             filters,
             log_level,

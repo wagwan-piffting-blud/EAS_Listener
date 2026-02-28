@@ -299,7 +299,7 @@ async fn handle_recording_and_webhook(
         return;
     }
 
-    if config.should_relay {
+    if config.should_relay && (config.should_relay_icecast || config.should_relay_dasdec) {
         if let Some((ref recording_path, ref source_stream)) = recorded_state {
             let filters = {
                 let guard = state.lock().await;

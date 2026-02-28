@@ -2,6 +2,7 @@ use crate::monitoring::{LogEntry, MonitoringEvent, MonitoringHub, StreamStatusPa
 use crate::state::{ActiveAlert, AppState};
 use crate::Config;
 use anyhow::Result;
+use axum::http::HeaderMap;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, Request, State};
 use axum::middleware;
@@ -22,12 +23,18 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+const DEEPLINK_HOST_CACHE_FILE: &str = "deeplink_host.txt";
+const DEEPLINK_HOST_LAST_SEEN_CACHE_FILE: &str = "deeplink_host_last_seen.txt";
 
 #[derive(Clone)]
 struct ApiState {
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
+    config: Config,
+    deeplink_host_cache: Arc<Mutex<Option<String>>>,
+    last_seen_host_cache: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -170,14 +177,115 @@ fn token_is_valid(auth_header: &str) -> bool {
     token == expected_token
 }
 
+fn sanitize_host_header(raw: &str) -> Option<String> {
+    let candidate = raw.split(',').next()?.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    let host_only = if candidate.starts_with('[') {
+        let end = candidate.find(']')?;
+        candidate.get(1..end)?
+    } else if candidate.matches(':').count() == 1 {
+        candidate.split(':').next().unwrap_or(candidate)
+    } else {
+        candidate
+    }
+    .trim()
+    .trim_matches('.');
+
+    if host_only.is_empty() {
+        return None;
+    }
+
+    Some(host_only.to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let lowered = host.to_ascii_lowercase();
+    lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
+}
+
+fn extract_deeplink_host_candidate(headers: &HeaderMap) -> Option<String> {
+    if let Some(xfh) = headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(sanitize_host_header)
+    {
+        return Some(xfh);
+    }
+
+    headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(sanitize_host_header)
+}
+
+async fn maybe_persist_deeplink_host(headers: &HeaderMap, state: &ApiState) {
+    let Some(host) = extract_deeplink_host_candidate(headers) else {
+        return;
+    };
+
+    let should_write_last_seen = {
+        let guard = state.last_seen_host_cache.lock().await;
+        guard.as_deref() != Some(host.as_str())
+    };
+
+    if should_write_last_seen {
+        let last_seen_file = state
+            .config
+            .shared_state_dir
+            .join(DEEPLINK_HOST_LAST_SEEN_CACHE_FILE);
+        match tokio::fs::write(&last_seen_file, &host).await {
+            Ok(_) => {
+                let mut guard = state.last_seen_host_cache.lock().await;
+                *guard = Some(host.clone());
+            }
+            Err(err) => warn!(
+                "Failed to persist last-seen deeplink host '{}' to {:?}: {}",
+                host, last_seen_file, err
+            ),
+        }
+    }
+
+    if is_loopback_host(&host) {
+        return;
+    }
+
+    let should_write_preferred = {
+        let guard = state.deeplink_host_cache.lock().await;
+        guard.as_deref() != Some(host.as_str())
+    };
+
+    if !should_write_preferred {
+        return;
+    }
+
+    let host_file = state.config.shared_state_dir.join(DEEPLINK_HOST_CACHE_FILE);
+    match tokio::fs::write(&host_file, &host).await {
+        Ok(_) => {
+            let mut guard = state.deeplink_host_cache.lock().await;
+            *guard = Some(host);
+        }
+        Err(err) => warn!(
+            "Failed to persist deeplink host '{}' to {:?}: {}",
+            host, host_file, err
+        ),
+    }
+}
+
 pub async fn run_server(
     bind_addr: SocketAddr,
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
+    config: Config,
 ) -> Result<()> {
     let state = ApiState {
         app_state,
         monitoring,
+        config,
+        deeplink_host_cache: Arc::new(Mutex::new(None)),
+        last_seen_host_cache: Arc::new(Mutex::new(None)),
     };
 
     let protected_router = Router::new()
@@ -209,14 +317,17 @@ async fn health_handler() -> Json<HealthResponse> {
 async fn logs_handler(
     Query(params): Query<LogsQuery>,
     State(state): State<ApiState>,
+    headers: HeaderMap,
 ) -> Json<LogsResponse> {
+    maybe_persist_deeplink_host(&headers, &state).await;
     let max_logs = state.monitoring.max_logs();
     let tail = params.tail.unwrap_or(100).clamp(1, max_logs);
     let logs = state.monitoring.recent_logs(tail);
     Json(LogsResponse { logs })
 }
 
-async fn status_handler(State(state): State<ApiState>) -> Json<StatusResponse> {
+async fn status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Json<StatusResponse> {
+    maybe_persist_deeplink_host(&headers, &state).await;
     let streams = state.monitoring.stream_snapshots();
     let active_alerts = {
         let guard = state.app_state.lock().await;

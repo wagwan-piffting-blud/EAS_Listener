@@ -695,18 +695,6 @@ fn process_stream(
                                     ),
                                 }
 
-                                let relay_state = match RelayState::new(config_for_relay).await {
-                                    Ok(state) => state,
-                                    Err(err) => {
-                                        warn!(
-                                            stream = %stream_for_timeout,
-                                            "Skipping 1050 Hz relay due to configuration error: {:?}",
-                                            err
-                                        );
-                                        return;
-                                    }
-                                };
-
                                 let julian_timestamp = Utc::now().format("%j%H%M").to_string();
 
                                 let raw_header = nwr_tone_header_for_recording(
@@ -742,21 +730,39 @@ fn process_stream(
                                 )
                                 .await;
 
-                                if let Err(err) = relay_state
-                                    .start_relay(
-                                        "??W",
-                                        filters_for_relay.as_slice(),
-                                        &output_path,
-                                        Some(stream_for_timeout.as_str()),
-                                        &raw_header,
-                                    )
-                                    .await
+                                if config_for_relay.should_relay
+                                    && (config_for_relay.should_relay_icecast
+                                        || config_for_relay.should_relay_dasdec)
                                 {
-                                    warn!(
-                                        stream = %stream_for_timeout,
-                                        "1050 Hz relay failed: {:?}",
-                                        err
-                                    );
+                                    let relay_state =
+                                        match RelayState::new(config_for_relay).await {
+                                            Ok(state) => state,
+                                            Err(err) => {
+                                                warn!(
+                                                    stream = %stream_for_timeout,
+                                                    "Skipping 1050 Hz relay due to configuration error: {:?}",
+                                                    err
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                    if let Err(err) = relay_state
+                                        .start_relay(
+                                            "??W",
+                                            filters_for_relay.as_slice(),
+                                            &output_path,
+                                            Some(stream_for_timeout.as_str()),
+                                            &raw_header,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            stream = %stream_for_timeout,
+                                            "1050 Hz relay failed: {:?}",
+                                            err
+                                        );
+                                    }
                                 }
                             });
                         }
