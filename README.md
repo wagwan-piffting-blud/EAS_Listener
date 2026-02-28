@@ -15,7 +15,7 @@
 - Audio recording and optional Icecast relaying
 - Rich notifications via [Apprise](https://github.com/caronc/apprise) and Discord embed support
 - Web-based monitoring dashboard
-- [Make Your Own DASDEC](https://github.com/playsamay4/MYOD) support
+- [Make Your Own DASDEC](https://github.com/wagwan-piffting-blud/MYOD/tree/cross-platform-with-audio) support
 - Event-code based filtering
 - Docker image with everything pre-configured and included
 - Highly configurable via JSON
