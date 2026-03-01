@@ -2,9 +2,9 @@ use crate::monitoring::{LogEntry, MonitoringEvent, MonitoringHub, StreamStatusPa
 use crate::state::{ActiveAlert, AppState};
 use crate::Config;
 use anyhow::Result;
-use axum::http::HeaderMap;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, Request, State};
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
