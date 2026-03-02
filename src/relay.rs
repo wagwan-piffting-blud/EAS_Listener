@@ -186,7 +186,6 @@ impl RelayState {
         prepare.arg("-b:a").arg("128k");
         prepare.arg(&combined_path_buf);
 
-        info!(path = %combined_path.display(), "Creating relay bundle with FFmpeg");
         let prepare_status = prepare
             .status()
             .await
@@ -221,7 +220,6 @@ impl RelayState {
                 .arg(format!("artist={}", "EAS Listener"));
             stream_cmd.arg(&config.icecast_relay);
 
-            info!(destination = %config.icecast_relay, "Streaming relay audio to Icecast");
             let stream_status = stream_cmd
                 .status()
                 .await
@@ -262,8 +260,10 @@ impl RelayState {
                 format!("{}/send_chunk", base_url)
             };
 
-            let audio_b64 = base64::engine::general_purpose::STANDARD
-                .encode(tokio::fs::read(&combined_path_buf).await?);
+            let audio_bytes = tokio::fs::read(&combined_path_buf)
+                .await
+                .context("Failed to read combined relay bundle for DASDEC relay")?;
+            let audio_b64 = base64::engine::general_purpose::STANDARD.encode(audio_bytes);
 
             const DIRECT_B64_THRESHOLD: usize = 2_750_000;
             let mime_type = "audio/wav";
