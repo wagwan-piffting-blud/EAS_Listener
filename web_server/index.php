@@ -279,6 +279,8 @@ if (!isset($_SESSION['authed'])) {
             window.ALERTSOUNDDATA = "<?php include 'alert_noise.php'; ?>";
 
             window.ALERTSOUNDENABLED = <?php echo (getenv('ALERT_SOUND_ENABLED') === 'true') ? 'true' : 'false'; ?>;
+
+            window.ICECAST_STREAM_URL_MAPPING = <?php echo json_encode(getenv('ICECAST_STREAM_URL_MAPPING') ? json_decode(getenv('ICECAST_STREAM_URL_MAPPING')) : []); ?>;
         </script>
         <script src="index.js"></script>
     </body>

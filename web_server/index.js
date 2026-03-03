@@ -326,10 +326,14 @@
                 ? formatTimestamp(stream.last_alert_received_ts * 1000)
                 : "—";
 
+            const streamNickname = window.ICECAST_STREAM_URL_MAPPING?.[stream.stream_url] || false;
+
+            const streamDisplay = streamNickname ? `<strong>${streamNickname}</strong> <span class="smallertext">(<a href="${stream.stream_url}" target="_blank">${stream.stream_url}</a>)</span>` : stream.stream_url;
+
             card.innerHTML = `
                 <div class="stream-header">
                 <div class="status-tag">${statusLabel}</div>
-                <div class="stream-url">${stream.stream_url}</div>
+                <div class="stream-url">${streamDisplay}</div>
                 </div>
                 <div class="stream-meta">
                     <div><strong>Audio:</strong> ${receivingText}</div>

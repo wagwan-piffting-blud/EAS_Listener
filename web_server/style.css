@@ -623,6 +623,12 @@ a {
     text-decoration: none;
 }
 
+.smallertext {
+    font-size: 0.70rem;
+    color: var(--muted);
+    text-decoration: none;
+}
+
 .bigtext {
     font-size: 2.05rem;
     font-weight: 600;

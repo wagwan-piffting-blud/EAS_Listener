@@ -3,6 +3,10 @@
         "http://icecast.your-stream.com:8000/stream1.mp3",
         "http://icecast.your-stream.com:8000/stream2.ogg"
     ],
+    "ICECAST_STREAM_URL_MAPPING": {
+        "http://icecast.your-stream.com:8000/stream1.mp3": "Your Stream #1",
+        "http://icecast.your-stream.com:8000/stream2.ogg": "Your Stream #2"
+    },
     "SHARED_STATE_DIR": "/data",
     "ALERT_LOG_FILE": "eas_alerts.log",
     "DEDICATED_ALERT_LOG_FILE": "EAS2Text.log",

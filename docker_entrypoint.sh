@@ -21,9 +21,22 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     eval "$(convert_config_to_env /app/config.json /app/.env "")"
 
     sed -i '/^FILTERS=/d' /app/.env
-    export $(grep -v '^#' /app/.env | xargs)
+    while IFS= read -r env_line; do
+        [ -z "$env_line" ] && continue
+        [ "${env_line#\#}" != "$env_line" ] && continue
+        env_key="${env_line%%=*}"
+        env_value="${env_line#*=}"
+        export "$env_key=$env_value"
+    done < /app/.env
+
     if [ -n "${ORIGINAL_LOCAL_DEEPLINK_HOST:-}" ]; then
         export LOCAL_DEEPLINK_HOST="${ORIGINAL_LOCAL_DEEPLINK_HOST}"
+    fi
+
+    if [ -n "${ICECAST_STREAM_URL_MAPPING:-}" ]; then
+        export ICECAST_STREAM_URL_MAPPING=$(echo "$ICECAST_STREAM_URL_MAPPING" | jq -cr 'to_entries | map((.key | @json) + ":" + (.value | @json)) | "{" + join(",") + "}" | gsub("\\\\"; "\\\\\\\\") | gsub("\""; "\\\\\"") | gsub("\u0027"; "\u0027\\\\\u0027\u0027")')
+    else
+        export ICECAST_STREAM_URL_MAPPING="{}"
     fi
 
     su -www-data -s /bin/bash -c "echo 'env[MONITORING_BIND_PORT] = ${MONITORING_BIND_PORT:-8080}' >> /etc/php/8.4/fpm/pool.d/www.conf"
@@ -37,7 +50,8 @@ if [ ! ${ALREADY_SET_UP:-} = "true" ]; then
     su -www-data -s /bin/bash -c "printf 'env[SHARED_STATE_DIR] = \"${SHARED_STATE_DIR}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[RECORDING_DIR] = \"${RECORDING_DIR}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[DEDICATED_ALERT_LOG_FILE] = \"${DEDICATED_ALERT_LOG_FILE}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
-    su -www-data -s /bin/bash -c "printf 'env[MONITORING_MAX_LOGS] = ${MONITORING_MAX_LOGS}\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
+    su -www-data -s /bin/bash -c "printf 'env[MONITORING_MAX_LOGS] = \"${MONITORING_MAX_LOGS:-}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
+    su -www-data -s /bin/bash -c "printf 'env[ICECAST_STREAM_URL_MAPPING] = \"${ICECAST_STREAM_URL_MAPPING}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[WATCHED_FIPS] = \"${WATCHED_FIPS:-}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[TZ] = \"${TZ}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
     su -www-data -s /bin/bash -c "printf 'env[ALERT_SOUND_SRC] = \"${ALERT_SOUND_SRC}\"\n' >> /etc/php/8.4/fpm/pool.d/www.conf"
