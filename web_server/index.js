@@ -328,7 +328,7 @@
 
             const streamNickname = window.ICECAST_STREAM_URL_MAPPING?.[stream.stream_url] || false;
 
-            const streamDisplay = streamNickname ? `<strong>${streamNickname}</strong> <span class="smallertext">(<a href="${stream.stream_url}" target="_blank">${stream.stream_url}</a>)</span>` : stream.stream_url;
+            const streamDisplay = streamNickname ? `<strong>${streamNickname}</strong> <span class="smallertext">(<a href="${stream.stream_url}" target="_blank" style="color: rgba(243, 245, 249, 0.65) !important;">${stream.stream_url}</a>)</span>` : `<a href="${stream.stream_url}" target="_blank" style="color: rgba(243, 245, 249, 0.65) !important;">${stream.stream_url}</a>`;
 
             card.innerHTML = `
                 <div class="stream-header">

@@ -14,6 +14,21 @@
     "ALERT_SOUND_SRC": "iembot.mp3",
     "ALERT_SOUND_ENABLED": true,
     "TZ": "America/Chicago",
+    "PROCESS_CAP_ALERTS": true,
+    "CAP_ENDPOINTS": [
+        {
+            "name": "ENDEC CAP Endpoint",
+            "url": "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/feed"
+        },
+        {
+            "name": "WEA CAP Endpoint",
+            "url": "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/PublicWEA/recent/2012-08-21T11:40:43Z"
+        },
+        {
+            "name": "EAS CAP Endpoint",
+            "url": "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/eas/recent/2019-12-31T11:59:59Z"
+        }
+    ],
     "WATCHED_FIPS": "031055,031153",
     "RECORDING_DIR": "/data/recordings",
     "RUST_LOG": "INFO",

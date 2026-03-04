@@ -16,6 +16,8 @@ pub struct Config {
     pub icecast_intro: PathBuf,
     pub icecast_outro: PathBuf,
     pub should_relay: bool,
+    pub process_cap_alerts: bool,
+    pub cap_endpoints: Vec<String>,
     pub should_log_all_alerts: bool,
     pub icecast_stream_urls: Vec<String>,
     pub shared_state_dir: PathBuf,
@@ -165,6 +167,44 @@ impl Config {
             ));
         }
 
+        let cap_endpoints: Vec<String> = config_json
+            .get("CAP_ENDPOINTS")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        entry
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|url| !url.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                entry
+                                    .get("url")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|url| !url.is_empty())
+                                    .map(str::to_string)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let process_cap_alerts = config_json
+            .get("PROCESS_CAP_ALERTS")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| {
+                anyhow!("PROCESS_CAP_ALERTS must be either true or false in your config.json file")
+            })?;
+
+        if process_cap_alerts && cap_endpoints.is_empty() {
+            return Err(anyhow!(
+                "CAP_ENDPOINTS must contain at least one endpoint in your config.json file if PROCESS_CAP_ALERTS is true"
+            ));
+        }
+
         let monitoring_bind_addr: SocketAddr = config_json
             .get("MONITORING_BIND_ADDR")
             .and_then(|v| v.as_str())
@@ -275,6 +315,8 @@ impl Config {
             should_log_all_alerts,
             should_relay_dasdec,
             dasdec_url,
+            process_cap_alerts,
+            cap_endpoints,
             shared_state_dir: shared_dir.clone(),
             alert_log_file,
             dedicated_alert_log_file: shared_dir.join(log_filename),

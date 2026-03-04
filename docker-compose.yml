@@ -9,6 +9,7 @@ services:
             # - ./leadin.mp3:/app/leadin.mp3         # Include if you have lead-in audio and want to use it when relaying
             # - ./leadout.mp3:/app/leadout.mp3       # Include if you have lead-out audio and want to use it when relaying
             - ./config.json:/app/config.json
+            # - ./cap_tts_replacement_config.json:/app/cap_tts_replacement_config.json # Include if you have a TTS replacement config for CAP alerts and want to use it
         env_file:
             - .env
         ports:

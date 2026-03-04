@@ -716,6 +716,7 @@ fn process_stream(
                                         fips: vec!["000000".to_string()],
                                         locations: "Unknown".to_string(),
                                         originator: "WXR".to_string(),
+                                        description: None,
                                     },
                                     raw_header.clone(),
                                     Duration::from_secs(15 * 60),

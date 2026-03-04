@@ -144,3 +144,28 @@ fn make_tone_cycle(freq: f64, sr: u32, samples_per_bit: usize, amp: f64) -> Vec<
         })
         .collect()
 }
+
+pub fn generate_attention_tone(sr: u32, amp: f64) -> Result<Vec<i16>, HeaderError> {
+    validate_amplitude(amp)?;
+
+    let sr = sr.max(MIN_SAMPLE_RATE);
+    let duration_sec = 8.0;
+    let total_samples = (sr as f64 * duration_sec).floor() as usize;
+
+    let mut samples = Vec::with_capacity(total_samples);
+    for i in 0..total_samples {
+        let t = i as f64 / sr as f64;
+        let s1 = (2.0 * PI * 853.0 * t).sin();
+        let s2 = (2.0 * PI * 960.0 * t).sin();
+        let s = (s1 + s2) * 0.5 * amp; // average the two tones and apply amplitude
+        let v = (s * i16::MAX as f64).clamp(i16::MIN as f64, i16::MAX as f64);
+        samples.push(v as i16);
+    }
+    Ok(samples)
+}
+
+pub fn generate_silence_for_duration(sr: u32, duration_sec: f64) -> Vec<i16> {
+    let sr = sr.max(MIN_SAMPLE_RATE);
+    let total_samples = (sr as f64 * duration_sec).floor() as usize;
+    vec![0i16; total_samples]
+}

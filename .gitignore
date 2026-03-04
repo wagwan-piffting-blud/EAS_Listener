@@ -26,7 +26,7 @@ eas-icons/same_codes_cache.json
 *.mp3
 *.ogg
 *.wav
-config.json
+*config.json
 data/
 docker-compose-local.yml
 !web_server/iembot.mp3

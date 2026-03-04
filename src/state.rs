@@ -11,6 +11,8 @@ pub struct EasAlertData {
     pub fips: Vec<String>,
     pub locations: String,
     pub originator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

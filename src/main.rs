@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 mod alerts;
 mod audio;
 mod backend;
+mod cap;
 mod cleanup;
 mod config;
 mod filter;
@@ -108,9 +109,18 @@ async fn main() -> Result<()> {
     let api_handle = tokio::spawn(backend::run_server(
         config.monitoring_bind_addr,
         app_state.clone(),
-        monitoring,
+        monitoring.clone(),
         config.clone(),
     ));
+    if config.process_cap_alerts {
+        tokio::spawn(cap::run_cap_processor(
+            config.clone(),
+            app_state.clone(),
+            monitoring.clone(),
+        ));
+    } else {
+        info!("CAP processor disabled because PROCESS_CAP_ALERTS is false in your config.json file. No CAP alerts will be processed or forwarded to webhooks.");
+    }
 
     tokio::select! {
         _ = audio_processor_handle => info!("Audio processor task exited."),

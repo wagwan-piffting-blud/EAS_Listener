@@ -66,7 +66,27 @@ pub async fn send_alert_webhook(
         }
     };
     let data = &alert.data;
+    let description = data
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let event_title = data.event_text.to_title_case();
+    let event_title = if event_title.to_lowercase().starts_with('a')
+        || event_title.to_lowercase().starts_with("an")
+    {
+        event_title
+    } else {
+        let article = if event_title
+            .to_lowercase()
+            .starts_with(|c: char| "aeiou".contains(c))
+        {
+            "An"
+        } else {
+            "A"
+        };
+        format!("{} {}", article, event_title)
+    };
     let apprise_title = format!("{} has just been issued/received", event_title.as_str());
     let received_timestamp = Local::now().to_rfc3339();
     let attachment_path = if let Some(path) = recording_path {
@@ -91,6 +111,7 @@ pub async fn send_alert_webhook(
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
+        description,
     );
     let markdown_body = build_markdown_body(
         &event_title,
@@ -98,6 +119,7 @@ pub async fn send_alert_webhook(
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
+        description,
     );
     let html_body = build_html_body(
         &event_title,
@@ -105,6 +127,7 @@ pub async fn send_alert_webhook(
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
+        description,
     );
     let text_body = build_plain_body(
         &event_title,
@@ -112,6 +135,7 @@ pub async fn send_alert_webhook(
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
+        description,
     );
 
     let discord_urls: Vec<&str> = apprise_urls_from_config_array
@@ -139,7 +163,18 @@ pub async fn send_alert_webhook(
         };
 
         for discord_url in discord_urls {
-            let payload_json = json!({ "embeds": [discord_embed_body.clone()] }).to_string();
+            let payload_value = json!({ "embeds": [discord_embed_body.clone()] });
+            let validation_errors = validate_discord_payload(&payload_value);
+            if !validation_errors.is_empty() {
+                warn!(
+                    "Discord payload preflight validation found {} issue(s) for '{}': {}",
+                    validation_errors.len(),
+                    discord_url,
+                    validation_errors.join("; ")
+                );
+            }
+
+            let payload_json = payload_value.to_string();
             let mut form = multipart::Form::new().text("payload_json", payload_json.clone());
             let mut attachment_included = false;
 
@@ -179,15 +214,22 @@ pub async fn send_alert_webhook(
                 Ok(response) => {
                     let status = response.status();
                     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE && attachment_included {
+                        log_discord_webhook_error_response(
+                            response,
+                            discord_url,
+                            "initial request with attachment",
+                        )
+                        .await;
                         let retry_form = multipart::Form::new().text("payload_json", payload_json);
                         match client.post(&url).multipart(retry_form).send().await {
                             Ok(retry_response) if retry_response.status().is_success() => {}
                             Ok(retry_response) => {
-                                warn!(
-                                    "Discord webhook retry without attachment responded with status {} for '{}'",
-                                    retry_response.status(),
-                                    discord_url
-                                );
+                                log_discord_webhook_error_response(
+                                    retry_response,
+                                    discord_url,
+                                    "retry without attachment",
+                                )
+                                .await;
                             }
                             Err(err) => {
                                 warn!(
@@ -197,10 +239,12 @@ pub async fn send_alert_webhook(
                             }
                         }
                     } else {
-                        warn!(
-                            "Discord webhook responded with status {} for '{}'",
-                            status, discord_url
-                        );
+                        log_discord_webhook_error_response(
+                            response,
+                            discord_url,
+                            "initial request",
+                        )
+                        .await;
                     }
                 }
                 Err(e) => {
@@ -256,6 +300,88 @@ pub async fn send_alert_webhook(
     warn!("Unable to deliver notification via AppRise after trying all formats");
 }
 
+async fn log_discord_webhook_error_response(
+    response: reqwest::Response,
+    discord_url: &str,
+    attempt_label: &str,
+) {
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(text) => text,
+        Err(err) => {
+            warn!(
+                "Discord webhook {} responded with status {} for '{}' and body could not be read: {}",
+                attempt_label, status, discord_url, err
+            );
+            return;
+        }
+    };
+
+    let trimmed_body = body.trim();
+    if trimmed_body.is_empty() {
+        warn!(
+            "Discord webhook {} responded with status {} for '{}' (empty response body)",
+            attempt_label, status, discord_url
+        );
+        return;
+    }
+
+    if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(trimmed_body) {
+        let message = json_body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<missing message>");
+        let code = json_body
+            .get("code")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "<missing code>".to_string());
+        let errors = json_body.get("errors");
+
+        if let Some(errors) = errors {
+            warn!(
+                "Discord webhook {} responded with status {} for '{}': message='{}' code={} errors={}",
+                attempt_label,
+                status,
+                discord_url,
+                message,
+                code,
+                truncate_for_log(&errors.to_string(), 1600)
+            );
+        } else {
+            warn!(
+                "Discord webhook {} responded with status {} for '{}': message='{}' code={} body={}",
+                attempt_label,
+                status,
+                discord_url,
+                message,
+                code,
+                truncate_for_log(trimmed_body, 1600)
+            );
+        }
+    } else {
+        warn!(
+            "Discord webhook {} responded with status {} for '{}': non-JSON body={}",
+            attempt_label,
+            status,
+            discord_url,
+            truncate_for_log(trimmed_body, 1600)
+        );
+    }
+}
+
+fn truncate_for_log(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}...(truncated)", &input[..end])
+}
+
 fn build_discord_embed_body(
     stream_id: &str,
     title: &str,
@@ -263,9 +389,12 @@ fn build_discord_embed_body(
     received_timestamp: &str,
     eas_text: &str,
     raw_header: &str,
+    description: Option<&str>,
 ) -> serde_json::Value {
     let monitor_number = STREAM_INDEX_MAP.get(stream_id).copied().unwrap_or(999);
-    let event_code = raw_header[9..12]
+    let event_code = raw_header
+        .get(9..12)
+        .unwrap_or("ZZZ")
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
         .collect::<String>();
@@ -288,51 +417,66 @@ fn build_discord_embed_body(
         "808080"
     };
 
-    let img_color_dec = u32::from_str_radix(img_color, 16);
+    let img_color_dec = u32::from_str_radix(img_color, 16).unwrap_or(0x808080);
+    let event_title = truncate_discord_text(
+        format!("{} has just been issued/received.", title).as_str(),
+        256,
+    );
+    let author_name = truncate_discord_text(
+        format!("{} - Software ENDEC Logs", station_name.as_str()).as_str(),
+        256,
+    );
+
+    let mut fields = vec![
+        json!({
+            "name": "Received From:",
+            "value": truncate_discord_text(originator, 1024),
+            "inline": false
+        }),
+        json!({
+            "name": "Received At:",
+            "value": truncate_discord_text(received_timestamp, 1024),
+            "inline": false
+        }),
+        json!({
+            "name": "Monitor",
+            "value": truncate_discord_text(format!("#{}", monitor_number).as_str(), 1024),
+            "inline": true
+        }),
+        json!({
+            "name": "Filter",
+            "value": truncate_discord_text(filter_name.as_str(), 1024),
+            "inline": true
+        }),
+        json!({
+            "name": "EAS Text Data:",
+            "value": discord_codeblock(eas_text.trim_end(), 1024),
+            "inline": false
+        }),
+        json!({
+            "name": "EAS Protocol Data:",
+            "value": discord_codeblock(raw_header.trim_end(), 1024),
+            "inline": false
+        }),
+    ];
+
+    if let Some(value) = description {
+        fields.push(json!({
+            "name": "CAP Description:",
+            "value": discord_codeblock(value, 1024),
+            "inline": false
+        }));
+    }
 
     let embed = json!({
-        "title": format!("{} has just been issued/received.", title),
-        "color": match img_color_dec {
-            Ok(value) => format!("{}", value),
-            Err(error) => format!("Error during parsing: {}", error),
-        },
+        "title": event_title,
+        "color": img_color_dec,
         "author": {
-            "name": format!("{} - Software ENDEC Logs", station_name.as_str()),
+            "name": author_name,
             "icon_url": format!("https://wagspuzzle.space/assets/eas-icons/index.php?code={}&hex=0x{}", img_name, img_color),
             "url": github_url.as_str()
         },
-        "fields": [
-            {
-                "name": "Received From:",
-                "value": originator,
-                "inline": false
-            },
-            {
-                "name": "Received At:",
-                "value": received_timestamp,
-                "inline": false
-            },
-            {
-                "name": "Monitor",
-                "value": format!("#{}", monitor_number),
-                "inline": true
-            },
-            {
-                "name": "Filter",
-                "value": filter_name,
-                "inline": true
-            },
-            {
-                "name": "EAS Text Data:",
-                "value": format!("```\n{}\n```", eas_text.trim_end()),
-                "inline": false
-            },
-            {
-                "name": "EAS Protocol Data:",
-                "value": format!("```\n{}\n```", raw_header.trim_end()),
-                "inline": false
-            }
-        ]
+        "fields": fields
     });
 
     return embed;
@@ -344,17 +488,144 @@ fn build_markdown_body(
     received_timestamp: &str,
     eas_text: &str,
     raw_header: &str,
+    description: Option<&str>,
 ) -> String {
+    let description_section = match description {
+        Some(value) => format!("\n\n**CAP Description:**\n```\n{}\n```", value),
+        None => String::new(),
+    };
+
     format!(
-        "**{} - Software ENDEC Logs**\n\n**{}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```\n\nPowered by [Wags' Software ENDEC]({})",
+        "**{} - Software ENDEC Logs**\n\n**{}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```{}\n\nPowered by [Wags' Software ENDEC]({})",
         station_name.as_str(),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
         raw_header.trim_end(),
+        description_section,
         github_url.as_str()
     )
+}
+
+fn validate_discord_payload(payload: &serde_json::Value) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    let Some(embeds) = payload.get("embeds").and_then(|v| v.as_array()) else {
+        issues.push("payload.embeds is missing or not an array".to_string());
+        return issues;
+    };
+
+    if embeds.is_empty() {
+        issues.push("payload.embeds is empty".to_string());
+        return issues;
+    }
+
+    for (idx, embed) in embeds.iter().enumerate() {
+        let Some(embed_obj) = embed.as_object() else {
+            issues.push(format!("payload.embeds[{idx}] is not an object"));
+            continue;
+        };
+
+        let mut total_chars = 0usize;
+        if let Some(title) = embed_obj.get("title").and_then(|v| v.as_str()) {
+            let len = title.chars().count();
+            total_chars += len;
+            if len > 256 {
+                issues.push(format!(
+                    "payload.embeds[{idx}].title exceeds 256 chars ({len})"
+                ));
+            }
+        }
+
+        if let Some(color) = embed_obj.get("color") {
+            if !color.is_number() {
+                issues.push(format!(
+                    "payload.embeds[{idx}].color must be a number (got {})",
+                    color
+                ));
+            }
+        }
+
+        if let Some(author_name) = embed_obj
+            .get("author")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+        {
+            let len = author_name.chars().count();
+            total_chars += len;
+            if len > 256 {
+                issues.push(format!(
+                    "payload.embeds[{idx}].author.name exceeds 256 chars ({len})"
+                ));
+            }
+        }
+
+        if let Some(fields) = embed_obj.get("fields").and_then(|v| v.as_array()) {
+            if fields.len() > 25 {
+                issues.push(format!(
+                    "payload.embeds[{idx}].fields has more than 25 items"
+                ));
+            }
+            for (field_idx, field) in fields.iter().enumerate() {
+                let Some(field_obj) = field.as_object() else {
+                    issues.push(format!(
+                        "payload.embeds[{idx}].fields[{field_idx}] is not an object"
+                    ));
+                    continue;
+                };
+
+                if let Some(name) = field_obj.get("name").and_then(|v| v.as_str()) {
+                    let len = name.chars().count();
+                    total_chars += len;
+                    if len > 256 {
+                        issues.push(format!(
+                            "payload.embeds[{idx}].fields[{field_idx}].name exceeds 256 chars ({len})"
+                        ));
+                    }
+                }
+
+                if let Some(value) = field_obj.get("value").and_then(|v| v.as_str()) {
+                    let len = value.chars().count();
+                    total_chars += len;
+                    if len > 1024 {
+                        issues.push(format!(
+                            "payload.embeds[{idx}].fields[{field_idx}].value exceeds 1024 chars ({len})"
+                        ));
+                    }
+                }
+            }
+        }
+
+        if total_chars > 6000 {
+            issues.push(format!(
+                "payload.embeds[{idx}] total text exceeds 6000 chars ({total_chars})"
+            ));
+        }
+    }
+
+    issues
+}
+
+fn truncate_discord_text(input: &str, max_chars: usize) -> String {
+    let current_len = input.chars().count();
+    if current_len <= max_chars {
+        return input.to_string();
+    }
+
+    let suffix = "...(truncated)";
+    let suffix_len = suffix.chars().count();
+    let keep = max_chars.saturating_sub(suffix_len);
+    let prefix: String = input.chars().take(keep).collect();
+    format!("{prefix}{suffix}")
+}
+
+fn discord_codeblock(content: &str, max_total_chars: usize) -> String {
+    let wrapper = "```\n\n```";
+    let wrapper_len = wrapper.chars().count();
+    let inner_limit = max_total_chars.saturating_sub(wrapper_len);
+    let clipped = truncate_discord_text(content, inner_limit);
+    format!("```\n{}\n```", clipped)
 }
 
 fn build_html_body(
@@ -363,7 +634,16 @@ fn build_html_body(
     received_timestamp: &str,
     eas_text: &str,
     raw_header: &str,
+    description: Option<&str>,
 ) -> String {
+    let description_section = match description {
+        Some(value) => format!(
+            "<p><strong>CAP Description:</strong></p><pre>{}</pre>",
+            html_escape(value)
+        ),
+        None => String::new(),
+    };
+
     format!(
         "<p><strong>{} - Software ENDEC Logs</strong></p>\
          <p><strong>{}</strong> has just been received from: {}</p>\
@@ -372,6 +652,7 @@ fn build_html_body(
          <pre>{}</pre>\
          <p><strong>EAS Protocol Data:</strong></p>\
          <pre>{}</pre>\
+         {}\
          <p>Powered by <a href=\"{}\">Wags' Software ENDEC</a></p>",
         html_escape(&station_name.as_str()),
         html_escape(title),
@@ -379,6 +660,7 @@ fn build_html_body(
         html_escape(received_timestamp),
         html_escape(eas_text.trim_end()),
         html_escape(raw_header.trim_end()),
+        description_section,
         github_url.as_str()
     )
 }
@@ -389,15 +671,22 @@ fn build_plain_body(
     received_timestamp: &str,
     eas_text: &str,
     raw_header: &str,
+    description: Option<&str>,
 ) -> String {
+    let description_section = match description {
+        Some(value) => format!("\n\nCAP Description:\n{}", value),
+        None => String::new(),
+    };
+
     format!(
-        "{} - Software ENDEC Logs\n\n{} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}\n\nPowered by Wags' Software ENDEC ({})",
+        "{} - Software ENDEC Logs\n\n{} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}{}\n\nPowered by Wags' Software ENDEC ({})",
         station_name.as_str(),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
         raw_header.trim_end(),
+        description_section,
         github_url.as_str()
     )
 }

@@ -23,21 +23,13 @@ RUN cargo build --release --locked
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV XDG_RUNTIME_DIR=/run/user/1000
 
-RUN apt-get update && apt-get install -y \
-    libssl3 \
-    ca-certificates \
-    python3 \
-    python3-pip \
-    git \
-    bash \
-    nginx \
-    jq \
-    ffmpeg \
-    curl \
-    php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ARG VERSION=1
+ARG ASSET_NAME=Speechify.7z
+ARG ASSET_SHA256="b1df25c9ef0322d0b419e7bfcb4d563ff62569c6fadcc546128efb9981eb6a4c"
+
+RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && mkdir -p /var/lib/apt/lists/partial && apt-get update && apt-get install -y --no-install-recommends wget libssl3 ca-certificates gnupg2 python3 python3-pip xvfb xauth git bash nginx jq ffmpeg curl bash p7zip-full tmux php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip && mkdir -pm755 /etc/apt/keyrings && wget -O - https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key - && dpkg --add-architecture i386 && wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/debian/dists/trixie/winehq-trixie.sources && apt-get update && apt-get install -y --no-install-recommends winehq-stable wine64 wine32 && rm -rf /var/lib/apt/lists/* && chsh -s /bin/bash
 
 COPY ./requirements.txt /requirements.txt
 
@@ -46,7 +38,7 @@ RUN pip3 install -r /requirements.txt --break-system-packages
 COPY decoder.py /usr/local/bin/decoder.py
 
 RUN chmod +x /usr/local/bin/decoder.py
-RUN mkdir -p /data /var/www/html
+RUN mkdir -p /data /var/www/html /app
 
 COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
@@ -54,7 +46,15 @@ COPY ./nginx.conf /etc/nginx/sites-available/default
 COPY ./web_server/ /var/www/html
 COPY ./Cargo.toml /app/Cargo.toml
 
-RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /data /var/www/html
+WORKDIR /app
+
+RUN curl -fL --retry 5 --retry-delay 2 \
+      -o "/tmp/${ASSET_NAME}" \
+      "https://github.com/wagwan-piffting-blud/Speechify_EAS_Listener/releases/download/v${VERSION}/${ASSET_NAME}" \
+    && echo "${ASSET_SHA256}  /tmp/${ASSET_NAME}" | sha256sum -c - \
+    && 7z x "/tmp/${ASSET_NAME}" -o/app/Speechify \
+    && rm -f "/tmp/${ASSET_NAME}" && \
+    chmod +x /docker_entrypoint.sh && chmod -R 777 /data /var/www/html
 
 HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl --fail http://localhost:${MONITORING_BIND_PORT}/api/health || exit 1
 

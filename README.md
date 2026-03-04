@@ -12,6 +12,8 @@
 
 - Real-time EAS/SAME message decoding from multiple audio sources (primarily Icecast/Shoutcast streams)
 - Includes 1050Hz tone detection for NWR streams that are not SAME-toned
+- Optional CAP alert processing with TTS support for CAP alerts that don't have SAME headers (e.g. NWR/IPAWS CAP alerts)
+- Configurable TTS word replacements for CAP alerts to improve readability and pronunciation **(NOTE: does NOT support phoneme codes or SSML tags, only simple word/phrase replacements!)**
 - Audio recording and optional Icecast relaying
 - Rich notifications via [Apprise](https://github.com/caronc/apprise) and Discord embed support
 - Web-based monitoring dashboard

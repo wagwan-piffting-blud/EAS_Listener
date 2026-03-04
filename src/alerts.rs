@@ -134,6 +134,7 @@ pub async fn run_alert_manager(
                 fips: vec![],
                 locations,
                 originator,
+                description: None,
             },
         };
 
@@ -415,7 +416,7 @@ async fn get_eas_details_and_log(config: &Config, raw_header: &str) -> Result<Ea
 }
 
 #[instrument(skip(state_dir, app_state))]
-async fn update_alert_files(state_dir: &Path, app_state: &AppState) -> Result<()> {
+pub async fn update_alert_files(state_dir: &Path, app_state: &AppState) -> Result<()> {
     let mut has_severe_alert = false;
     let mut has_impact_day_alert = false;
     for alert in &app_state.active_alerts {
