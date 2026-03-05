@@ -149,6 +149,10 @@ if (!isset($_SESSION['authed'])) {
                 </h2>
                 <div id="logList" class="logs-container section-scroll"></div>
             </section>
+            <section id="capStatusSection">
+                <h2>CAP Status</h2>
+                <div id="capStatus" class="cap-status section-scroll"></div>
+            </section>
         </main>
         <footer>
             <span>Powered by <a id="updateLink" data-text="Wags' Rust EAS Listener" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a> | <a href="/chargen.php">Enter Character Generator mode</a> | <a href="/vacuum.php">Vacuum old alerts</a></span>

@@ -1,5 +1,5 @@
 use crate::monitoring::{LogEntry, MonitoringEvent, MonitoringHub, StreamStatusPayload};
-use crate::state::{ActiveAlert, AppState};
+use crate::state::{ActiveAlert, AppState, CapRuntimeStatus};
 use crate::Config;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -27,6 +27,7 @@ use tracing::{error, info, warn};
 
 const DEEPLINK_HOST_CACHE_FILE: &str = "deeplink_host.txt";
 const DEEPLINK_HOST_LAST_SEEN_CACHE_FILE: &str = "deeplink_host_last_seen.txt";
+const CAP_HEADER_SOURCE_MARKER: &str = "IPAWSCAP";
 
 #[derive(Clone)]
 struct ApiState {
@@ -56,6 +57,14 @@ struct HealthResponse {
 struct StatusResponse {
     streams: Vec<StreamStatusPayload>,
     active_alerts: Vec<ActiveAlert>,
+    cap_status: CapStatusPayload,
+}
+
+#[derive(Debug, Serialize)]
+struct CapStatusPayload {
+    active_alerts: usize,
+    #[serde(flatten)]
+    runtime: CapRuntimeStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,12 +79,14 @@ enum WsMessage {
     Log(LogEntry),
     Stream(StreamStatusPayload),
     Alerts(Vec<ActiveAlert>),
+    CapStatus(CapStatusPayload),
 }
 
 #[derive(Debug, Serialize)]
 struct SnapshotPayload {
     streams: Vec<StreamStatusPayload>,
     active_alerts: Vec<ActiveAlert>,
+    cap_status: CapStatusPayload,
     logs: Vec<LogEntry>,
 }
 
@@ -291,6 +302,7 @@ pub async fn run_server(
     let protected_router = Router::new()
         .route("/api/logs", get(logs_handler))
         .route("/api/status", get(status_handler))
+        .route("/api/cap-status", get(cap_status_handler))
         .layer(cors_layer())
         .with_state(state.clone())
         .route_layer(middleware::from_fn(auth));
@@ -329,14 +341,23 @@ async fn logs_handler(
 async fn status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Json<StatusResponse> {
     maybe_persist_deeplink_host(&headers, &state).await;
     let streams = state.monitoring.stream_snapshots();
-    let active_alerts = {
+    let (active_alerts, cap_status) = {
         let guard = state.app_state.lock().await;
-        guard.active_alerts.clone()
+        (
+            guard.active_alerts.clone(),
+            build_cap_status_payload(&guard.active_alerts, &guard.cap_status),
+        )
     };
     Json(StatusResponse {
         streams,
         active_alerts,
+        cap_status,
     })
+}
+
+async fn cap_status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Json<CapStatusPayload> {
+    maybe_persist_deeplink_host(&headers, &state).await;
+    Json(cap_status_snapshot(&state).await)
 }
 
 async fn ws_handler(
@@ -369,10 +390,17 @@ async fn ws_connection(mut socket: WebSocket, state: ApiState) {
             event = events.recv() => {
                 match event {
                     Ok(event) => {
+                        let should_send_cap_status = matches!(event, MonitoringEvent::Alerts(_));
                         let message: WsMessage = event.into();
                         if let Err(err) = send_ws_message(&mut socket, &message).await {
                             error!("Failed to send monitoring event: {err}");
                             break;
+                        }
+                        if should_send_cap_status {
+                            if let Err(err) = send_cap_status_update(&mut socket, &state).await {
+                                error!("Failed to send CAP status update: {err}");
+                                break;
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -395,6 +423,10 @@ async fn ws_connection(mut socket: WebSocket, state: ApiState) {
                 }
             }
             _ = heartbeat.tick() => {
+                if let Err(err) = send_cap_status_update(&mut socket, &state).await {
+                    error!("Failed to send CAP status heartbeat update: {err}");
+                    break;
+                }
                 if socket.send(Message::Ping(Vec::new())).await.is_err() {
                     break;
                 }
@@ -408,16 +440,45 @@ async fn ws_connection(mut socket: WebSocket, state: ApiState) {
 async fn send_snapshot(socket: &mut WebSocket, state: &ApiState) -> Result<()> {
     let streams = state.monitoring.stream_snapshots();
     let logs = state.monitoring.recent_logs(100);
-    let active_alerts = {
+    let (active_alerts, cap_status) = {
         let guard = state.app_state.lock().await;
-        guard.active_alerts.clone()
+        (
+            guard.active_alerts.clone(),
+            build_cap_status_payload(&guard.active_alerts, &guard.cap_status),
+        )
     };
     let snapshot = WsMessage::Snapshot(SnapshotPayload {
         streams,
         active_alerts,
+        cap_status,
         logs,
     });
     send_ws_message(socket, &snapshot).await
+}
+
+async fn send_cap_status_update(socket: &mut WebSocket, state: &ApiState) -> Result<()> {
+    let status = cap_status_snapshot(state).await;
+    send_ws_message(socket, &WsMessage::CapStatus(status)).await
+}
+
+async fn cap_status_snapshot(state: &ApiState) -> CapStatusPayload {
+    let guard = state.app_state.lock().await;
+    build_cap_status_payload(&guard.active_alerts, &guard.cap_status)
+}
+
+fn build_cap_status_payload(
+    active_alerts: &[ActiveAlert],
+    runtime: &CapRuntimeStatus,
+) -> CapStatusPayload {
+    let active_cap_alerts = active_alerts
+        .iter()
+        .filter(|alert| alert.raw_header.contains(CAP_HEADER_SOURCE_MARKER))
+        .count();
+
+    CapStatusPayload {
+        active_alerts: active_cap_alerts,
+        runtime: runtime.clone(),
+    }
 }
 
 async fn send_ws_message(socket: &mut WebSocket, message: &WsMessage) -> Result<()> {

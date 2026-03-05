@@ -1,9 +1,17 @@
 use crate::filter::{self, FilterRule};
 use anyhow::{anyhow, Context, Result};
 use chrono_tz::Tz;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapEndpoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -17,7 +25,7 @@ pub struct Config {
     pub icecast_outro: PathBuf,
     pub should_relay: bool,
     pub process_cap_alerts: bool,
-    pub cap_endpoints: Vec<String>,
+    pub cap_endpoints: Vec<CapEndpoint>,
     pub should_log_all_alerts: bool,
     pub icecast_stream_urls: Vec<String>,
     pub shared_state_dir: PathBuf,
@@ -167,7 +175,7 @@ impl Config {
             ));
         }
 
-        let cap_endpoints: Vec<String> = config_json
+        let cap_endpoints: Vec<CapEndpoint> = config_json
             .get("CAP_ENDPOINTS")
             .and_then(|v| v.as_array())
             .map(|entries| {
@@ -178,14 +186,26 @@ impl Config {
                             .as_str()
                             .map(str::trim)
                             .filter(|url| !url.is_empty())
-                            .map(str::to_string)
+                            .map(|url| CapEndpoint {
+                                name: None,
+                                url: url.to_string(),
+                            })
                             .or_else(|| {
-                                entry
+                                let url = entry
                                     .get("url")
                                     .and_then(|v| v.as_str())
                                     .map(str::trim)
-                                    .filter(|url| !url.is_empty())
-                                    .map(str::to_string)
+                                    .filter(|url| !url.is_empty())?;
+                                let name = entry
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|name| !name.is_empty())
+                                    .map(str::to_string);
+                                Some(CapEndpoint {
+                                    name,
+                                    url: url.to_string(),
+                                })
                             })
                     })
                     .collect()

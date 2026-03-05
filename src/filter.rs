@@ -25,11 +25,17 @@ pub struct FilterRule {
 }
 
 impl FilterRule {
-    fn matches(&self, normalized_code: &str) -> bool {
+    fn matches_exact(&self, normalized_code: &str) -> bool {
         self.matchers.iter().any(|matcher| match matcher {
-            EventCodeMatcher::Wildcard => true,
             EventCodeMatcher::Exact(expected) => expected == normalized_code,
+            EventCodeMatcher::Wildcard => false,
         })
+    }
+
+    fn has_wildcard(&self) -> bool {
+        self.matchers
+            .iter()
+            .any(|matcher| matches!(matcher, EventCodeMatcher::Wildcard))
     }
 }
 
@@ -39,6 +45,14 @@ lazy_static! {
 
 pub fn parse_filters(config_json: &Value) -> Vec<FilterRule> {
     let mut filters = Vec::new();
+
+    let filters_enabled = config_json
+        .get("ENABLE_FILTERS")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !filters_enabled {
+        return filters;
+    }
 
     let Some(entries) = config_json.get("FILTERS").and_then(Value::as_array) else {
         return filters;
@@ -74,12 +88,12 @@ pub fn parse_filters(config_json: &Value) -> Vec<FilterRule> {
 
         let Some(action_str) = entry.get("action").and_then(Value::as_str) else {
             warn!(
-                "Filter '{}' missing action field; defaulting to relay",
+                "Filter '{}' missing action field; defaulting to log",
                 name
             );
             filters.push(FilterRule {
                 name: name.to_string(),
-                action: FilterAction::Relay,
+                action: FilterAction::Log,
                 matchers,
             });
             continue;
@@ -118,7 +132,19 @@ pub fn determine_filter_name(event_code: &str) -> String {
 
 pub fn match_filter<'a>(filters: &'a [FilterRule], event_code: &str) -> Option<&'a FilterRule> {
     let normalized = normalize_event_code(event_code);
-    filters.iter().find(|rule| rule.matches(&normalized))
+    let mut wildcard_match: Option<&FilterRule> = None;
+
+    for rule in filters {
+        if rule.matches_exact(&normalized) {
+            return Some(rule);
+        }
+
+        if wildcard_match.is_none() && rule.has_wildcard() {
+            wildcard_match = Some(rule);
+        }
+    }
+
+    wildcard_match
 }
 
 #[allow(dead_code)]
@@ -133,7 +159,7 @@ pub fn should_log_alert(event_code: &str) -> bool {
     let filters = GLOBAL_FILTERS.read();
     match_filter(&filters, event_code)
         .map(|rule| rule.action == FilterAction::Log || rule.action == FilterAction::Relay)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub fn should_forward_alert(event_code: &str) -> bool {

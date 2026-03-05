@@ -105,28 +105,27 @@ async fn main() -> Result<()> {
         monitoring.clone(),
     ));
     let log_cleanup_handle = tokio::spawn(cleanup::run_log_cleanup(config.clone()));
-    let reload_handler_handle = tokio::spawn(run_reload_handler(app_state.clone(), reload_tx));
+    let reload_handler_handle =
+        tokio::spawn(run_reload_handler(app_state.clone(), reload_tx.clone()));
     let api_handle = tokio::spawn(backend::run_server(
         config.monitoring_bind_addr,
         app_state.clone(),
         monitoring.clone(),
         config.clone(),
     ));
-    if config.process_cap_alerts {
-        tokio::spawn(cap::run_cap_processor(
-            config.clone(),
-            app_state.clone(),
-            monitoring.clone(),
-        ));
-    } else {
-        info!("CAP processor disabled because PROCESS_CAP_ALERTS is false in your config.json file. No CAP alerts will be processed or forwarded to webhooks.");
-    }
+    let cap_supervisor_handle = tokio::spawn(cap::run_cap_supervisor(
+        config.clone(),
+        app_state.clone(),
+        monitoring.clone(),
+        reload_tx.subscribe(),
+    ));
 
     tokio::select! {
         _ = audio_processor_handle => info!("Audio processor task exited."),
         _ = alert_manager_handle => info!("Alert manager task exited."),
         _ = state_cleanup_handle => info!("State cleanup task exited."),
         _ = log_cleanup_handle => info!("Log cleanup task exited."),
+        _ = cap_supervisor_handle => info!("CAP supervisor task exited."),
         _ = reload_handler_handle => info!("Reload handler task exited."),
         _ = api_handle => info!("Monitoring API task exited."),
     };

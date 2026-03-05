@@ -20,7 +20,8 @@ use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -66,6 +67,88 @@ struct CapAlert {
     source_url: String,
 }
 
+fn spawn_cap_processor_task(
+    config: Config,
+    app_state: Arc<Mutex<AppState>>,
+    monitoring: MonitoringHub,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(err) = run_cap_processor(config, app_state, monitoring).await {
+            warn!("CAP processor task exited with error: {}", err);
+        }
+    })
+}
+
+async fn sync_cap_runtime_config_status(app_state: &Arc<Mutex<AppState>>, config: &Config) {
+    let mut guard = app_state.lock().await;
+    guard.cap_status.enabled = config.process_cap_alerts;
+    guard.cap_status.endpoint_count = config.cap_endpoints.len();
+    guard.cap_status.endpoints = config.cap_endpoints.clone();
+}
+
+pub async fn run_cap_supervisor(
+    initial_config: Config,
+    app_state: Arc<Mutex<AppState>>,
+    monitoring: MonitoringHub,
+    mut reload_rx: broadcast::Receiver<Config>,
+) -> Result<()> {
+    let mut current_config = initial_config;
+    sync_cap_runtime_config_status(&app_state, &current_config).await;
+    let mut cap_task: Option<JoinHandle<()>> = if current_config.process_cap_alerts {
+        Some(spawn_cap_processor_task(
+            current_config.clone(),
+            app_state.clone(),
+            monitoring.clone(),
+        ))
+    } else {
+        info!("CAP processor disabled because PROCESS_CAP_ALERTS is false in your config.json file. No CAP alerts will be processed or forwarded to webhooks.");
+        None
+    };
+
+    loop {
+        match reload_rx.recv().await {
+            Ok(new_config) => {
+                current_config = new_config;
+                sync_cap_runtime_config_status(&app_state, &current_config).await;
+
+                if let Some(task) = cap_task.take() {
+                    task.abort();
+                    match task.await {
+                        Ok(_) => {}
+                        Err(err) if err.is_cancelled() => {}
+                        Err(err) => warn!("CAP processor task join error: {}", err),
+                    }
+                }
+
+                if current_config.process_cap_alerts {
+                    info!("CAP processor configuration reloaded; restarting CAP processor task.");
+                    cap_task = Some(spawn_cap_processor_task(
+                        current_config.clone(),
+                        app_state.clone(),
+                        monitoring.clone(),
+                    ));
+                } else {
+                    info!("CAP processor disabled by reloaded configuration.");
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(
+                    "CAP supervisor lagged on config updates (skipped {} message(s)); waiting for next update.",
+                    skipped
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    if let Some(task) = cap_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+
+    Ok(())
+}
+
 pub async fn run_cap_processor(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
@@ -103,18 +186,39 @@ pub async fn run_cap_processor(
         seen_alerts.retain(|_, expires_at| *expires_at > now);
 
         for endpoint in &config.cap_endpoints {
-            debug!("Polling CAP endpoint {}", endpoint);
-            let feed_xml = match fetch_text(&client, endpoint).await {
+            let endpoint_url = endpoint.url.as_str();
+            let poll_time = Utc::now();
+            {
+                let mut guard = app_state.lock().await;
+                guard.cap_status.last_poll_at = Some(poll_time);
+                guard.cap_status.polls_attempted =
+                    guard.cap_status.polls_attempted.saturating_add(1);
+            }
+
+            debug!("Polling CAP endpoint {}", endpoint_url);
+            let feed_xml = match fetch_text(&client, endpoint_url).await {
                 Ok(xml) => {
+                    {
+                        let mut guard = app_state.lock().await;
+                        guard.cap_status.last_successful_poll_at = Some(poll_time);
+                        guard.cap_status.last_poll_error = None;
+                    }
                     debug!(
                         "Fetched CAP endpoint {} successfully ({} bytes)",
-                        endpoint,
+                        endpoint_url,
                         xml.len()
                     );
                     xml
                 }
                 Err(err) => {
-                    warn!("Failed to fetch CAP endpoint {}: {}", endpoint, err);
+                    let err_text = err.to_string();
+                    {
+                        let mut guard = app_state.lock().await;
+                        guard.cap_status.polls_failed =
+                            guard.cap_status.polls_failed.saturating_add(1);
+                        guard.cap_status.last_poll_error = Some(err_text.clone());
+                    }
+                    warn!("Failed to fetch CAP endpoint {}: {}", endpoint_url, err);
                     continue;
                 }
             };
@@ -122,23 +226,23 @@ pub async fn run_cap_processor(
             let alert_sources = if looks_like_alert_xml(&feed_xml) {
                 debug!(
                     "CAP endpoint {} returned an alert document directly",
-                    endpoint
+                    endpoint_url
                 );
-                vec![(endpoint.clone(), feed_xml)]
+                vec![(endpoint_url.to_string(), feed_xml)]
             } else {
                 let links = match parse_feed_alert_links(&feed_xml) {
                     Ok(links) => {
-                        debug!("Parsed {} CAP alert link(s) from {}", links.len(), endpoint);
+                        debug!("Parsed {} CAP alert link(s) from {}", links.len(), endpoint_url);
                         links
                     }
                     Err(err) => {
-                        warn!("Failed to parse CAP feed {}: {}", endpoint, err);
+                        warn!("Failed to parse CAP feed {}: {}", endpoint_url, err);
                         continue;
                     }
                 };
 
                 if links.is_empty() {
-                    debug!("No CAP entries found at endpoint {}", endpoint);
+                    debug!("No CAP entries found at endpoint {}", endpoint_url);
                     continue;
                 }
 
@@ -249,7 +353,7 @@ pub async fn run_cap_processor(
                     &app_state,
                     &monitoring,
                     &client,
-                    endpoint,
+                    endpoint_url,
                     parsed.clone(),
                 )
                 .await;
@@ -294,7 +398,15 @@ async fn process_cap_alert(
 ) {
     let event_code = normalize_event_code(&alert.event_code);
 
-    if !is_cap_relevant(&alert.fips, &config.watched_fips) {
+    let cap_relevant = is_cap_relevant(&alert.fips, &config.watched_fips);
+    let should_log_cap_entry = cap_relevant || config.should_log_all_alerts;
+    if should_log_cap_entry {
+        if let Err(err) = append_cap_log(config, &alert).await {
+            warn!("Failed to append CAP log entry: {}", err);
+        }
+    }
+
+    if !cap_relevant {
         debug!(
             "Skipping CAP alert {} ({}) because FIPS {:?} does not match watched set",
             alert.identifier, event_code, alert.fips
@@ -354,17 +466,14 @@ async fn process_cap_alert(
             .active_alerts
             .retain(|existing| existing.expires_at > now && existing.raw_header != raw_header);
         guard.active_alerts.push(active_alert.clone());
+        guard.cap_status.last_alert_received_at = Some(active_alert.received_at);
+        guard.cap_status.last_alert_event_code = Some(event_code.clone());
+        guard.cap_status.last_alert_source = Some(source_stream.to_string());
+        guard.cap_status.alerts_processed = guard.cap_status.alerts_processed.saturating_add(1);
         guard.active_alerts.clone()
     };
 
     monitoring.broadcast_alerts(active_snapshot, Some(source_stream), Some(&event_code));
-
-    let should_log = config.should_log_all_alerts || filter::should_log_alert(&event_code);
-    if should_log {
-        if let Err(err) = append_cap_log(config, &alert).await {
-            warn!("Failed to append CAP log entry: {}", err);
-        }
-    }
 
     let cap_recording_path = match fetch_cap_audio_recording(
         client,
@@ -1218,7 +1327,7 @@ async fn append_cap_log(config: &Config, alert: &CapAlert) -> Result<()> {
     let timestamp = local_time.format("%Y-%m-%d %l:%M:%S %p");
 
     let log_line = format!(
-        "{}: {} (Received @ {})",
+        "{}: {} (Received @ {})\n\n",
         header_string, alert_desc, timestamp
     );
 

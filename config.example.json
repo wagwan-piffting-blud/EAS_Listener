@@ -52,11 +52,11 @@
     "ICECAST_OUTRO": "/app/leadout.mp3",
     "SHOULD_RELAY_DASDEC": false,
     "DASDEC_URL": "http://192.168.1.100:5000/send",
-    "ENABLE_FILTERS": false,
+    "ENABLE_FILTERS": true,
     "FILTERS": [
         {
-            "name": "RWT Filter",
-            "event_codes": ["RWT"],
+            "name": "Spammy Event Filter",
+            "event_codes": ["RWT", "RMT", "DMO"],
             "action": "ignore"
         },
         {

@@ -21,6 +21,7 @@
         nextAudioAvailabilityCheckAt: 0,
         audioPollInFlight: false,
         logs: [],
+        capStatus: null,
     };
     let audioAvailabilityPollTimer = null;
     let audioUnavailableCountdownTimer = null;
@@ -34,6 +35,8 @@
         alertCount: document.getElementById("alertCount"),
         logList: document.getElementById("logList"),
         logCount: document.getElementById("logCount"),
+        capStatusSection: document.getElementById("capStatusSection"),
+        capStatus: document.getElementById("capStatus"),
     };
 
     function setWsStatus(text, statusClass) {
@@ -77,6 +80,15 @@
         return `${secs}s`;
     }
 
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
     function applyStatusPayload(payload) {
         if (payload.streams) {
             state.streams.clear();
@@ -87,8 +99,12 @@
         if (payload.active_alerts) {
             setActiveAlerts(payload.active_alerts);
         }
+        if (payload.cap_status !== undefined) {
+            state.capStatus = payload.cap_status;
+        }
         renderStreams();
         renderAlerts();
+        renderCapStatus();
     }
 
     function buildAlertSignature(alerts) {
@@ -714,6 +730,97 @@
         }
     }
 
+    function renderCapStatus() {
+        const section = elements.capStatusSection;
+        const container = elements.capStatus;
+        if (!container) return;
+        container.innerHTML = "";
+
+        const cap = state.capStatus;
+        if (!cap || typeof cap !== "object") {
+            if (section) section.style.display = "";
+            container.innerHTML = '<div class="empty-state">CAP status unavailable.</div>';
+            return;
+        }
+
+        if (!cap.enabled) {
+            if (section) section.style.display = "none";
+            return;
+        }
+
+        if (section) section.style.display = "";
+
+        const endpointCount = Number(cap.endpoint_count) || 0;
+        const endpoints = Array.isArray(cap.endpoints) ? cap.endpoints : [];
+        const endpointRows = endpoints.length
+            ? endpoints
+                .map((entry, index) => {
+                    const endpointUrl = typeof entry === "string" ? entry : (entry?.url || "");
+                    if (!endpointUrl) {
+                        return `<div class="cap-endpoint-row"><strong>Endpoint ${index + 1}</strong></div>`;
+                    }
+
+                    let endpointName =
+                        typeof entry === "object" && typeof entry?.name === "string"
+                            ? entry.name.trim()
+                            : "";
+                    if (!endpointName) {
+                        try {
+                            endpointName = new URL(endpointUrl).hostname;
+                        } catch (_err) {
+                            endpointName = `Endpoint ${index + 1}`;
+                        }
+                    }
+
+                    const safeName = escapeHtml(endpointName);
+                    const safeUrl = escapeHtml(endpointUrl);
+                    return `<div class="cap-endpoint-row"><strong>${safeName}</strong> <span class="smallertext">(<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: rgba(243, 245, 249, 0.65) !important;">${safeUrl}</a>)</span></div>`;
+                })
+                .join("")
+            : '<div class="cap-endpoint-row">None configured</div>';
+        const lastPoll = cap.last_poll_at ? formatTimestamp(cap.last_poll_at * 1000) : "Never";
+        const lastGoodPoll = cap.last_successful_poll_at
+            ? formatTimestamp(cap.last_successful_poll_at * 1000)
+            : "Never";
+        const lastAlertAt = cap.last_alert_received_at
+            ? formatTimestamp(cap.last_alert_received_at * 1000)
+            : "—";
+        const lastAlertCode = cap.last_alert_event_code
+            ? escapeHtml(cap.last_alert_event_code)
+            : "—";
+        const lastAlertSource = cap.last_alert_source
+            ? escapeHtml(cap.last_alert_source)
+            : "—";
+        const pollError = cap.last_poll_error ? escapeHtml(cap.last_poll_error) : "";
+
+        const card = document.createElement("article");
+        card.className = `cap-card ${pollError ? "degraded" : "healthy"}`;
+        card.innerHTML = `
+            <div class="cap-header">
+                <div class="status-tag">${pollError ? "Degraded" : "Healthy"}</div>
+                <div class="cap-subtitle">CAP monitor is active and publishing status updates.</div>
+            </div>
+            <div class="cap-meta">
+                <span><strong>Status:</strong> ${cap.enabled ? "Enabled" : "Disabled"}</span>
+                <span><strong>Endpoints:</strong> ${endpointCount}</span>
+                <span><strong>Poll attempts:</strong> ${cap.polls_attempted || 0}</span>
+                <span><strong>Poll failures:</strong> ${cap.polls_failed || 0}</span>
+                <span><strong>Processed CAP alerts:</strong> ${cap.alerts_processed || 0}</span>
+                <span><strong>Active CAP alerts:</strong> ${cap.active_alerts || 0}</span>
+                <span><strong>Last poll:</strong> ${lastPoll}</span>
+                <span><strong>Last successful poll:</strong> ${lastGoodPoll}</span>
+                <span><strong>Last CAP alert:</strong> ${lastAlertCode} at ${lastAlertAt}</span>
+                <span><strong>Last CAP source:</strong> ${lastAlertSource}</span>
+            </div>
+            ${pollError ? `<div class="cap-error"><strong>Last poll error:</strong><pre>${pollError}</pre></div>` : ""}
+            <div class="cap-endpoints">
+                <div class="cap-endpoints-title">Configured endpoints</div>
+                ${endpointRows}
+            </div>
+        `;
+        container.appendChild(card);
+    }
+
     async function fetchJson(path) {
         try {
             const protocol = window.location.protocol === "https:" ? "https" : "http";
@@ -782,6 +889,12 @@
                     if (Array.isArray(payload.payload)) {
                         setActiveAlerts(payload.payload);
                         renderAlerts();
+                    }
+                    break;
+                case "CapStatus":
+                    if (payload.payload && typeof payload.payload === "object") {
+                        state.capStatus = payload.payload;
+                        renderCapStatus();
                     }
                     break;
                 default:

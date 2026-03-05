@@ -1,3 +1,4 @@
+use crate::config::CapEndpoint;
 use crate::filter::{self, FilterRule};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -41,8 +42,28 @@ impl ActiveAlert {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CapRuntimeStatus {
+    pub enabled: bool,
+    pub endpoint_count: usize,
+    pub endpoints: Vec<CapEndpoint>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub last_poll_at: Option<DateTime<Utc>>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub last_successful_poll_at: Option<DateTime<Utc>>,
+    pub last_poll_error: Option<String>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub last_alert_received_at: Option<DateTime<Utc>>,
+    pub last_alert_event_code: Option<String>,
+    pub last_alert_source: Option<String>,
+    pub polls_attempted: u64,
+    pub polls_failed: u64,
+    pub alerts_processed: u64,
+}
+
 pub struct AppState {
     pub active_alerts: Vec<ActiveAlert>,
+    pub cap_status: CapRuntimeStatus,
     filters: Vec<FilterRule>,
 }
 
@@ -51,6 +72,7 @@ impl AppState {
         filter::install_filters(filters.clone());
         Self {
             active_alerts: Vec::new(),
+            cap_status: CapRuntimeStatus::default(),
             filters,
         }
     }
