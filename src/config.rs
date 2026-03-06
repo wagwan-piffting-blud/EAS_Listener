@@ -38,6 +38,7 @@ pub struct Config {
     pub monitoring_max_log_entries: usize,
     pub monitoring_activity_window_secs: u64,
     pub use_reverse_proxy: bool,
+    pub preferred_senderid: String,
     pub monitoring_bind_port: u16,
     pub ws_reverse_proxy_url: String,
     pub dashboard_username: String,
@@ -297,6 +298,12 @@ impl Config {
             .unwrap_or("localhost")
             .to_string();
 
+        let preferred_senderid = config_json
+            .get("PREFERRED_SENDERID")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
         let local_deeplink_host = std::env::var("LOCAL_DEEPLINK_HOST")
             .ok()
             .map(|v| v.trim().to_string())
@@ -346,6 +353,7 @@ impl Config {
             monitoring_bind_addr,
             monitoring_max_log_entries,
             monitoring_activity_window_secs,
+            preferred_senderid,
             use_reverse_proxy,
             monitoring_bind_port,
             ws_reverse_proxy_url,

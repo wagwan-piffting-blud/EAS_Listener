@@ -65,6 +65,20 @@ fi
 
 chmod -R 777 /app /data /var/www/html
 
+if [ "${START_ICECAST:-false}" = "true" ]; then
+    ICECAST_CONFIG="${ICECAST_CONFIG_PATH:-/etc/icecast2/icecast.xml}"
+    if [ ! -f "$ICECAST_CONFIG" ]; then
+        echo "Icecast config not found at $ICECAST_CONFIG" >&2
+        exit 1
+    fi
+
+    echo "Starting Icecast..."
+    if ! su -s /bin/bash -c "icecast2 -c \"$ICECAST_CONFIG\" -b" icecast2; then
+        echo "Failed to start Icecast with $ICECAST_CONFIG" >&2
+        exit 1
+    fi
+fi
+
 if [ "${PROCESS_CAP_ALERTS:-true}" = "false" ]; then
     export PROCESS_CAP_ALERTS=false
 else

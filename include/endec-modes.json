@@ -1,0 +1,13 @@
+{
+    "TEMPLATES": {
+        "TFT": "__PREFIX__ for the following counties/areas: __FIPS__ at __START__ effective until __END__. message from __SENDER__.",
+        "SAGE": "__ORG__ __HAVEHAS__ issued __EVENTCODE__ for __FIPS__ beginning at __START__ and ending at __END__ (__SENDER__)",
+        "TRILITHIC6": "__ORG__ __HAVEHAS__ issued __EVENTCODE__ for __FIPS__. Effective Until __END__.",
+        "TRILITHIC8PLUS": "__ORG__ __HAVEHAS__ issued __EVENTCODE__ for __FIPS__. Effective Until __END__.  __SENDER__",
+        "BURK": "__ORG__ __HAVEHAS__ issued __EVENTTEXT__ for __FIPS__ on __START__ effective until __END__.",
+        "DAS1": "__ORG__ HAS ISSUED __EVENTCODE__ FOR THE FOLLOWING COUNTIES/AREAS: __FIPS__ AT __START__ EFFECTIVE UNTIL __END__. MESSAGE FROM __SENDER__.",
+        "DAS2PLUS": "__ORG__ has issued __EVENTCODE__ for the following counties or areas: __FIPS__ at __START__ Effective until __END__. Message from __SENDER__.",
+        "HOLLYANNE": "__ORG__ HAS ISSUED __EVENTCODE__ __FIPS__ BEGINNING AT __START__ AND ENDING AT __END__. MESSAGE FROM __SENDER__.",
+        "GORMAN": "__EVENTCODE__ HAS BEEN ISSUED FOR THE FOLLOWING COUNTIES/AREAS: __FIPS__ AT __START__ EFFECTIVE UNTIL __END__. MESSAGE FROM __SENDER__."
+    }
+}

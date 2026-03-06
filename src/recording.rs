@@ -3,6 +3,7 @@ use crate::header;
 use anyhow::Result;
 use chrono::Local;
 use hound::{WavSpec, WavWriter};
+use serde::Deserialize;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -134,14 +135,16 @@ fn next_available_recording_path(
 
 fn event_code_from_header(header_text: &str) -> String {
     let trimmed = header_text.trim();
-    let mut parts = trimmed.split('-');
-    if matches!(parts.next(), Some("ZCZC")) {
-        let _originator = parts.next();
-        if let Some(event_code) = parts.next() {
-            return sanitize_filename_label(event_code);
-        }
+    #[derive(Deserialize)]
+    struct ParsedHeaderEventCode {
+        event_code: String,
     }
-    "UNK".to_string()
+
+    crate::e2t_ng::parse_header_json(trimmed)
+        .ok()
+        .and_then(|json| serde_json::from_str::<ParsedHeaderEventCode>(&json).ok())
+        .map(|parsed| sanitize_filename_label(parsed.event_code.as_str()))
+        .unwrap_or_else(|| "UNK".to_string())
 }
 
 fn stream_label_from_source(source_stream: &str) -> String {

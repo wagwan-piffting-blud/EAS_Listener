@@ -415,7 +415,7 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
     header("Content-Type: application/json");
 
     $alerts_file_path = getenv("SHARED_STATE_DIR") . "/" . getenv("DEDICATED_ALERT_LOG_FILE");
-    $max_alerts = 50;
+    $max_alerts = $_GET['max_alerts'] ?? 50;
     $alert_lines = [];
     $alertdata = [];
     $included_alert_count = 0;
@@ -456,8 +456,16 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
                 ];
                 $included_alert_count += 1;
 
-                if(count($alert_lines) > $max_alerts) {
+                if($max_alerts == "all") {
+                    continue;
+                }
+
+                elseif(count($alert_lines) > $max_alerts) {
                     array_shift($alert_lines);
+                }
+
+                else {
+                    continue;
                 }
             }
 
@@ -543,6 +551,7 @@ else { ?><!DOCTYPE html>
                         Watched FIPS
                     </span>
                     <span id="oldAlertCount" class="pill">None</span>
+                    <input id="maxAlertCount" type="text" placeholder="Max. Alerts to Display" pattern="^(\d+|all)$" />
                 </h2>
                 <p class="smalltext">Note: Alerts are shown in chronological order (old to new, top to bottom) on this page.</p>
                 <div id="oldAlertList" class="section-scroll"></div>

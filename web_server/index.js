@@ -8,6 +8,81 @@
     const AUDIO_PROBE_BACKOFF_BASE_MS = 3000;
     const AUDIO_PROBE_BACKOFF_MAX_MS = 60000;
     const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
+    const STREAM_RENDER_FALLBACK_DELAY_MS = 16;
+    const TIMESTAMP_WITH_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    });
+    const TIMESTAMP_DATE_ONLY_FORMATTER = new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+    });
+    const LOCATION_CODE_PATTERN = /\d{6}/g;
+    const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
+    const STATE_AND_TERRITORY_NAMES = Object.freeze({
+        AL: "Alabama",
+        AK: "Alaska",
+        AZ: "Arizona",
+        AR: "Arkansas",
+        CA: "California",
+        CO: "Colorado",
+        CT: "Connecticut",
+        DE: "Delaware",
+        FL: "Florida",
+        GA: "Georgia",
+        HI: "Hawaii",
+        ID: "Idaho",
+        IL: "Illinois",
+        IN: "Indiana",
+        IA: "Iowa",
+        KS: "Kansas",
+        KY: "Kentucky",
+        LA: "Louisiana",
+        ME: "Maine",
+        MD: "Maryland",
+        MA: "Massachusetts",
+        MI: "Michigan",
+        MN: "Minnesota",
+        MS: "Mississippi",
+        MO: "Missouri",
+        MT: "Montana",
+        NE: "Nebraska",
+        NV: "Nevada",
+        NH: "New Hampshire",
+        NJ: "New Jersey",
+        NM: "New Mexico",
+        NY: "New York",
+        NC: "North Carolina",
+        ND: "North Dakota",
+        OH: "Ohio",
+        OK: "Oklahoma",
+        OR: "Oregon",
+        PA: "Pennsylvania",
+        RI: "Rhode Island",
+        SC: "South Carolina",
+        SD: "South Dakota",
+        TN: "Tennessee",
+        TX: "Texas",
+        UT: "Utah",
+        VT: "Vermont",
+        VA: "Virginia",
+        WA: "Washington",
+        WV: "West Virginia",
+        WI: "Wisconsin",
+        WY: "Wyoming",
+        DC: "District of Columbia",
+        AS: "American Samoa",
+        GU: "Guam",
+        MP: "Northern Mariana Islands",
+        PR: "Puerto Rico",
+        VI: "U.S. Virgin Islands",
+        UM: "U.S. Minor Outlying Islands",
+    });
     const NEW_ALERT_SOUND_SRC = window.ALERTSOUNDDATA || "";
     const NEW_ALERT_SOUND_ENABLED = window.ALERTSOUNDENABLED === true;
 
@@ -20,8 +95,15 @@
         audioProbeStateByRecordingId: new Map(),
         nextAudioAvailabilityCheckAt: 0,
         audioPollInFlight: false,
+        sameUsByFips: null,
+        sameUsSubdivByCode: null,
+        sameUsLoadPromise: null,
+        locationLabelCache: new Map(),
         logs: [],
         capStatus: null,
+        streamCardByUrl: new Map(),
+        pendingStreamUrls: new Set(),
+        streamRenderScheduled: false,
     };
     let audioAvailabilityPollTimer = null;
     let audioUnavailableCountdownTimer = null;
@@ -45,24 +127,10 @@
     }
 
     function formatTimestamp(ts, withTime = true) {
-        if (ts === null || ts === undefined) return "—";
+        if (ts === null || ts === undefined) return "-";
         const date = new Date(ts);
-        if (Number.isNaN(date.getTime())) return "—";
-        const options = withTime
-        ? {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            }
-        : {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-            };
-        return new Intl.DateTimeFormat(undefined, options).format(date);
+        if (Number.isNaN(date.getTime())) return "-";
+        return (withTime ? TIMESTAMP_WITH_TIME_FORMATTER : TIMESTAMP_DATE_ONLY_FORMATTER).format(date);
     }
 
     function formatDuration(seconds) {
@@ -89,6 +157,40 @@
             .replace(/'/g, "&#39;");
     }
 
+    function expandStateAbbreviations(value) {
+        if (!value) return "";
+        return String(value).replace(/,\s*([A-Z]{2})\b/g, (fullMatch, code) => {
+            const fullName = STATE_AND_TERRITORY_NAMES[code];
+            return fullName ? `, ${fullName}` : fullMatch;
+        });
+    }
+
+    function normalizeLocationSeparators(value) {
+        const input = String(value || "").trim();
+        if (!input) return "";
+        if (input.includes(";")) {
+            return input
+                .split(";")
+                .map((part) => part.trim())
+                .filter(Boolean)
+                .join("; ");
+        }
+
+        const parts = input
+            .split(",")
+            .map((part) => part.trim())
+            .filter(Boolean);
+        if (parts.length >= 4 && parts.length % 2 === 0) {
+            const locations = [];
+            for (let i = 0; i < parts.length; i += 2) {
+                locations.push(`${parts[i]}, ${parts[i + 1]}`);
+            }
+            return locations.join("; ");
+        }
+
+        return input;
+    }
+
     function applyStatusPayload(payload) {
         if (payload.streams) {
             state.streams.clear();
@@ -107,14 +209,34 @@
         renderCapStatus();
     }
 
+    function parsedHeaderForAlert(alert) {
+        return alert?.data?.parsed_header || null;
+    }
+
+    function eventCodeForAlert(alert) {
+        return parsedHeaderForAlert(alert)?.event_code || alert?.data?.event_code || "";
+    }
+
+    function originatorForAlert(alert) {
+        return alert?.data?.originator || parsedHeaderForAlert(alert)?.originator || "";
+    }
+
+    function locationCodesForAlert(alert) {
+        const parsed = parsedHeaderForAlert(alert);
+        if (Array.isArray(parsed?.fips_codes) && parsed.fips_codes.length) {
+            return parsed.fips_codes.join(", ");
+        }
+        return alert?.data?.locations || "";
+    }
+
     function buildAlertSignature(alerts) {
         return alerts
-            .map((alert) => `${alert.received_at || ""}:${alert.data?.event_code || ""}:${alert.raw_header || ""}`)
+            .map((alert) => `${alert.received_at || ""}:${eventCodeForAlert(alert)}:${alert.raw_header || ""}`)
             .join("|");
     }
 
     function getAlertKey(alert) {
-        return `${alert.received_at || ""}:${alert.data?.event_code || ""}:${alert.raw_header || ""}`;
+        return `${alert.received_at || ""}:${eventCodeForAlert(alert)}:${alert.raw_header || ""}`;
     }
 
     function getSortedActiveAlerts(alerts = state.activeAlerts) {
@@ -251,8 +373,17 @@
                 const blob = new Blob([arrayBuffer], { type: mime_type });
                 const url = URL.createObjectURL(blob);
                 const audio = new Audio(url);
+                let revoked = false;
+                const cleanup = () => {
+                    if (revoked) return;
+                    revoked = true;
+                    URL.revokeObjectURL(url);
+                };
+                audio.addEventListener("ended", cleanup, { once: true });
+                audio.addEventListener("error", cleanup, { once: true });
                 audio.play().catch((err) => {
                     console.error("Failed to play alert sound:", err);
+                    cleanup();
                 });
             } catch (err) {
                 console.error("Failed to parse alert sound data URI:", err);
@@ -301,70 +432,146 @@
         renderLogs();
     }
 
+    function renderStreamCard(card, stream) {
+        card.className = `stream-card ${stream.is_connected ? "online" : "offline"}`;
+        card.dataset.streamUrl = stream.stream_url;
+
+        const receivingText = stream.is_receiving_audio
+            ? "Receiving audio"
+            : "No audio activity";
+        const statusLabel = stream.is_connected ? "Connected" : "Disconnected";
+        const uptime = stream.uptime_seconds
+            ? formatDuration(stream.uptime_seconds)
+            : "-";
+
+        const lastActivity = stream.last_activity
+            ? formatTimestamp(stream.last_activity * 1000)
+            : "Never";
+
+        const lastDisconnect = stream.last_disconnect
+            ? formatTimestamp(stream.last_disconnect * 1000)
+            : "-";
+
+        const connectedSince = stream.connected_since
+            ? formatTimestamp(stream.connected_since * 1000)
+            : "-";
+
+        const lastAlertReceived = stream.last_alert_received_ts
+            ? formatTimestamp(stream.last_alert_received_ts * 1000)
+            : "-";
+
+        const streamNickname = window.ICECAST_STREAM_URL_MAPPING?.[stream.stream_url] || "";
+        const safeStreamUrl = escapeHtml(stream.stream_url || "");
+        const safeLastError = escapeHtml(stream.last_error || "-");
+        const safeLastAlertCode = escapeHtml(stream.last_alert_received || "");
+        const safeStreamNickname = escapeHtml(streamNickname);
+        const streamDisplay = safeStreamNickname
+            ? `<strong>${safeStreamNickname}</strong> <span class="smallertext">(<a href="${safeStreamUrl}" target="_blank" rel="noopener noreferrer" style="color: rgba(243, 245, 249, 0.65) !important;">${safeStreamUrl}</a>)</span>`
+            : `<a href="${safeStreamUrl}" target="_blank" rel="noopener noreferrer" style="color: rgba(243, 245, 249, 0.65) !important;">${safeStreamUrl}</a>`;
+
+        card.innerHTML = `
+            <div class="stream-header">
+            <div class="status-tag">${statusLabel}</div>
+            <div class="stream-url">${streamDisplay}</div>
+            </div>
+            <div class="stream-meta">
+                <div><strong>Audio:</strong> ${receivingText}</div>
+                <div><strong>Uptime:</strong> ${uptime}</div>
+                <div><strong>Connected since:</strong> ${connectedSince}</div>
+                <div><strong>Last audio:</strong> ${lastActivity}</div>
+                <div><strong>Last disconnect:</strong> ${lastDisconnect}</div>
+                <div><strong>Attempts:</strong> ${stream.connection_attempts}</div>
+                <div><strong>Last error:</strong> ${safeLastError}</div>
+                <div><strong>Alerts received:</strong> ${stream.alerts_received}</div>
+                <div><strong>Last alert received:</strong> ${safeLastAlertCode ? `${safeLastAlertCode} at ${lastAlertReceived}` : "-"} </div>
+            </div>
+        `;
+    }
+
+    function removeEmptyStreamState() {
+        const emptyNode = elements.streamGrid.querySelector(".empty-state");
+        if (emptyNode) {
+            emptyNode.remove();
+        }
+    }
+
+    function insertStreamCardSorted(card) {
+        const container = elements.streamGrid;
+        const cards = container.querySelectorAll("article.stream-card");
+        for (const existingCard of cards) {
+            const existingUrl = existingCard.dataset.streamUrl || "";
+            if (existingUrl.localeCompare(card.dataset.streamUrl || "") > 0) {
+                container.insertBefore(card, existingCard);
+                return;
+            }
+        }
+        container.appendChild(card);
+    }
+
+    function upsertStreamCard(stream) {
+        let card = state.streamCardByUrl.get(stream.stream_url);
+        if (!card) {
+            card = document.createElement("article");
+            renderStreamCard(card, stream);
+            removeEmptyStreamState();
+            insertStreamCardSorted(card);
+            state.streamCardByUrl.set(stream.stream_url, card);
+            return;
+        }
+        renderStreamCard(card, stream);
+    }
+
+    function scheduleQueuedStreamRender() {
+        if (state.streamRenderScheduled) return;
+        state.streamRenderScheduled = true;
+        const flush = () => {
+            state.streamRenderScheduled = false;
+            if (!state.pendingStreamUrls.size) return;
+            const pendingUrls = Array.from(state.pendingStreamUrls);
+            state.pendingStreamUrls.clear();
+            pendingUrls.forEach((streamUrl) => {
+                const stream = state.streams.get(streamUrl);
+                if (stream) {
+                    upsertStreamCard(stream);
+                }
+            });
+            elements.streamCount.textContent = `${state.streams.size} tracked`;
+        };
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(flush);
+            return;
+        }
+        setTimeout(flush, STREAM_RENDER_FALLBACK_DELAY_MS);
+    }
+
+    function queueStreamRender(streamUrl) {
+        if (!streamUrl) return;
+        state.pendingStreamUrls.add(streamUrl);
+        scheduleQueuedStreamRender();
+    }
+
     function renderStreams() {
         const container = elements.streamGrid;
-        container.innerHTML = "";
         const streams = Array.from(state.streams.values()).sort((a, b) =>
             a.stream_url.localeCompare(b.stream_url)
         );
         elements.streamCount.textContent = `${streams.length} tracked`;
+        state.pendingStreamUrls.clear();
+        state.streamCardByUrl.clear();
 
         if (!streams.length) {
             container.innerHTML = '<div class="empty-state">No streams configured.</div>';
             return;
         }
 
-        for (const stream of streams) {
+        const fragment = document.createDocumentFragment();
+        streams.forEach((stream) => {
             const card = document.createElement("article");
-            card.className = `stream-card ${stream.is_connected ? "online" : "offline"}`;
-
-            const receivingText = stream.is_receiving_audio
-                ? "Receiving audio"
-                : "No audio activity";
-            const statusLabel = stream.is_connected ? "Connected" : "Disconnected";
-            const uptime = stream.uptime_seconds
-                ? formatDuration(stream.uptime_seconds)
-                : "—";
-
-            const lastActivity = stream.last_activity
-                ? formatTimestamp(stream.last_activity * 1000)
-                : "Never";
-
-            const lastDisconnect = stream.last_disconnect
-                ? formatTimestamp(stream.last_disconnect * 1000)
-                : "—";
-
-            const connectedSince = stream.connected_since
-                ? formatTimestamp(stream.connected_since * 1000)
-                : "—";
-
-            const lastAlertReceived = stream.last_alert_received_ts
-                ? formatTimestamp(stream.last_alert_received_ts * 1000)
-                : "—";
-
-            const streamNickname = window.ICECAST_STREAM_URL_MAPPING?.[stream.stream_url] || false;
-
-            const streamDisplay = streamNickname ? `<strong>${streamNickname}</strong> <span class="smallertext">(<a href="${stream.stream_url}" target="_blank" style="color: rgba(243, 245, 249, 0.65) !important;">${stream.stream_url}</a>)</span>` : `<a href="${stream.stream_url}" target="_blank" style="color: rgba(243, 245, 249, 0.65) !important;">${stream.stream_url}</a>`;
-
-            card.innerHTML = `
-                <div class="stream-header">
-                <div class="status-tag">${statusLabel}</div>
-                <div class="stream-url">${streamDisplay}</div>
-                </div>
-                <div class="stream-meta">
-                    <div><strong>Audio:</strong> ${receivingText}</div>
-                    <div><strong>Uptime:</strong> ${uptime}</div>
-                    <div><strong>Connected since:</strong> ${connectedSince}</div>
-                    <div><strong>Last audio:</strong> ${lastActivity}</div>
-                    <div><strong>Last disconnect:</strong> ${lastDisconnect}</div>
-                    <div><strong>Attempts:</strong> ${stream.connection_attempts}</div>
-                    <div><strong>Last error:</strong> ${stream.last_error || "—"}</div>
-                    <div><strong>Alerts received:</strong> ${stream.alerts_received}</div>
-                    <div><strong>Last alert received:</strong> ${stream.last_alert_received ? stream.last_alert_received + " at " + lastAlertReceived : "—"} </div>
-                </div>
-            `;
-            container.appendChild(card);
-        }
+            renderStreamCard(card, stream);
+            state.streamCardByUrl.set(stream.stream_url, card);
+            fragment.appendChild(card);
+        });
+        container.replaceChildren(fragment);
     }
 
     function secondsToHM(totalSeconds) {
@@ -646,6 +853,83 @@
         return null;
     }
 
+    async function loadSameUsLookups() {
+        if (state.sameUsByFips && state.sameUsSubdivByCode) return;
+        if (state.sameUsLoadPromise) {
+            await state.sameUsLoadPromise;
+            return;
+        }
+
+        state.sameUsLoadPromise = (async () => {
+            try {
+                const payload = await fetchJson("/api/same-us");
+                if (!payload) {
+                    throw new Error("Empty /api/same-us response");
+                }
+                const same = payload?.SAME;
+                const subdiv = payload?.SUBDIV;
+
+                state.sameUsByFips = same && typeof same === "object" ? same : {};
+                state.sameUsSubdivByCode = subdiv && typeof subdiv === "object" ? subdiv : {};
+                state.locationLabelCache.clear();
+            } catch (err) {
+                console.error("Failed to load SAME lookup table", err);
+                state.sameUsByFips = {};
+                state.sameUsSubdivByCode = {};
+                state.locationLabelCache.clear();
+            } finally {
+                state.sameUsLoadPromise = null;
+                if (state.activeAlerts.length) {
+                    renderAlerts();
+                }
+            }
+        })();
+
+        await state.sameUsLoadPromise;
+    }
+
+    function formatLocationLabel(locationCode) {
+        if (state.locationLabelCache.has(locationCode)) {
+            return state.locationLabelCache.get(locationCode);
+        }
+
+        const subdivCode = locationCode.charAt(0);
+        const sameCode = locationCode.slice(1);
+        const sameName = state.sameUsByFips?.[sameCode];
+
+        if (!sameName) {
+            state.locationLabelCache.set(locationCode, locationCode);
+            return locationCode;
+        }
+
+        const subdivisionName = state.sameUsSubdivByCode?.[subdivCode] || "";
+        const withSubdivision = subdivisionName ? `${subdivisionName} ${sameName}` : sameName;
+        const withoutCounty = withSubdivision
+            .replace(LOCATION_COUNTY_PATTERN, "")
+            .replace(/\s{2,}/g, " ")
+            .replace(/\s+,/g, ",")
+            .trim();
+        const expanded = expandStateAbbreviations(withoutCounty);
+
+        state.locationLabelCache.set(locationCode, expanded);
+        return expanded;
+    }
+
+    function locationParser(locations) {
+        if (!locations) return "";
+        if (!state.sameUsByFips || !state.sameUsSubdivByCode) {
+            void loadSameUsLookups();
+        }
+
+        const locationCodes = String(locations).match(LOCATION_CODE_PATTERN);
+        if (!locationCodes || !locationCodes.length) {
+            const expanded = expandStateAbbreviations(String(locations).trim());
+            return normalizeLocationSeparators(expanded);
+        }
+
+        return locationCodes.map((locationCode) => formatLocationLabel(locationCode)).join("; ");
+    }
+
     function renderAlerts() {
         const container = elements.alertList;
         container.innerHTML = "";
@@ -665,19 +949,22 @@
             const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message)/i).exec(eventText)?.[1]?.toLowerCase();
             const alertKey = getAlertKey(alert);
             const availableAudioSrc = state.activeAlertAudioSrcByAlert.get(alertKey) || "";
+            const eventCode = eventCodeForAlert(alert) || "—";
+            const originator = originatorForAlert(alert) || "—";
+            const locationCodes = locationCodesForAlert(alert);
 
             card.className = `alert-card ${severity || "unknown"}`;
             card.innerHTML = `
-                <div class="event-code">${alert.data.event_code}</div>
+                <div class="event-code">${eventCode}</div>
                 <div class="headline">${eventText}</div>
                 <div class="meta">
                     <div>${alert.data.eas_text || "Alert received."}</div>
                     <br>
-                    <div><strong>Originator:</strong> ${alert.data.originator}</div>
+                    <div><strong>Originator:</strong> ${originator}</div>
                     <br>
                     <div><strong>Severity:</strong> ${severity ? severity.toUpperCase() : "Unknown"}</div>
                     <br>
-                    <div><strong>Locations:</strong> ${alert.data.locations || "—"}</div>
+                    <div><strong>Locations:</strong> ${locationParser(locationCodes) || "—"}</div>
                     <br>
                     <div><strong>Received:</strong> ${formatTimestamp(alert.received_at * 1000)}</div>
                     <br>
@@ -844,6 +1131,7 @@
         const [statusResponse, logResponse] = await Promise.all([
             fetchJson(`/api/status`),
             fetchJson(`/api/logs?tail=${LOG_FETCH_TAIL}`),
+            loadSameUsLookups(),
         ]);
 
         if (statusResponse) {
@@ -877,7 +1165,7 @@
                 case "Stream":
                     if (payload.payload?.stream_url) {
                         state.streams.set(payload.payload.stream_url, payload.payload);
-                        renderStreams();
+                        queueStreamRender(payload.payload.stream_url);
                     }
                     break;
                 case "Log":

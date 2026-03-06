@@ -1,18 +1,18 @@
 use crate::config::Config;
+use crate::e2t_ng::ParsedEasSerialized;
 use crate::filter;
 use crate::monitoring::MonitoringHub;
 use crate::recording::{self, RecordingState};
 use crate::relay::RelayState;
 use crate::state::{ActiveAlert, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -23,6 +23,8 @@ use tracing::{error, info, instrument, warn};
 
 const IMPACT_DAY_FILE: &str = "impact_day.txt";
 const SEVERE_DAY_FILE: &str = "severe_day.txt";
+const ALERT_DEDUP_WINDOW: Duration = Duration::from_secs(15 * 60);
+const ALERT_DEDUP_PRUNE_INTERVAL: usize = 256;
 
 #[inline]
 fn is_severe_alert_event_code(event_code: &str) -> bool {
@@ -86,6 +88,72 @@ fn is_alert_relevant(alert_data: &EasAlertData, watched_fips: &HashSet<String>) 
         .any(|fips| watched_fips.contains(fips))
 }
 
+#[derive(Debug, Clone)]
+struct AlertDedupEntry {
+    sender_id: String,
+    received_at: Instant,
+}
+
+#[inline]
+fn dedup_key_without_sender(raw_header: &str) -> Option<(String, String)> {
+    let trimmed = raw_header.trim().trim_end_matches('-');
+    let (prefix, sender_id) = trimmed.rsplit_once('-')?;
+    if prefix.is_empty() || sender_id.is_empty() {
+        return None;
+    }
+
+    let mut key = String::with_capacity(prefix.len() + 1);
+    key.push_str(prefix);
+    key.push('-');
+
+    Some((key, sender_id.to_string()))
+}
+
+#[inline]
+fn prune_dedup_cache(cache: &mut HashMap<String, AlertDedupEntry>, now: Instant) {
+    cache.retain(|_, entry| now.duration_since(entry.received_at) < ALERT_DEDUP_WINDOW);
+}
+
+#[inline]
+fn should_process_alert(
+    cache: &mut HashMap<String, AlertDedupEntry>,
+    raw_header: &str,
+    preferred_senderid: &str,
+    now: Instant,
+) -> bool {
+    let Some((dedup_key, sender_id)) = dedup_key_without_sender(raw_header) else {
+        return true;
+    };
+
+    let preferred = preferred_senderid.trim();
+    let incoming_is_preferred = !preferred.is_empty() && sender_id.eq_ignore_ascii_case(preferred);
+
+    if let Some(existing) = cache.get_mut(&dedup_key) {
+        if now.duration_since(existing.received_at) < ALERT_DEDUP_WINDOW {
+            let existing_is_preferred =
+                !preferred.is_empty() && existing.sender_id.eq_ignore_ascii_case(preferred);
+
+            if incoming_is_preferred && !existing_is_preferred {
+                existing.sender_id = sender_id;
+                existing.received_at = now;
+                return true;
+            }
+
+            existing.received_at = now;
+            return false;
+        }
+    }
+
+    cache.insert(
+        dedup_key,
+        AlertDedupEntry {
+            sender_id,
+            received_at: now,
+        },
+    );
+    true
+}
+
 pub async fn run_alert_manager(
     mut config: Config,
     state: Arc<Mutex<AppState>>,
@@ -96,6 +164,9 @@ pub async fn run_alert_manager(
     mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
     let mut reload_enabled = true;
+    let mut dedup_cache: HashMap<String, AlertDedupEntry> = HashMap::new();
+    let mut dedup_prune_counter = 0usize;
+
     loop {
         let (event, locations, originator, raw_header, purge_time, stream_id) = tokio::select! {
             maybe_alert = rx.recv() => {
@@ -122,19 +193,38 @@ pub async fn run_alert_manager(
             }
         };
 
+        dedup_prune_counter += 1;
+        let dedup_now = Instant::now();
+        if dedup_prune_counter >= ALERT_DEDUP_PRUNE_INTERVAL {
+            dedup_prune_counter = 0;
+            prune_dedup_cache(&mut dedup_cache, dedup_now);
+        }
+
+        if !should_process_alert(
+            &mut dedup_cache,
+            &raw_header,
+            &config.preferred_senderid,
+            dedup_now,
+        ) {
+            info!("Skipping duplicate alert within dedup window: {}", &raw_header);
+            continue;
+        }
+
         info!("Processing alert: {}", &raw_header);
 
-        let dsame_result = get_eas_details_and_log(&config, &raw_header).await;
+        let dsame_result =
+            get_eas_details_and_log(&config, &raw_header, &event, &locations, &originator).await;
         let alert_data = match &dsame_result {
             Ok(data) => data.clone(),
             Err(_) => EasAlertData {
-                eas_text: "Decoder script failed.".to_string(),
+                eas_text: "EAS decode failed.".to_string(),
                 event_text: event.clone(),
                 event_code: event,
                 fips: vec![],
                 locations,
                 originator,
                 description: None,
+                parsed_header: None,
             },
         };
 
@@ -165,7 +255,7 @@ pub async fn run_alert_manager(
 
             let dsame_text = match dsame_result {
                 Ok(data) => data.eas_text,
-                Err(e) => format!("Decoder script failed: {}", e),
+                Err(e) => format!("EAS decode failed: {}", e),
             };
 
             let value = handle_recording_and_webhook(
@@ -366,53 +456,74 @@ pub async fn run_state_cleanup(
     }
 }
 
-async fn get_eas_details_and_log(config: &Config, raw_header: &str) -> Result<EasAlertData> {
-    let header_clone = raw_header.to_string();
-    let timezone = config.timezone.clone().to_string();
-    let output = tokio::task::spawn_blocking(move || {
-        Command::new("python3")
-            .arg("/usr/local/bin/decoder.py")
-            .arg("--msg")
-            .arg(header_clone)
-            .arg("--tz")
-            .arg(timezone)
-            .output()
-    })
-    .await??;
+async fn get_eas_details_and_log(
+    config: &Config,
+    raw_header: &str,
+    _event_text: &str,
+    locations: &str,
+    _originator: &str,
+) -> Result<EasAlertData> {
+    let timezone = config.timezone.to_string();
 
-    if output.status.success() {
-        let alert_data: EasAlertData = serde_json::from_slice(&output.stdout)?;
-        let watched_fips = &config.watched_fips;
-        let write_anyways = config.should_log_all_alerts;
-        let received_at = Utc::now();
-        let local_time = received_at.with_timezone(&config.timezone);
-        let timestamp = local_time.format("%Y-%m-%d %l:%M:%S %p");
-        let log_line = format!(
-            "{}: {} (Received @ {})\n\n",
-            raw_header, alert_data.eas_text, timestamp
-        );
+    let parsed_json = crate::e2t_ng::parse_header_json(raw_header)
+        .map_err(|err| anyhow!("Invalid EAS header format: {} ({})", raw_header, err))?;
+    let parsed_header: ParsedEasSerialized = serde_json::from_str(&parsed_json)
+        .map_err(|err| anyhow!("Failed to decode parsed EAS header JSON: {}", err))?;
 
-        if is_alert_relevant(&alert_data, watched_fips) || write_anyways {
-            info!("Logging alert to file: {}", log_line.trim());
+    let eas_text = crate::e2t_ng::E2T(raw_header, "", false, Some(timezone.as_str()));
 
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&config.dedicated_alert_log_file)
-                .await?;
-            file.write_all(log_line.as_bytes()).await?;
-        } else {
-            info!(
-                "Alert not in watched FIPS (zones: {}). Skipping log write.",
-                alert_data.locations
-            );
-        }
-
-        Ok(alert_data)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("decoder.py script failed: {}", stderr);
+    if eas_text == "Invalid EAS header format" {
+        anyhow::bail!("Invalid EAS header format: {}", raw_header);
     }
+
+    let event_text = crate::webhook::determine_event_title(&parsed_header.event_code);
+
+    let locations = if locations.trim().is_empty() {
+        parsed_header.fips_codes.join(", ")
+    } else {
+        locations.to_string()
+    };
+
+    let originator = crate::webhook::determine_originator_name(&parsed_header.originator);
+
+    let alert_data = EasAlertData {
+        eas_text,
+        event_text,
+        event_code: parsed_header.event_code.clone(),
+        fips: parsed_header.fips_codes.clone(),
+        locations,
+        originator,
+        description: None,
+        parsed_header: Some(parsed_header),
+    };
+
+    let watched_fips = &config.watched_fips;
+    let write_anyways = config.should_log_all_alerts;
+    let received_at = Utc::now();
+    let local_time = received_at.with_timezone(&config.timezone);
+    let timestamp = local_time.format("%Y-%m-%d %l:%M:%S %p");
+    let log_line = format!(
+        "{}: {} (Received @ {})\n\n",
+        raw_header, alert_data.eas_text, timestamp
+    );
+
+    if is_alert_relevant(&alert_data, watched_fips) || write_anyways {
+        info!("Logging alert to file: {}", log_line.trim());
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.dedicated_alert_log_file)
+            .await?;
+        file.write_all(log_line.as_bytes()).await?;
+    } else {
+        info!(
+            "Alert not in watched FIPS (zones: {}). Skipping log write.",
+            alert_data.locations
+        );
+    }
+
+    Ok(alert_data)
 }
 
 #[instrument(skip(state_dir, app_state))]

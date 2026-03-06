@@ -19,6 +19,7 @@ mod backend;
 mod cap;
 mod cleanup;
 mod config;
+mod e2t_ng;
 mod filter;
 mod header;
 mod monitoring;

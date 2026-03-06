@@ -17,6 +17,8 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
+const STREAM_ACTIVITY_EMIT_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     pub id: u64,
@@ -61,6 +63,7 @@ struct StreamTelemetry {
     is_connected: bool,
     connected_since: Option<DateTime<Utc>>,
     last_activity: Option<DateTime<Utc>>,
+    last_activity_broadcast_at: Option<DateTime<Utc>>,
     last_disconnect: Option<DateTime<Utc>>,
     last_error: Option<String>,
     attempts: u64,
@@ -76,6 +79,7 @@ impl StreamTelemetry {
             is_connected: false,
             connected_since: None,
             last_activity: None,
+            last_activity_broadcast_at: None,
             last_disconnect: None,
             last_error: None,
             attempts: 0,
@@ -107,6 +111,7 @@ pub struct MonitoringHub {
     next_log_id: Arc<AtomicU64>,
     max_logs: usize,
     inactivity_timeout: Duration,
+    stream_activity_emit_interval: Duration,
 }
 
 impl MonitoringHub {
@@ -118,6 +123,7 @@ impl MonitoringHub {
             next_log_id: Arc::new(AtomicU64::new(1)),
             max_logs,
             inactivity_timeout,
+            stream_activity_emit_interval: STREAM_ACTIVITY_EMIT_INTERVAL,
         }
     }
 
@@ -178,6 +184,7 @@ impl MonitoringHub {
             state.is_connected = false;
             state.connected_since = None;
             state.last_activity = None;
+            state.last_activity_broadcast_at = None;
             state.last_error = None;
         });
     }
@@ -188,6 +195,7 @@ impl MonitoringHub {
             state.is_connected = true;
             state.connected_since = Some(now);
             state.last_activity = Some(now);
+            state.last_activity_broadcast_at = Some(now);
             state.last_disconnect = None;
             state.last_error = None;
         });
@@ -195,15 +203,52 @@ impl MonitoringHub {
 
     pub fn note_activity(&self, stream: &str) {
         let now = Utc::now();
-        self.update_stream(stream, |state| {
+        let inactivity_timeout = self.inactivity_timeout;
+        let emit_interval = self.stream_activity_emit_interval;
+        let payload = {
+            let mut guard = self.inner.write();
+            let state = guard
+                .streams
+                .entry(stream.to_string())
+                .or_insert_with(|| StreamTelemetry::new(stream.to_string()));
+            let was_receiving_audio = state
+                .last_activity
+                .map(|ts| {
+                    now.signed_duration_since(ts)
+                        .to_std()
+                        .map(|dur| dur <= inactivity_timeout)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
             state.last_activity = Some(now);
-        });
+            let should_emit_by_interval = state
+                .last_activity_broadcast_at
+                .map(|last| {
+                    now.signed_duration_since(last)
+                        .to_std()
+                        .map(|dur| dur >= emit_interval)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true);
+            let should_emit = !was_receiving_audio || should_emit_by_interval;
+
+            if should_emit {
+                state.last_activity_broadcast_at = Some(now);
+                Some(self.make_snapshot(state))
+            } else {
+                None
+            }
+        };
+        if let Some(payload) = payload {
+            let _ = self.events_tx.send(MonitoringEvent::Stream(payload));
+        }
     }
 
     pub fn note_error(&self, stream: &str, error: String) {
         self.update_stream(stream, move |state| {
             state.is_connected = false;
             state.connected_since = None;
+            state.last_activity_broadcast_at = None;
             state.last_disconnect = Some(Utc::now());
             state.last_error = Some(error.clone());
         });
@@ -214,6 +259,7 @@ impl MonitoringHub {
         self.update_stream(stream, |state| {
             state.is_connected = false;
             state.connected_since = None;
+            state.last_activity_broadcast_at = None;
             state.last_disconnect = Some(now);
         });
     }

@@ -103,6 +103,7 @@ header h1 {
 
 main {
     flex: 1;
+    min-height: 0;
     width: 100%;
     max-width: 100%;
     padding: clamp(1rem, 4vw, 3rem);
@@ -424,6 +425,8 @@ a {
 
 .section-scroll {
     flex: 1;
+    min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
     display: grid;
     gap: 0.75rem;
@@ -748,6 +751,23 @@ a {
     .alert-card .headline,
     .alert-card .meta {
         max-inline-size: min(62ch, 100%);
+    }
+}
+
+@media (min-width: 900px) {
+    body {
+        height: 100vh;
+        overflow: hidden;
+    }
+
+    main {
+        overflow: auto;
+    }
+
+    section,
+    section#oldAlertSection {
+        max-height: 100%;
+        overflow: hidden;
     }
 }
 

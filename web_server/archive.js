@@ -28,7 +28,12 @@ function formatTimestamp(ts, withTime = true) {
 }
 
 async function fetchArchivedAlerts() {
-    const params = new URLSearchParams({ fetch_alerts: "true" });
+    const maxAlertsInput = document.getElementById("maxAlertCount");
+    let value = maxAlertsInput.value || "50";
+    maxAlertsInput.value = value;
+
+    const params = new URLSearchParams({ fetch_alerts: "true", max_alerts: maxAlertsInput.value || "50" });
+
     if (filterWatchedFips) {
         params.set("filter_alerts", "watched_fips");
     }
@@ -282,3 +287,7 @@ if (fipsFilterToggle) {
 }
 
 renderAlerts();
+
+document.getElementById("maxAlertCount").addEventListener("change", () => {
+    renderAlerts();
+});

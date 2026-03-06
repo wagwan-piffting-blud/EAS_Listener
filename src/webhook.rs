@@ -2,9 +2,9 @@ use crate::filter;
 use crate::state::ActiveAlert;
 use crate::Config;
 use chrono::Local;
-use inflector::Inflector;
 use lazy_static::lazy_static;
 use reqwest::{multipart, Client};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -12,6 +12,14 @@ use std::io::Read;
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::warn;
+
+#[derive(Debug, Deserialize)]
+struct SameUsLookup {
+    #[serde(rename = "ORGS")]
+    orgs: HashMap<String, String>,
+    #[serde(rename = "EVENTS")]
+    events: HashMap<String, String>,
+}
 
 lazy_static! {
     static ref json_config: Config =
@@ -25,6 +33,47 @@ lazy_static! {
         .collect();
     static ref github_url: String =
         "https://github.com/wagwan-piffting-blud/EAS_Listener".to_string();
+    static ref same_us_lookup: SameUsLookup =
+        serde_json::from_str(include_str!("../include/same-us.json")).expect("parse same-us.json");
+}
+
+pub fn determine_event_title(event_code: &str) -> String {
+    let key = event_code.trim().to_ascii_uppercase();
+    match same_us_lookup.events.get(key.as_str()) {
+        Some(title) => {
+            let trimmed = title.trim();
+            let without_article = trimmed
+                .strip_prefix("an ")
+                .or_else(|| trimmed.strip_prefix("a "))
+                .or_else(|| trimmed.strip_prefix("An "))
+                .or_else(|| trimmed.strip_prefix("A "))
+                .unwrap_or(trimmed)
+                .trim();
+            if without_article.is_empty() {
+                event_code.to_string()
+            } else {
+                without_article.to_string()
+            }
+        }
+        None => event_code.to_string(),
+    }
+}
+
+pub fn determine_originator_name(originator_code: &str) -> String {
+    let key = originator_code.trim().to_ascii_uppercase();
+    same_us_lookup
+        .orgs
+        .get(key.as_str())
+        .cloned()
+        .unwrap_or_else(|| originator_code.to_string())
+}
+
+pub fn a_or_an(word: &str) -> &str {
+    let first_char = word.chars().next().unwrap_or(' ').to_ascii_lowercase();
+    match first_char {
+        'a' | 'e' | 'i' | 'o' | 'u' => "An",
+        _ => "A",
+    }
 }
 
 pub async fn send_alert_webhook(
@@ -71,23 +120,16 @@ pub async fn send_alert_webhook(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let event_title = data.event_text.to_title_case();
-    let event_title = if event_title.to_lowercase().starts_with('a')
-        || event_title.to_lowercase().starts_with("an")
-    {
-        event_title
-    } else {
-        let article = if event_title
-            .to_lowercase()
-            .starts_with(|c: char| "aeiou".contains(c))
-        {
-            "An"
-        } else {
-            "A"
-        };
-        format!("{} {}", article, event_title)
-    };
-    let apprise_title = format!("{} has just been issued/received", event_title.as_str());
+    // Fetch event title from `include/same-us.json` based on the event code in the alert data.
+    let event_code = &data.event_code;
+    let event_title = determine_event_title(&event_code);
+    let originator_code = &data.originator;
+    let originator = determine_originator_name(&originator_code);
+    let apprise_title = format!(
+        "{} {} has just been issued/received",
+        a_or_an(&event_title),
+        event_title.as_str()
+    );
     let received_timestamp = Local::now().to_rfc3339();
     let attachment_path = if let Some(path) = recording_path {
         match tokio::fs::metadata(&path).await {
@@ -107,7 +149,8 @@ pub async fn send_alert_webhook(
     let discord_embed_body = build_discord_embed_body(
         &url,
         &event_title,
-        &data.originator,
+        event_code,
+        &originator,
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
@@ -115,7 +158,7 @@ pub async fn send_alert_webhook(
     );
     let markdown_body = build_markdown_body(
         &event_title,
-        &data.originator,
+        &originator,
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
@@ -123,7 +166,7 @@ pub async fn send_alert_webhook(
     );
     let html_body = build_html_body(
         &event_title,
-        &data.originator,
+        &originator,
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
@@ -131,7 +174,7 @@ pub async fn send_alert_webhook(
     );
     let text_body = build_plain_body(
         &event_title,
-        &data.originator,
+        &originator,
         &received_timestamp,
         &data.eas_text,
         &alert.raw_header,
@@ -385,6 +428,7 @@ fn truncate_for_log(input: &str, max_bytes: usize) -> String {
 fn build_discord_embed_body(
     stream_id: &str,
     title: &str,
+    event_code: &str,
     originator: &str,
     received_timestamp: &str,
     eas_text: &str,
@@ -392,16 +436,14 @@ fn build_discord_embed_body(
     description: Option<&str>,
 ) -> serde_json::Value {
     let monitor_number = STREAM_INDEX_MAP.get(stream_id).copied().unwrap_or(999);
-    let event_code = raw_header
-        .get(9..12)
-        .unwrap_or("ZZZ")
+    let normalized_event_code = event_code
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
         .collect::<String>();
-    let filter_name = filter::determine_filter_name(&event_code);
+    let filter_name = filter::determine_filter_name(&normalized_event_code);
 
-    let img_name = if !raw_header.is_empty() && raw_header.len() >= 12 {
-        &event_code
+    let img_name = if !normalized_event_code.is_empty() {
+        normalized_event_code.as_str()
     } else {
         "ZZZ"
     };
@@ -419,7 +461,12 @@ fn build_discord_embed_body(
 
     let img_color_dec = u32::from_str_radix(img_color, 16).unwrap_or(0x808080);
     let event_title = truncate_discord_text(
-        format!("{} has just been issued/received.", title).as_str(),
+        format!(
+            "{} {} has just been issued/received.",
+            a_or_an(title),
+            title
+        )
+        .as_str(),
         256,
     );
     let author_name = truncate_discord_text(
@@ -496,8 +543,9 @@ fn build_markdown_body(
     };
 
     format!(
-        "**{} - Software ENDEC Logs**\n\n**{}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```{}\n\nPowered by [Wags' Software ENDEC]({})",
+        "**{} - Software ENDEC Logs**\n\n**{} {}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```{}\n\nPowered by [Wags' Software ENDEC]({})",
         station_name.as_str(),
+        a_or_an(title),
         title,
         originator,
         received_timestamp,
@@ -646,7 +694,7 @@ fn build_html_body(
 
     format!(
         "<p><strong>{} - Software ENDEC Logs</strong></p>\
-         <p><strong>{}</strong> has just been received from: {}</p>\
+         <p><strong>{} {}</strong> has just been received from: {}</p>\
          <p><strong>Received:</strong> {}</p>\
          <p><strong>EAS Text Data:</strong></p>\
          <pre>{}</pre>\
@@ -655,6 +703,7 @@ fn build_html_body(
          {}\
          <p>Powered by <a href=\"{}\">Wags' Software ENDEC</a></p>",
         html_escape(&station_name.as_str()),
+        html_escape(a_or_an(title)),
         html_escape(title),
         html_escape(originator),
         html_escape(received_timestamp),
@@ -679,8 +728,9 @@ fn build_plain_body(
     };
 
     format!(
-        "{} - Software ENDEC Logs\n\n{} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}{}\n\nPowered by Wags' Software ENDEC ({})",
+        "{} - Software ENDEC Logs\n\n{} {} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}{}\n\nPowered by Wags' Software ENDEC ({})",
         station_name.as_str(),
+        a_or_an(title),
         title,
         originator,
         received_timestamp,

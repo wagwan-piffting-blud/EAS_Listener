@@ -27,6 +27,9 @@ if (!empty($_POST["username"]) && !empty($_POST["password"])) {
 
     if ($_POST["username"] === $valid_user && $_POST["password"] === $valid_pass) {
         $_SESSION['authed'] = true;
+        $redirect_target = $_SESSION['redirect'] ?? basename($_SERVER["SCRIPT_FILENAME"]);
+        header("Location: " . basename($redirect_target), true, 303);
+        exit();
     } else {
         echo "<script>alert('Invalid username or password.'); window.location='" . basename($_SERVER["SCRIPT_FILENAME"]) . "';</script>";
         exit();

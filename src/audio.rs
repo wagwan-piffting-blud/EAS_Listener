@@ -702,8 +702,19 @@ fn process_stream(
                                     &julian_timestamp,
                                 );
 
-                                let tone_event_code =
-                                    raw_header.get(9..12).unwrap_or("??W").to_string();
+                                let parsed_header =
+                                    crate::e2t_ng::parse_header_json(&raw_header)
+                                    .ok()
+                                    .and_then(|json| {
+                                        serde_json::from_str::<crate::e2t_ng::ParsedEasSerialized>(
+                                            &json,
+                                        )
+                                        .ok()
+                                    });
+                                let tone_event_code = parsed_header
+                                    .as_ref()
+                                    .map(|parsed| parsed.event_code.clone())
+                                    .unwrap_or_else(|| "??W".to_string());
                                 let tone_details = format!(
                                     "Detected 1050 Hz NOAA Weather Radio tone on stream {}.",
                                     stream_for_timeout
@@ -717,6 +728,7 @@ fn process_stream(
                                         locations: "Unknown".to_string(),
                                         originator: "WXR".to_string(),
                                         description: None,
+                                        parsed_header,
                                     },
                                     raw_header.clone(),
                                     Duration::from_secs(15 * 60),

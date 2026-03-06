@@ -11,12 +11,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
+use once_cell::sync::Lazy;
 use reqwest::header;
 use reqwest::header::HeaderValue;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Method;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -28,11 +30,15 @@ use tracing::{error, info, warn};
 const DEEPLINK_HOST_CACHE_FILE: &str = "deeplink_host.txt";
 const DEEPLINK_HOST_LAST_SEEN_CACHE_FILE: &str = "deeplink_host_last_seen.txt";
 const CAP_HEADER_SOURCE_MARKER: &str = "IPAWSCAP";
+static SAME_US_LOOKUP_JSON: Lazy<serde_json::Value> = Lazy::new(|| {
+    serde_json::from_str(include_str!("../include/same-us.json")).expect("parse same-us.json")
+});
 
 #[derive(Clone)]
 struct ApiState {
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
+    cap_stream_urls: Arc<HashSet<String>>,
     config: Config,
     deeplink_host_cache: Arc<Mutex<Option<String>>>,
     last_seen_host_cache: Arc<Mutex<Option<String>>>,
@@ -291,9 +297,17 @@ pub async fn run_server(
     monitoring: MonitoringHub,
     config: Config,
 ) -> Result<()> {
+    let cap_stream_urls = Arc::new(
+        config
+            .cap_endpoints
+            .iter()
+            .map(|endpoint| endpoint.url.clone())
+            .collect(),
+    );
     let state = ApiState {
         app_state,
         monitoring,
+        cap_stream_urls,
         config,
         deeplink_host_cache: Arc::new(Mutex::new(None)),
         last_seen_host_cache: Arc::new(Mutex::new(None)),
@@ -303,6 +317,7 @@ pub async fn run_server(
         .route("/api/logs", get(logs_handler))
         .route("/api/status", get(status_handler))
         .route("/api/cap-status", get(cap_status_handler))
+        .route("/api/same-us", get(same_us_lookup_handler))
         .layer(cors_layer())
         .with_state(state.clone())
         .route_layer(middleware::from_fn(auth));
@@ -326,6 +341,14 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+async fn same_us_lookup_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    maybe_persist_deeplink_host(&headers, &state).await;
+    Json(SAME_US_LOOKUP_JSON.clone())
+}
+
 async fn logs_handler(
     Query(params): Query<LogsQuery>,
     State(state): State<ApiState>,
@@ -340,7 +363,7 @@ async fn logs_handler(
 
 async fn status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Json<StatusResponse> {
     maybe_persist_deeplink_host(&headers, &state).await;
-    let streams = state.monitoring.stream_snapshots();
+    let streams = filter_non_cap_streams(state.monitoring.stream_snapshots(), &state);
     let (active_alerts, cap_status) = {
         let guard = state.app_state.lock().await;
         (
@@ -355,7 +378,10 @@ async fn status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Js
     })
 }
 
-async fn cap_status_handler(State(state): State<ApiState>, headers: HeaderMap) -> Json<CapStatusPayload> {
+async fn cap_status_handler(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Json<CapStatusPayload> {
     maybe_persist_deeplink_host(&headers, &state).await;
     Json(cap_status_snapshot(&state).await)
 }
@@ -391,6 +417,11 @@ async fn ws_connection(mut socket: WebSocket, state: ApiState) {
                 match event {
                     Ok(event) => {
                         let should_send_cap_status = matches!(event, MonitoringEvent::Alerts(_));
+                        if let MonitoringEvent::Stream(status) = &event {
+                            if is_cap_stream_url(status.stream_url.as_str(), &state) {
+                                continue;
+                            }
+                        }
                         let message: WsMessage = event.into();
                         if let Err(err) = send_ws_message(&mut socket, &message).await {
                             error!("Failed to send monitoring event: {err}");
@@ -437,8 +468,24 @@ async fn ws_connection(mut socket: WebSocket, state: ApiState) {
     let _ = socket.close().await;
 }
 
+#[inline]
+fn is_cap_stream_url(stream_url: &str, state: &ApiState) -> bool {
+    state.cap_stream_urls.contains(stream_url)
+}
+
+fn filter_non_cap_streams(
+    mut streams: Vec<StreamStatusPayload>,
+    state: &ApiState,
+) -> Vec<StreamStatusPayload> {
+    if state.cap_stream_urls.is_empty() {
+        return streams;
+    }
+    streams.retain(|stream| !is_cap_stream_url(stream.stream_url.as_str(), state));
+    streams
+}
+
 async fn send_snapshot(socket: &mut WebSocket, state: &ApiState) -> Result<()> {
-    let streams = state.monitoring.stream_snapshots();
+    let streams = filter_non_cap_streams(state.monitoring.stream_snapshots(), state);
     let logs = state.monitoring.recent_logs(100);
     let (active_alerts, cap_status) = {
         let guard = state.app_state.lock().await;

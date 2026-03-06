@@ -8,7 +8,7 @@ use crate::state::{ActiveAlert, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use hound::{WavSpec, WavWriter};
 use roxmltree::{Document, Node};
 use std::cmp::min;
@@ -232,7 +232,11 @@ pub async fn run_cap_processor(
             } else {
                 let links = match parse_feed_alert_links(&feed_xml) {
                     Ok(links) => {
-                        debug!("Parsed {} CAP alert link(s) from {}", links.len(), endpoint_url);
+                        debug!(
+                            "Parsed {} CAP alert link(s) from {}",
+                            links.len(),
+                            endpoint_url
+                        );
                         links
                     }
                     Err(err) => {
@@ -436,8 +440,12 @@ async fn process_cap_alert(
         alert.expires,
         &alert.identifier,
     );
+    let parsed_header = crate::e2t_ng::parse_header_json(raw_header.as_str())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok());
     let purge_time = determine_purge_time(alert.expires);
-    let eas_text = build_eas_text(&alert).await;
+    let timezone = config.timezone.to_string();
+    let eas_text = build_eas_text(&alert, timezone.as_str());
     let locations = if alert.areas.is_empty() {
         "Unknown".to_string()
     } else {
@@ -455,6 +463,7 @@ async fn process_cap_alert(
             .clone()
             .unwrap_or_else(|| alert.sender.clone()),
         description: Some(alert.simple_description.clone()),
+        parsed_header,
     };
 
     let active_alert = ActiveAlert::new(alert_data, raw_header.clone(), purge_time);
@@ -475,25 +484,17 @@ async fn process_cap_alert(
 
     monitoring.broadcast_alerts(active_snapshot, Some(source_stream), Some(&event_code));
 
-    let cap_recording_path = match fetch_cap_audio_recording(
-        client,
-        config,
-        &alert,
-        &raw_header,
-        &event_code,
-        source_stream,
-    )
-    .await
-    {
-        Ok(path) => path,
-        Err(err) => {
-            warn!(
-                "Failed to process CAP audio for alert {} ({}): {}",
-                alert.identifier, event_code, err
-            );
-            None
-        }
-    };
+    let cap_recording_path =
+        match fetch_cap_audio_recording(client, config, &alert, &raw_header, &event_code).await {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(
+                    "Failed to process CAP audio for alert {} ({}): {}",
+                    alert.identifier, event_code, err
+                );
+                None
+            }
+        };
 
     if cap_recording_path.is_none() {
         debug!(
@@ -514,6 +515,7 @@ async fn process_cap_alert(
     }
 
     if action == FilterAction::Relay && config.should_relay {
+        info!("CAP alert for watched zone(s) received. Relaying...");
         if let Some(recording_path) = cap_recording_path {
             match RelayState::new(config.clone()).await {
                 Ok(relay_state) => {
@@ -991,7 +993,12 @@ async fn synthesize_cap_tts_audio(
     alert: &CapAlert,
     event_code: &str,
 ) -> Result<Option<PathBuf>> {
-    let alert_prefix_raw = build_eas_text(alert).await;
+    info!(
+        "Synthesizing CAP TTS audio for alert {} ({})",
+        alert.identifier, event_code
+    );
+    let timezone = config.timezone.to_string();
+    let alert_prefix_raw = build_eas_text(alert, timezone.as_str());
 
     let alert_prefix = if let Some((before_nws, after_nws)) =
         alert_prefix_raw.split_once("The National Weather Service in ")
@@ -1079,6 +1086,12 @@ async fn synthesize_cap_tts_audio(
         return Ok(None);
     }
 
+    info!(
+        "CAP TTS audio synthesized. ({} bytes, alert ID {})",
+        metadata.len(),
+        alert.identifier
+    );
+
     Ok(Some(tts_path))
 }
 
@@ -1137,18 +1150,7 @@ fn parse_cap_time(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
-async fn build_eas_text(alert: &CapAlert) -> String {
-    let timezone = match Config::from_config_json("/app/config.json") {
-        Ok(config) => config.timezone.to_string(),
-        Err(err) => {
-            warn!(
-                "Failed to load config while building EAS text, defaulting timezone to UTC: {}",
-                err
-            );
-            "UTC".to_string()
-        }
-    };
-
+fn build_eas_text(alert: &CapAlert, timezone: &str) -> String {
     let mut header = build_cap_raw_header(
         &alert.originator_code,
         &alert.event_code,
@@ -1168,58 +1170,15 @@ async fn build_eas_text(alert: &CapAlert) -> String {
         alert.description.clone()
     };
 
-    let output = match Command::new("python3")
-        .arg("/usr/local/bin/decoder.py")
-        .arg("--msg")
-        .arg(header)
-        .arg("--tz")
-        .arg(timezone)
-        .output()
-        .await
-    {
-        Ok(output) => output,
-        Err(err) => {
-            warn!("Failed to run EAS decoder script: {}", err);
-            return fallback_text;
-        }
-    };
-
-    if !output.status.success() {
+    let eas_text = crate::e2t_ng::E2T(&header, "", false, Some(timezone));
+    if eas_text == "Invalid EAS header format" || eas_text.trim().is_empty() {
         warn!(
-            "EAS decoder script failed with status {:?}, stderr: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            "E2T-NG failed to generate EAS text for CAP header {}, using fallback text.",
+            header
         );
-        return fallback_text;
-    }
-
-    let decoder_output = match String::from_utf8(output.stdout) {
-        Ok(text) => text,
-        Err(err) => {
-            warn!("Failed to parse EAS decoder output as UTF-8: {}", err);
-            return fallback_text;
-        }
-    };
-
-    match serde_json::from_str::<serde_json::Value>(&decoder_output) {
-        Ok(json) => json
-            .get("eas_text")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                warn!(
-                    "EAS decoder output JSON missing 'eas_text' field, output: {}",
-                    decoder_output
-                );
-                fallback_text
-            }),
-        Err(err) => {
-            warn!(
-                "Failed to parse EAS decoder output as JSON: {}, output: {}",
-                err, decoder_output
-            );
-            fallback_text
-        }
+        fallback_text
+    } else {
+        eas_text
     }
 }
 
@@ -1320,7 +1279,8 @@ async fn append_cap_log(config: &Config, alert: &CapAlert) -> Result<()> {
         &alert.identifier,
     );
 
-    let alert_desc = build_eas_text(alert).await;
+    let timezone = config.timezone.to_string();
+    let alert_desc = build_eas_text(alert, timezone.as_str());
 
     let received_at = Utc::now();
     let local_time = received_at.with_timezone(&config.timezone);
@@ -1519,7 +1479,6 @@ async fn fetch_cap_audio_recording(
     alert: &CapAlert,
     raw_header: &str,
     event_code: &str,
-    source_stream: &str,
 ) -> Result<Option<PathBuf>> {
     fs::create_dir_all(&config.recording_dir).await?;
 
@@ -1568,24 +1527,19 @@ async fn fetch_cap_audio_recording(
         download_path
     };
 
-    let (output_path, should_remove_cap_audio_input) = match build_recording_with_same_header(
-        config,
-        raw_header,
-        source_stream,
-        event_code,
-        &cap_audio_path,
-    )
-    .await
-    {
-        Ok(path) => (Some(path), true),
-        Err(err) => {
-            warn!(
-                "Failed to prepend SAME header to CAP audio, using raw CAP audio file: {}",
-                err
-            );
-            (Some(cap_audio_path.clone()), false)
-        }
-    };
+    let (output_path, should_remove_cap_audio_input) =
+        match build_recording_with_same_header(config, raw_header, event_code, &cap_audio_path)
+            .await
+        {
+            Ok(path) => (Some(path), true),
+            Err(err) => {
+                warn!(
+                    "Failed to prepend SAME header to CAP audio, using raw CAP audio file: {}",
+                    err
+                );
+                (Some(cap_audio_path.clone()), false)
+            }
+        };
 
     if should_remove_cap_audio_input {
         let _ = fs::remove_file(&cap_audio_path).await;
@@ -1618,7 +1572,6 @@ fn decode_deref_uri_audio(deref_uri: &str) -> Result<Vec<u8>> {
 async fn build_recording_with_same_header(
     config: &Config,
     raw_header: &str,
-    source_stream: &str,
     event_code: &str,
     cap_audio_input_path: &PathBuf,
 ) -> Result<PathBuf> {
@@ -1660,12 +1613,12 @@ async fn build_recording_with_same_header(
     write_wav_i16(&silence_path, CAP_RECORDING_SAMPLE_RATE, &silence_samples).await?;
     write_wav_i16(&nnnn_path, CAP_RECORDING_SAMPLE_RATE, &nnnn_samples).await?;
 
-    let timestamp = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let output_name = format!(
         "EAS_Recording_{}_{}_{}.wav",
         timestamp,
         sanitize_filename_label(event_code),
-        stream_label_from_source(source_stream)
+        "IPAWSCAP"
     );
     let output_path = config.recording_dir.join(output_name);
 
@@ -1766,25 +1719,6 @@ fn audio_extension(mime_type: Option<&str>, uri: Option<&str>) -> &'static str {
     }
 
     "bin"
-}
-
-fn stream_label_from_source(source_stream: &str) -> String {
-    let without_query_or_fragment = source_stream
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(source_stream);
-
-    let segment = without_query_or_fragment
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or("CAP");
-
-    let label = match segment.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => stem,
-        _ => segment,
-    };
-
-    sanitize_filename_label(label)
 }
 
 fn sanitize_filename_label(label: &str) -> String {

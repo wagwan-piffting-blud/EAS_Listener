@@ -87,10 +87,7 @@ pub fn parse_filters(config_json: &Value) -> Vec<FilterRule> {
         }
 
         let Some(action_str) = entry.get("action").and_then(Value::as_str) else {
-            warn!(
-                "Filter '{}' missing action field; defaulting to log",
-                name
-            );
+            warn!("Filter '{}' missing action field; defaulting to log", name);
             filters.push(FilterRule {
                 name: name.to_string(),
                 action: FilterAction::Log,

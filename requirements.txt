@@ -1,3 +1,0 @@
-EAS2Text-Remastered
-apprise
-pytz

@@ -1,4 +1,5 @@
 use crate::config::CapEndpoint;
+use crate::e2t_ng::ParsedEasSerialized;
 use crate::filter::{self, FilterRule};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub struct EasAlertData {
     pub originator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_header: Option<ParsedEasSerialized>,
 }
 
 #[derive(Debug, Clone, Serialize)]
