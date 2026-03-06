@@ -48,6 +48,16 @@ function fetch_audio(src) {
     return `<audio controls><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
 }
 
+function downloadAudio(src) {
+    if (!src) return;
+    const link = document.createElement("a");
+    link.href = src;
+    link.download = src.split("/").pop();
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
 async function renderAlerts() {
     const container = alertList;
     container.innerHTML = "";
@@ -65,7 +75,7 @@ async function renderAlerts() {
         const recordingMarkup = filterWatchedFips && alert.data.audio_recording
             ? `
                 <br>
-                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)}</div>
+                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)} <button type="button" class="download" onclick="downloadAudio('${alert.data.audio_recording}')">Download</button></div>
             `
             : "";
 
@@ -81,8 +91,6 @@ async function renderAlerts() {
                 <div><strong>Originator:</strong> ${alert.data.originator}</div>
                 <br>
                 <div><strong>Severity:</strong> ${alert.data.alert_severity ? alert.data.alert_severity.toUpperCase() : "Unknown"}</div>
-                <br>
-                <div><strong>Locations:</strong> ${alert.data.locations || "—"}</div>
                 <br>
                 <div><strong>Received:</strong> ${formatTimestamp(alert.received_at * 1000)}</div>
                 <br>

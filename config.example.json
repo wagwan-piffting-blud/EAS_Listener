@@ -48,6 +48,7 @@
     "SHOULD_RELAY": false,
     "SHOULD_RELAY_ICECAST": false,
     "ICECAST_RELAY": "icecast://source:your_password_here@192.168.1.100:8000/live",
+    "USE_ICECAST_INTRO_OUTRO": false,
     "ICECAST_INTRO": "/app/leadin.mp3",
     "ICECAST_OUTRO": "/app/leadout.mp3",
     "SHOULD_RELAY_DASDEC": false,

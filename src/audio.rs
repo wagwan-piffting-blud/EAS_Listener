@@ -230,6 +230,9 @@ async fn run_stream_task(
 ) -> Result<()> {
     let mut last_log_time = Instant::now() - Duration::from_secs(61);
     let mut last_log_time2 = Instant::now() - Duration::from_secs(61);
+    let mut last_connect_error_log = Instant::now() - Duration::from_secs(61);
+    let mut connect_retry_attempt: u32 = 0;
+    let mut suppressed_connect_errors: u32 = 0;
 
     loop {
         monitoring.note_connecting(&stream_url);
@@ -250,6 +253,9 @@ async fn run_stream_task(
         {
             Ok(response) => {
                 if !response.status().is_success() {
+                    connect_retry_attempt = connect_retry_attempt.saturating_add(1);
+                    let retry_delay_secs = (1u64 << connect_retry_attempt.min(6)).min(60);
+                    let retry_delay = Duration::from_secs(retry_delay_secs);
                     monitoring.note_error(
                         &stream_url,
                         format!("unexpected status: {}", response.status()),
@@ -258,14 +264,19 @@ async fn run_stream_task(
                         error!(
                             stream = %stream_url,
                             status = %response.status(),
-                            "Received non-success status code; retrying"
+                            retry_in_secs = retry_delay_secs,
+                            attempt = connect_retry_attempt,
+                            "Received non-success status code; retrying with exponential backoff"
                         );
                         last_log_time2 = Instant::now();
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(retry_delay).await;
                     continue;
                 }
 
+                connect_retry_attempt = 0;
+                suppressed_connect_errors = 0;
+                last_connect_error_log = Instant::now() - Duration::from_secs(61);
                 monitoring.note_connected(&stream_url);
                 let content_type = response
                     .headers()
@@ -356,12 +367,25 @@ async fn run_stream_task(
                 monitoring.note_disconnected(&stream_url);
             }
             Err(e) => {
-                error!(
-                    stream = %stream_url,
-                    "Failed to connect to Icecast stream: {}. Retrying...",
-                    e
-                );
+                connect_retry_attempt = connect_retry_attempt.saturating_add(1);
+                let retry_delay_secs = (1u64 << connect_retry_attempt.min(6)).min(60);
+                let retry_delay = Duration::from_secs(retry_delay_secs);
+                if last_connect_error_log.elapsed() > Duration::from_secs(60) {
+                    error!(
+                        stream = %stream_url,
+                        retry_in_secs = retry_delay_secs,
+                        attempt = connect_retry_attempt,
+                        suppressed_errors = suppressed_connect_errors,
+                        "Failed to connect to Icecast stream: {}. Retrying with exponential backoff.",
+                        e
+                    );
+                    last_connect_error_log = Instant::now();
+                    suppressed_connect_errors = 0;
+                } else {
+                    suppressed_connect_errors = suppressed_connect_errors.saturating_add(1);
+                }
                 monitoring.note_error(&stream_url, format!("connect error: {e}"));
+                tokio::time::sleep(retry_delay).await;
                 continue;
             }
         }

@@ -106,17 +106,12 @@ impl From<MonitoringEvent> for WsMessage {
     }
 }
 
-fn cors_layer() -> CorsLayer {
-    let json_config = Config::from_config_json("/app/config.json");
-
-    if json_config.as_ref().unwrap().use_reverse_proxy.to_string() != "true" {
-        let origin: HeaderValue = format!(
-            "http://{}:{}/",
-            "localhost",
-            json_config.as_ref().unwrap().monitoring_bind_port
-        )
-        .parse()
-        .unwrap_or_else(|_| HeaderValue::from_static("http://localhost:8080"));
+fn cors_layer(config: &Config) -> CorsLayer {
+    if !config.use_reverse_proxy {
+        let origin: HeaderValue =
+            format!("http://{}:{}/", "localhost", config.monitoring_bind_port)
+                .parse()
+                .unwrap_or_else(|_| HeaderValue::from_static("http://localhost:8080"));
 
         CorsLayer::new()
             .allow_origin(origin)
@@ -131,12 +126,9 @@ fn cors_layer() -> CorsLayer {
             .allow_headers([AUTHORIZATION, CONTENT_TYPE])
             .max_age(Duration::from_secs(86400))
     } else {
-        let origin: HeaderValue = format!(
-            "http://{}/",
-            json_config.as_ref().unwrap().ws_reverse_proxy_url
-        )
-        .parse()
-        .unwrap_or_else(|_| HeaderValue::from_static("http://localhost"));
+        let origin: HeaderValue = format!("http://{}/", config.ws_reverse_proxy_url)
+            .parse()
+            .unwrap_or_else(|_| HeaderValue::from_static("http://localhost"));
 
         CorsLayer::new()
             .allow_origin(origin)
@@ -153,7 +145,11 @@ fn cors_layer() -> CorsLayer {
     }
 }
 
-async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
+async fn auth(
+    State(state): State<ApiState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
     if req.method() == Method::OPTIONS {
         return Ok(next.run(req).await);
     }
@@ -164,22 +160,20 @@ async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
         .and_then(|header| header.to_str().ok());
 
     match auth_header {
-        Some(auth_header) if token_is_valid(auth_header) => Ok(next.run(req).await),
+        Some(auth_header) if token_is_valid(auth_header, &state.config) => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
-fn token_is_valid(auth_header: &str) -> bool {
-    let json_config = Config::from_config_json("/app/config.json");
-
+fn token_is_valid(auth_header: &str, config: &Config) -> bool {
     if !auth_header.starts_with("Bearer ") {
         info!("Auth header does not start with 'Bearer '");
         return false;
     }
 
     let token = &auth_header[7..];
-    let username = json_config.as_ref().unwrap().dashboard_username.clone();
-    let password = json_config.as_ref().unwrap().dashboard_password.clone();
+    let username = config.dashboard_username.clone();
+    let password = config.dashboard_password.clone();
 
     if username.is_empty() || password.is_empty() || username == "admin" || password == "password" {
         info!("Default or empty username/password in use, rejecting token");
@@ -318,14 +312,14 @@ pub async fn run_server(
         .route("/api/status", get(status_handler))
         .route("/api/cap-status", get(cap_status_handler))
         .route("/api/same-us", get(same_us_lookup_handler))
-        .layer(cors_layer())
+        .layer(cors_layer(&state.config))
         .with_state(state.clone())
-        .route_layer(middleware::from_fn(auth));
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth));
 
     let router = Router::new()
         .route("/api/health", get(health_handler))
         .route("/ws", get(ws_handler))
-        .layer(cors_layer())
+        .layer(cors_layer(&state.config))
         .merge(protected_router)
         .with_state(state.clone());
 
@@ -393,7 +387,7 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     let auth_header = format!("Bearer {}", params.auth);
 
-    if !token_is_valid(&auth_header) {
+    if !token_is_valid(&auth_header, &state.config) {
         (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
     } else {
         ws.on_upgrade(move |socket| ws_connection(socket, state))

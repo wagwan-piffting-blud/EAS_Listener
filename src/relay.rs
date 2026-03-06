@@ -84,15 +84,18 @@ impl RelayState {
             ));
         }
 
-        let mut audio_segments = Vec::new();
+        let include_icecast_intro_outro =
+            config.should_relay && config.should_relay_icecast && config.use_icecast_intro_outro;
+        let mut audio_segments =
+            Vec::with_capacity(if include_icecast_intro_outro { 3 } else { 1 });
 
-        if !config.icecast_intro.as_os_str().is_empty() {
+        if include_icecast_intro_outro && !config.icecast_intro.as_os_str().is_empty() {
             audio_segments.push(config.icecast_intro.clone());
         }
 
         audio_segments.push(recorded_segment.to_path_buf());
 
-        if !config.icecast_outro.as_os_str().is_empty() {
+        if include_icecast_intro_outro && !config.icecast_outro.as_os_str().is_empty() {
             audio_segments.push(config.icecast_outro.clone());
         }
 
@@ -198,8 +201,21 @@ impl RelayState {
             ));
         }
 
+        let should_relay_dasdec = config.should_relay && config.should_relay_dasdec;
+        let dasdec_url = config.dasdec_url.clone();
+
+        let dasdec_audio_b64 = if should_relay_dasdec && !dasdec_url.trim().is_empty() {
+            let audio_bytes = tokio::fs::read(&combined_path_buf)
+                .await
+                .context("Failed to read combined relay bundle for DASDEC relay")?;
+            Some(base64::engine::general_purpose::STANDARD.encode(audio_bytes))
+        } else {
+            None
+        };
+
         if config.should_relay && config.should_relay_icecast {
             info!("Starting relay to Icecast servers...");
+
             if config.icecast_relay.is_empty() {
                 return Err(anyhow!("ICECAST_RELAY is not set. Cannot start relay."));
             }
@@ -220,25 +236,38 @@ impl RelayState {
                 .arg(format!("artist={}", "EAS Listener"));
             stream_cmd.arg(&config.icecast_relay);
 
-            let stream_status = stream_cmd
-                .status()
-                .await
+            let mut stream_child = stream_cmd
+                .spawn()
                 .context("Failed to execute ffmpeg relay stream command")?;
+            let relay_target = config.icecast_relay.clone();
 
-            if !stream_status.success() {
-                return Err(anyhow!(
-                    "ffmpeg relay stream process exited with status {:?}",
-                    stream_status.code()
-                ));
-            }
+            tokio::spawn(async move {
+                match stream_child.wait().await {
+                    Ok(status) if status.success() => {
+                        info!("Icecast relay finished successfully.");
+                    }
+                    Ok(status) => {
+                        warn!(
+                            "ffmpeg relay stream process to '{}' exited with status {:?}",
+                            relay_target,
+                            status.code()
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed while waiting for ffmpeg relay stream to '{}': {}",
+                            relay_target, err
+                        );
+                    }
+                }
 
-            combined_path
-                .close()
-                .context("Failed to clean up temporary relay bundle")?;
+                if let Err(err) = combined_path.close() {
+                    warn!("Failed to clean up temporary relay bundle: {}", err);
+                }
+            });
+
+            info!("Icecast relay running in background; continuing with DASDEC relay.");
         }
-
-        let should_relay_dasdec = config.should_relay && config.should_relay_dasdec;
-        let dasdec_url = config.dasdec_url.clone();
 
         if should_relay_dasdec && !dasdec_url.trim().is_empty() {
             let client = Client::new();
@@ -260,10 +289,9 @@ impl RelayState {
                 format!("{}/send_chunk", base_url)
             };
 
-            let audio_bytes = tokio::fs::read(&combined_path_buf)
-                .await
-                .context("Failed to read combined relay bundle for DASDEC relay")?;
-            let audio_b64 = base64::engine::general_purpose::STANDARD.encode(audio_bytes);
+            let audio_b64 = dasdec_audio_b64
+                .as_ref()
+                .ok_or_else(|| anyhow!("DASDEC relay audio buffer was not prepared"))?;
 
             const DIRECT_B64_THRESHOLD: usize = 2_750_000;
             let mime_type = "audio/wav";

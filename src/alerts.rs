@@ -23,6 +23,7 @@ use tracing::{error, info, instrument, warn};
 
 const IMPACT_DAY_FILE: &str = "impact_day.txt";
 const SEVERE_DAY_FILE: &str = "severe_day.txt";
+const ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 const ALERT_DEDUP_WINDOW: Duration = Duration::from_secs(15 * 60);
 const ALERT_DEDUP_PRUNE_INTERVAL: usize = 256;
 
@@ -154,6 +155,62 @@ fn should_process_alert(
     true
 }
 
+async fn read_persisted_active_alerts(state_dir: &Path) -> Result<Vec<ActiveAlert>> {
+    let persisted_path = state_dir.join(ACTIVE_ALERTS_FILE);
+    if !fs::try_exists(&persisted_path).await? {
+        return Ok(Vec::new());
+    }
+
+    let bytes = fs::read(&persisted_path).await?;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let alerts = serde_json::from_slice::<Vec<ActiveAlert>>(&bytes).map_err(|err| {
+        anyhow!(
+            "Failed to parse persisted active alerts from {}: {}",
+            persisted_path.display(),
+            err
+        )
+    })?;
+    Ok(alerts)
+}
+
+async fn restore_active_alert_state(
+    state_dir: &Path,
+    state: &Arc<Mutex<AppState>>,
+) -> Result<Option<Vec<ActiveAlert>>> {
+    let mut persisted_alerts = read_persisted_active_alerts(state_dir).await?;
+    let now = Utc::now();
+    persisted_alerts.retain(|alert| alert.expires_at > now);
+
+    let mut app_state_guard = state.lock().await;
+    let initial_len = app_state_guard.active_alerts.len();
+    app_state_guard
+        .active_alerts
+        .retain(|alert| alert.expires_at > now);
+
+    let mut known_headers = app_state_guard
+        .active_alerts
+        .iter()
+        .map(|alert| alert.raw_header.clone())
+        .collect::<HashSet<_>>();
+
+    for alert in persisted_alerts {
+        if known_headers.insert(alert.raw_header.clone()) {
+            app_state_guard.active_alerts.push(alert);
+        }
+    }
+
+    let changed = app_state_guard.active_alerts.len() != initial_len;
+    if changed {
+        update_alert_files(state_dir, &app_state_guard).await?;
+        return Ok(Some(app_state_guard.active_alerts.clone()));
+    }
+
+    Ok(None)
+}
+
 pub async fn run_alert_manager(
     mut config: Config,
     state: Arc<Mutex<AppState>>,
@@ -163,6 +220,18 @@ pub async fn run_alert_manager(
     monitoring: MonitoringHub,
     mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
+    match restore_active_alert_state(&config.shared_state_dir, &state).await {
+        Ok(Some(alert_snapshot)) => {
+            info!(
+                "Restored {} active alert(s) from persisted state.",
+                alert_snapshot.len()
+            );
+            monitoring.broadcast_alerts(alert_snapshot, None, None);
+        }
+        Ok(None) => {}
+        Err(err) => warn!("Failed restoring active alerts from disk: {}", err),
+    }
+
     let mut reload_enabled = true;
     let mut dedup_cache: HashMap<String, AlertDedupEntry> = HashMap::new();
     let mut dedup_prune_counter = 0usize;
@@ -180,6 +249,19 @@ pub async fn run_alert_manager(
                     Ok(new_config) => {
                         info!("Alert manager loaded updated configuration.");
                         config = new_config;
+                        match restore_active_alert_state(&config.shared_state_dir, &state).await {
+                            Ok(Some(alert_snapshot)) => {
+                                info!(
+                                    "Restored {} active alert(s) from persisted state after reload.",
+                                    alert_snapshot.len()
+                                );
+                                monitoring.broadcast_alerts(alert_snapshot, None, None);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                warn!("Failed restoring active alerts after reload: {}", err)
+                            }
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!("Alert manager reload channel lagged; skipped {} update(s).", skipped);
@@ -206,7 +288,10 @@ pub async fn run_alert_manager(
             &config.preferred_senderid,
             dedup_now,
         ) {
-            info!("Skipping duplicate alert within dedup window: {}", &raw_header);
+            info!(
+                "Skipping duplicate alert within dedup window: {}",
+                &raw_header
+            );
             continue;
         }
 
@@ -364,18 +449,6 @@ async fn handle_recording_and_webhook(
         }
     }
 
-    if filter::should_log_alert(&event_code) {
-        let recording_path_for_webhook = recorded_state.as_ref().map(|(path, _)| path.clone());
-        send_alert_webhook(
-            &stream_id,
-            &alert,
-            &dsame_text,
-            &raw_header,
-            recording_path_for_webhook,
-        )
-        .await;
-    }
-
     if filter::should_forward_alert(&event_code) {
         info!("Forwarding alert {} to configured webhook(s)", event_code);
         let recording_path_for_webhook = recorded_state.as_ref().map(|(path, _)| path.clone());
@@ -528,9 +601,22 @@ async fn get_eas_details_and_log(
 
 #[instrument(skip(state_dir, app_state))]
 pub async fn update_alert_files(state_dir: &Path, app_state: &AppState) -> Result<()> {
+    let now = Utc::now();
+    let active_alerts = app_state
+        .active_alerts
+        .iter()
+        .filter(|alert| alert.expires_at > now)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let active_alerts_path = state_dir.join(ACTIVE_ALERTS_FILE);
+    let active_alerts_payload = serde_json::to_vec(&active_alerts)
+        .map_err(|err| anyhow!("Failed to serialize active alerts: {}", err))?;
+    fs::write(&active_alerts_path, active_alerts_payload).await?;
+
     let mut has_severe_alert = false;
     let mut has_impact_day_alert = false;
-    for alert in &app_state.active_alerts {
+    for alert in &active_alerts {
         let event_code = alert.data.event_code.trim();
         if is_severe_alert_event_code(event_code) {
             has_severe_alert = true;

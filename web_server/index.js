@@ -24,6 +24,7 @@
     });
     const LOCATION_CODE_PATTERN = /\d{6}/g;
     const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
+    const CAP_HEADER_SOURCE_MARKER = "IPAWSCAP";
     const STATE_AND_TERRITORY_NAMES = Object.freeze({
         AL: "Alabama",
         AK: "Alaska",
@@ -221,7 +222,14 @@
         return alert?.data?.originator || parsedHeaderForAlert(alert)?.originator || "";
     }
 
+    function isCapAlert(alert) {
+        return String(alert?.raw_header || "").includes(CAP_HEADER_SOURCE_MARKER);
+    }
+
     function locationCodesForAlert(alert) {
+        if (isCapAlert(alert)) {
+            return alert?.data?.locations || "";
+        }
         const parsed = parsedHeaderForAlert(alert);
         if (Array.isArray(parsed?.fips_codes) && parsed.fips_codes.length) {
             return parsed.fips_codes.join(", ");
@@ -915,19 +923,14 @@
         return expanded;
     }
 
-    function locationParser(locations) {
-        if (!locations) return "";
-        if (!state.sameUsByFips || !state.sameUsSubdivByCode) {
-            void loadSameUsLookups();
-        }
-
-        const locationCodes = String(locations).match(LOCATION_CODE_PATTERN);
-        if (!locationCodes || !locationCodes.length) {
-            const expanded = expandStateAbbreviations(String(locations).trim());
-            return normalizeLocationSeparators(expanded);
-        }
-
-        return locationCodes.map((locationCode) => formatLocationLabel(locationCode)).join("; ");
+    function downloadAudio(src) {
+        if (!src) return;
+        const link = document.createElement("a");
+        link.href = `/${src}`;
+        link.download = src.split("/").pop() || "alert_audio.wav";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     }
 
     function renderAlerts() {
@@ -943,15 +946,17 @@
 
         alerts.forEach((alert) => {
             const card = document.createElement("article");
+            const capAlert = isCapAlert(alert);
             const normalizedEventText = String(alert?.data?.event_text || "").replace(/^(?:a|an|the)\s+/i, "").trim();
             const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
             const eventText = normalizedEventText || parsedEventText?.[1] || "No headline available";
-            const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message)/i).exec(eventText)?.[1]?.toLowerCase();
+            const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message|statement)/i).exec(eventText)?.[1]?.toLowerCase();
             const alertKey = getAlertKey(alert);
             const availableAudioSrc = state.activeAlertAudioSrcByAlert.get(alertKey) || "";
-            const eventCode = eventCodeForAlert(alert) || "—";
-            const originator = originatorForAlert(alert) || "—";
+            const eventCode = eventCodeForAlert(alert) || "-";
+            const originator = originatorForAlert(alert) || "-";
             const locationCodes = locationCodesForAlert(alert);
+            const capDescription = capAlert ? String(alert?.data?.description || "").trim() : "";
 
             card.className = `alert-card ${severity || "unknown"}`;
             card.innerHTML = `
@@ -960,21 +965,22 @@
                 <div class="meta">
                     <div>${alert.data.eas_text || "Alert received."}</div>
                     <br>
+                    <div><strong>Source:</strong> ${capAlert ? "CAP" : "EAS"}</div>
+                    <br>
                     <div><strong>Originator:</strong> ${originator}</div>
                     <br>
                     <div><strong>Severity:</strong> ${severity ? severity.toUpperCase() : "Unknown"}</div>
-                    <br>
-                    <div><strong>Locations:</strong> ${locationParser(locationCodes) || "—"}</div>
                     <br>
                     <div><strong>Received:</strong> ${formatTimestamp(alert.received_at * 1000)}</div>
                     <br>
                     <div><strong>Expires:</strong> ${formatTimestamp(alert.expires_at * 1000)}</div>
                     <br>
-                    <div><strong>Length:</strong> ${alert.purge_time.secs ? secondsToHM(alert.purge_time.secs) : "—"}</div>
+                    <div><strong>Length:</strong> ${alert.purge_time.secs ? secondsToHM(alert.purge_time.secs) : "-"}</div>
                     <br>
-                    <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "—"}</pre></div>
+                    ${capDescription ? `<div><strong>CAP Description:</strong> <pre>${escapeHtml(capDescription)}</pre></div><br>` : ""}
+                    <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "-"}</pre></div>
                     <br>
-                    <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(availableAudioSrc)}</div>
+                    <div class="alert-audio-row"><strong>Recording audio:</strong><span class="alert-audio-controls">${fetch_audio(availableAudioSrc)}${availableAudioSrc ? `<button type="button" class="download" onclick="downloadAudio('${availableAudioSrc}')">Download</button>` : ""}</span></div>
                 </div>
             `;
 

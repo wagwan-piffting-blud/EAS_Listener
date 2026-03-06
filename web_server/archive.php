@@ -49,6 +49,65 @@ function match_watched_fips(string $locations_string, ?array $watched_fips_looku
     return false;
 }
 
+function get_active_raw_headers_lookup(): array {
+    static $lookup = null;
+
+    if($lookup !== null) {
+        return $lookup;
+    }
+
+    $lookup = [];
+    $shared_state_dir = rtrim((string) (getenv("SHARED_STATE_DIR") ?: ""), "/\\");
+    if($shared_state_dir === "") {
+        return $lookup;
+    }
+
+    $active_alerts_path = $shared_state_dir . DIRECTORY_SEPARATOR . "active_alerts.json";
+    if(!is_readable($active_alerts_path)) {
+        return $lookup;
+    }
+
+    $raw_payload = @file_get_contents($active_alerts_path);
+    if($raw_payload === false || $raw_payload === "") {
+        return $lookup;
+    }
+
+    $decoded = json_decode($raw_payload, true);
+    if(!is_array($decoded)) {
+        return $lookup;
+    }
+
+    $now = time();
+    foreach($decoded as $entry) {
+        if(!is_array($entry)) {
+            continue;
+        }
+
+        $raw_header = trim((string) ($entry["raw_header"] ?? ""));
+        if($raw_header === "") {
+            continue;
+        }
+
+        $expires_at = isset($entry["expires_at"]) ? (int) $entry["expires_at"] : null;
+        if($expires_at !== null && $expires_at <= $now) {
+            continue;
+        }
+
+        $lookup[$raw_header] = true;
+    }
+
+    return $lookup;
+}
+
+function extract_logged_raw_header(string $alert_line): string {
+    $parts = explode(": ", $alert_line, 2);
+    if(count($parts) !== 2) {
+        return "";
+    }
+
+    return trim($parts[0]);
+}
+
 function get_recording_dir(): string {
     return rtrim((string) (getenv("RECORDING_DIR") ?: ""), "/\\");
 }
@@ -224,7 +283,7 @@ function get_latest_recording_id(): int {
 
 function is_finalized_wav_recording(string $file): bool {
     $filesize = @filesize($file);
-    if($filesize === false || $filesize < 44) {
+    if($filesize === false || $filesize < 12) {
         return false;
     }
 
@@ -233,28 +292,61 @@ function is_finalized_wav_recording(string $file): bool {
         return false;
     }
 
-    $header = @fread($handle, 44);
+    $riff_header = @fread($handle, 12);
+    if($riff_header === false || strlen($riff_header) < 12) {
+        fclose($handle);
+        return false;
+    }
+
+    if(substr($riff_header, 0, 4) !== "RIFF" || substr($riff_header, 8, 4) !== "WAVE") {
+        fclose($handle);
+        return false;
+    }
+
+    $riff_size = (int) unpack("V", substr($riff_header, 4, 4))[1];
+    $data_offset = null;
+    $data_size = null;
+    $offset = 12;
+
+    while(($offset + 8) <= $filesize) {
+        if(@fseek($handle, $offset) !== 0) {
+            break;
+        }
+
+        $chunk_header = @fread($handle, 8);
+        if($chunk_header === false || strlen($chunk_header) < 8) {
+            break;
+        }
+
+        $chunk_id = substr($chunk_header, 0, 4);
+        $chunk_size = (int) unpack("V", substr($chunk_header, 4, 4))[1];
+        $chunk_data_offset = $offset + 8;
+        $chunk_end = $chunk_data_offset + $chunk_size;
+
+        if($chunk_end > $filesize) {
+            break;
+        }
+
+        if($chunk_id === "data") {
+            $data_offset = $chunk_data_offset;
+            $data_size = $chunk_size;
+            break;
+        }
+
+        $offset = $chunk_end + ($chunk_size % 2);
+    }
+
     fclose($handle);
-
-    if($header === false || strlen($header) < 44) {
+    if($data_offset === null || $data_size === null) {
         return false;
     }
 
-    if(substr($header, 0, 4) !== "RIFF" || substr($header, 8, 4) !== "WAVE") {
-        return false;
-    }
-
-    // hound writes canonical PCM WAV where "data" chunk begins at offset 36.
-    if(substr($header, 36, 4) !== "data") {
-        return false;
-    }
-
-    $riff_size = unpack("V", substr($header, 4, 4))[1];
-    $data_size = unpack("V", substr($header, 40, 4))[1];
+    $expected_data_size_max = (int) $filesize - $data_offset;
     $expected_riff_size = (int) $filesize - 8;
-    $expected_data_size = (int) $filesize - 44;
 
-    return $riff_size === $expected_riff_size && $data_size === $expected_data_size;
+    return $riff_size === $expected_riff_size
+        && $data_size >= 0
+        && $data_size <= $expected_data_size_max;
 }
 
 function hhmmToSeconds(string $hhmmString): int {
@@ -421,6 +513,7 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
     $included_alert_count = 0;
     $filter_by_watched_fips = ($_GET['filter_alerts'] ?? null) === 'watched_fips';
     $watched_fips_lookup = [];
+    $active_raw_headers_lookup = get_active_raw_headers_lookup();
 
     if($filter_by_watched_fips) {
         $watched_fips_lookup = get_watched_fips_lookup();
@@ -438,6 +531,11 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
                 $alert_line = trim($line);
 
                 if($alert_line === '') {
+                    continue;
+                }
+
+                $logged_raw_header = extract_logged_raw_header($alert_line);
+                if($logged_raw_header !== "" && isset($active_raw_headers_lookup[$logged_raw_header])) {
                     continue;
                 }
 

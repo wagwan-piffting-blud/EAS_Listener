@@ -19,7 +19,7 @@ pub struct EasAlertData {
     pub parsed_header: Option<ParsedEasSerialized>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct ActiveAlert {
     pub data: EasAlertData,

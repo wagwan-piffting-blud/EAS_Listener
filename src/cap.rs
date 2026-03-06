@@ -681,11 +681,19 @@ fn parse_cap_alert(xml: &str, source_url: &str) -> Result<CapAlert> {
         sender_name = child_text(info_node, "senderName");
     }
 
-    let event_text = child_text(info_node, "event").unwrap_or_else(|| "CAP Alert".to_string());
-
-    let event_code = extract_same_value(info_node, "eventCode")
-        .map(|value| normalize_event_code(&value))
-        .unwrap_or_else(|| derive_event_code(&event_text));
+    let same_event_code =
+        extract_same_value(info_node, "eventCode").map(|value| normalize_event_code(&value));
+    let (event_code, event_text) = match same_event_code {
+        Some(code) => {
+            let text = crate::webhook::determine_event_title(&code);
+            (code, text)
+        }
+        None => {
+            let text = child_text(info_node, "event").unwrap_or_else(|| "CAP Alert".to_string());
+            let code = derive_event_code(&text);
+            (code, text)
+        }
+    };
     let originator_code = extract_parameter_value(info_node, "EAS-ORG")
         .map(|value| normalize_originator_code(&value))
         .unwrap_or_else(|| "CIV".to_string());

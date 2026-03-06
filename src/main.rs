@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::level_filters::LevelFilter;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::filter as other_filter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::prelude::*;
@@ -34,9 +34,60 @@ use state::AppState;
 const CONFIG_PATH: &str = "/app/config.json";
 const RELOAD_SIGNAL_PATH: &str = "/app/reload_signal";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigSource {
+    File,
+    BuiltInDefault,
+}
+
+fn load_config_with_fallback(config_path: &str) -> (Config, ConfigSource, Option<String>) {
+    match std::fs::metadata(config_path) {
+        Ok(_) => match Config::from_config_json(config_path) {
+            Ok(config) => (config, ConfigSource::File, None),
+            Err(err) => (
+                Config::safe_internal_defaults(),
+                ConfigSource::BuiltInDefault,
+                Some(format!(
+                    "Configuration file '{}' is invalid: {:?}. Using built-in safe defaults.",
+                    config_path, err
+                )),
+            ),
+        },
+        Err(err) if err.kind() == ErrorKind::NotFound => (
+            Config::safe_internal_defaults(),
+            ConfigSource::BuiltInDefault,
+            Some(format!(
+                "Configuration file '{}' was not found. Using built-in safe defaults.",
+                config_path
+            )),
+        ),
+        Err(err) => (
+            Config::safe_internal_defaults(),
+            ConfigSource::BuiltInDefault,
+            Some(format!(
+                "Failed to access configuration file '{}': {}. Using built-in safe defaults.",
+                config_path, err
+            )),
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::from_config_json(CONFIG_PATH)?;
+    let (config, config_source, config_warning) = load_config_with_fallback(CONFIG_PATH);
+
+    if let Err(err) = std::fs::create_dir_all(&config.shared_state_dir) {
+        eprintln!(
+            "Warning: failed to create shared state directory {:?}: {}",
+            config.shared_state_dir, err
+        );
+    }
+    if let Err(err) = std::fs::create_dir_all(&config.recording_dir) {
+        eprintln!(
+            "Warning: failed to create recording directory {:?}: {}",
+            config.recording_dir, err
+        );
+    }
 
     let monitoring = MonitoringHub::new(
         config.monitoring_max_log_entries,
@@ -55,7 +106,8 @@ async fn main() -> Result<()> {
     let monitoring_layer = MonitoringLayer::new(monitoring.clone());
     let filter = other_filter::Targets::new()
         .with_default(log_level)
-        .with_target("symphonia", tracing::Level::ERROR);
+        .with_target("symphonia", tracing::Level::ERROR)
+        .with_target("sameold", tracing::Level::WARN);
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -73,6 +125,14 @@ async fn main() -> Result<()> {
         .with(monitoring_layer)
         .with(filter)
         .init();
+
+    if config_source == ConfigSource::BuiltInDefault {
+        if let Some(message) = config_warning.as_deref() {
+            warn!("{}", message);
+        }
+    } else {
+        info!("Loaded configuration from {}", CONFIG_PATH);
+    }
 
     info!("Starting EAS Listener...");
 
@@ -164,30 +224,32 @@ async fn run_reload_handler(
             continue;
         }
 
-        match Config::from_config_json(CONFIG_PATH) {
-            Ok(new_config) => {
-                {
-                    let mut guard = app_state.lock().await;
-                    guard.update_filters(new_config.filters.clone());
-                }
+        let (new_config, config_source, config_warning) = load_config_with_fallback(CONFIG_PATH);
 
-                if reload_tx.send(new_config).is_err() {
-                    warn!("No active reload receivers were available for configuration update.");
-                }
-
-                info!("Applied configuration reload from reload signal.");
-
-                if let Err(err) = tokio::fs::remove_file(RELOAD_SIGNAL_PATH).await {
-                    if err.kind() != ErrorKind::NotFound {
-                        warn!("Failed to remove reload signal file: {}", err);
-                    }
-                }
+        if config_source == ConfigSource::BuiltInDefault {
+            if let Some(message) = config_warning.as_deref() {
+                warn!("{}", message);
             }
-            Err(err) => {
-                error!(
-                    "Failed to reload configuration from {}: {:?}",
-                    CONFIG_PATH, err
-                );
+        }
+
+        {
+            let mut guard = app_state.lock().await;
+            guard.update_filters(new_config.filters.clone());
+        }
+
+        if reload_tx.send(new_config).is_err() {
+            warn!("No active reload receivers were available for configuration update.");
+        }
+
+        if config_source == ConfigSource::File {
+            info!("Applied configuration reload from reload signal.");
+        } else {
+            warn!("Applied built-in safe defaults for configuration reload.");
+        }
+
+        if let Err(err) = tokio::fs::remove_file(RELOAD_SIGNAL_PATH).await {
+            if err.kind() != ErrorKind::NotFound {
+                warn!("Failed to remove reload signal file: {}", err);
             }
         }
 

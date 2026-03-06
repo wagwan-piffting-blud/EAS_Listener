@@ -22,8 +22,15 @@ struct SameUsLookup {
 }
 
 lazy_static! {
-    static ref json_config: Config =
-        Config::from_config_json("/app/config.json").expect("Failed to load config");
+    static ref json_config: Config = Config::from_config_json("/app/config.json").unwrap_or_else(
+        |err| {
+            eprintln!(
+                "Warning: failed to load /app/config.json for webhook config: {:?}. Using built-in safe defaults.",
+                err
+            );
+            Config::safe_internal_defaults()
+        },
+    );
     static ref station_name: String = json_config.eas_relay_name.clone();
     static ref STREAM_INDEX_MAP: HashMap<String, usize> = json_config
         .icecast_stream_urls

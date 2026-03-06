@@ -464,6 +464,66 @@ a {
     transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
+.download {
+    appearance: none;
+    margin-left: 0.35rem;
+    padding: 0.28rem 0.72rem;
+    border-radius: 999px;
+    border: 1px solid var(--accent, #4f9dff);
+    background: rgba(0, 0, 0, 0.28);
+    color: var(--accent, #4f9dff);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.download:hover {
+    background: var(--accent, #4f9dff);
+    color: #071018;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+}
+
+.download:active {
+    transform: translateY(1px);
+}
+
+.download:focus-visible {
+    outline: 2px solid var(--accent, #4f9dff);
+    outline-offset: 2px;
+}
+
+.alert-audio-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+}
+
+.alert-audio-row strong {
+    white-space: nowrap;
+}
+
+.alert-audio-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    flex-wrap: nowrap;
+}
+
+.alert-audio-controls audio[data-alert-audio="true"] {
+    width: min(100%, 18rem);
+    min-width: 0;
+}
+
+.alert-audio-controls .download {
+    margin-left: 0;
+    flex-shrink: 0;
+}
+
 .alert-card.test .alert-card.unknown {
     border-color: rgba(79, 157, 255, 0.4);
     background: rgba(79, 157, 255, 0.2);
