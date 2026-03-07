@@ -7,7 +7,7 @@
     const AUDIO_PROBE_CONCURRENCY = 2;
     const AUDIO_PROBE_BACKOFF_BASE_MS = 3000;
     const AUDIO_PROBE_BACKOFF_MAX_MS = 60000;
-    const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
+    const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available.";
     const STREAM_RENDER_FALLBACK_DELAY_MS = 16;
     const LOCATION_CODE_PATTERN = /\d{6}/g;
     const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
@@ -90,6 +90,7 @@
         logs: [],
         capStatus: null,
         streamCardByUrl: new Map(),
+        alertCardByKey: new Map(),
         pendingStreamUrls: new Set(),
         streamRenderScheduled: false,
     };
@@ -228,12 +229,52 @@
         return `${alert.received_at || ""}:${eventCodeForAlert(alert)}:${alert.raw_header || ""}`;
     }
 
+    function recordingStateForAlert(alert) {
+        const value = String(alert?.recording_state || "").toLowerCase();
+        if (value === "ready" || value === "missing") {
+            return value;
+        }
+        return "pending";
+    }
+
+    function recordingFileNameForAlert(alert) {
+        const value = alert?.recording_file_name;
+        return typeof value === "string" && value.trim() ? value.trim() : "";
+    }
+
+    function recordingAudioSrcForAlert(alert, recordingState) {
+        if (recordingState !== "ready") return "";
+        const fileName = recordingFileNameForAlert(alert);
+        if (!fileName) return "";
+        return `archive.php?recording_name=${encodeURIComponent(fileName)}`;
+    }
+
+    function recordingStateLabel(recordingState) {
+        switch (recordingState) {
+            case "ready":
+                return "Ready";
+            case "missing":
+                return "Unavailable";
+            default:
+                return "Pending";
+        }
+    }
+
+    function recordingUnavailableText(recordingState) {
+        switch (recordingState) {
+            case "missing":
+                return "No recording is available for this alert.";
+            default:
+                return "Pending.";
+        }
+    }
+
     function getSortedActiveAlerts(alerts = state.activeAlerts) {
         return alerts.slice().sort((a, b) => b.received_at - a.received_at);
     }
 
     function hasPendingAlertAudio() {
-        return state.activeAlerts.some((alert) => !state.activeAlertAudioSrcByAlert.has(getAlertKey(alert)));
+        return false;
     }
 
     function shouldProbeRecordingId(recordingId, now = Date.now()) {
@@ -305,7 +346,7 @@
     }
 
     function getAudioUnavailableText() {
-        return AUDIO_NOT_AVAILABLE_TEXT.replace("__SECOND__", getAudioUnavailableCountdownSeconds());
+        return AUDIO_NOT_AVAILABLE_TEXT;
     }
 
     function refreshAudioUnavailableCountdown() {
@@ -392,22 +433,10 @@
         if (changed) {
             state.activeAlertSignature = nextSignature;
             state.activeAlertsChangedAt = Date.now();
-            const activeKeys = new Set(nextAlerts.map(getAlertKey));
-            state.activeAlertAudioSrcByAlert = new Map(
-                Array.from(state.activeAlertAudioSrcByAlert.entries()).filter(([key]) => activeKeys.has(key))
-            );
-            state.audioProbeStateByRecordingId.clear();
-            state.nextAudioAvailabilityCheckAt = nextAlerts.length
-                ? state.activeAlertsChangedAt + AUDIO_INITIAL_HOLDOFF_MS
-                : 0;
         }
 
-        updateAudioAvailabilityPolling();
         if (hasNewAlert) {
             playNewAlertSound();
-        }
-        if (changed && nextAlerts.length) {
-            precheckAvailableAlertAudio();
         }
 
         return changed;
@@ -747,27 +776,18 @@
         }
     }
 
-    function bindAudioUnavailableFallback(card, alertKey) {
+    function bindAudioUnavailableFallback(card) {
         const audioEl = card.querySelector("audio[data-alert-audio='true']");
         if (!audioEl) return;
+        if (audioEl.dataset.unavailableFallbackBound === "true") return;
+        audioEl.dataset.unavailableFallbackBound = "true";
         const sourceEl = audioEl.querySelector("source");
-        const failedSrc = sourceEl?.getAttribute("src") || "";
 
         const showUnavailable = () => {
             const unavailable = document.createElement("span");
             unavailable.dataset.audioUnavailable = "true";
-            state.nextAudioAvailabilityCheckAt = Date.now() + AUDIO_AVAILABILITY_POLL_MS;
-            unavailable.textContent = getAudioUnavailableText();
+            unavailable.textContent = AUDIO_NOT_AVAILABLE_TEXT;
             audioEl.replaceWith(unavailable);
-            startAudioUnavailableCountdown();
-            if (
-                alertKey &&
-                failedSrc &&
-                state.activeAlertAudioSrcByAlert.get(alertKey) === failedSrc
-            ) {
-                state.activeAlertAudioSrcByAlert.delete(alertKey);
-                updateAudioAvailabilityPolling();
-            }
         };
 
         audioEl.addEventListener("error", showUnavailable, { once: true });
@@ -903,60 +923,178 @@
         return expanded;
     }
 
+    function buildAlertRenderData(alert) {
+        const capAlert = isCapAlert(alert);
+        const normalizedEventText = String(alert?.data?.event_text || "").replace(/^(?:a|an|the)\s+/i, "").trim();
+        const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
+        const eventText = normalizedEventText || parsedEventText?.[1] || "No headline available";
+        const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message|statement)/i).exec(eventText)?.[1]?.toLowerCase();
+        const recordingState = recordingStateForAlert(alert);
+        const recordingStateText = recordingStateLabel(recordingState);
+        const recordingFileName = recordingFileNameForAlert(alert);
+        const availableAudioSrc = recordingAudioSrcForAlert(alert, recordingState);
+        const recordingUnavailableMarkup = `<span data-audio-unavailable="true">${escapeHtml(recordingUnavailableText(recordingState))}</span>`;
+        const recordingAudioMarkup = availableAudioSrc
+            ? `${fetch_audio(availableAudioSrc)}<button type="button" class="download" onclick="window.downloadAudio('${availableAudioSrc}')">Download</button>`
+            : recordingUnavailableMarkup;
+        const eventCode = eventCodeForAlert(alert) || "-";
+        const originator = originatorForAlert(alert) || "-";
+        const capDescription = capAlert ? String(alert?.data?.description || "").trim() : "";
+        const sourceStream =
+            state.streams.get(alert?.source_stream_url)?.stream_url
+            || state.streams.get(alert?.stream_url)?.stream_url
+            || alert?.source_stream_url
+            || alert?.stream_url
+            || "";
+        const hasSourceStream = Boolean(sourceStream);
+
+        return {
+            capAlert,
+            eventText,
+            severity: severity || "unknown",
+            recordingState,
+            recordingStateText,
+            recordingFileName,
+            availableAudioSrc,
+            recordingAudioMarkup,
+            eventCode,
+            originator,
+            capDescription,
+            sourceStream,
+            hasSourceStream,
+        };
+    }
+
+    function createAlertCard(alert, alertKey) {
+        const card = document.createElement("article");
+        const renderData = buildAlertRenderData(alert);
+        card.dataset.alertKey = alertKey;
+        card.dataset.audioSrc = renderData.availableAudioSrc;
+        card.dataset.recordingState = renderData.recordingState;
+        card.dataset.recordingFileName = renderData.recordingFileName;
+        card.className = `alert-card ${renderData.severity}`;
+        card.innerHTML = `
+            <div class="event-code">${renderData.eventCode}</div>
+            <div class="headline">${renderData.eventText}</div>
+            <div class="meta">
+                <div>${alert.data.eas_text.replace(/Message from (.*)./, `Message from <a style="color: rgba(243, 245, 249, 0.65) !important;" href="${escapeHtml(renderData.sourceStream ? renderData.sourceStream : '')}" target="_blank" rel="noopener noreferrer">$1</a>.`) || "Alert received."}</div>
+                <br>
+                <div><strong>Source:</strong> ${renderData.capAlert ? "CAP" : "EAS"}</div>
+                <br>
+                <div><strong>Originator:</strong> ${renderData.originator}</div>
+                <br>
+                <div><strong>Severity:</strong> ${renderData.severity ? renderData.severity.toUpperCase() : "Unknown"}</div>
+                <br>
+                <div><strong>Received:</strong> ${formatTimestamp(alert.received_at * 1000)}</div>
+                <br>
+                <div><strong>Expires:</strong> ${formatTimestamp(alert.expires_at * 1000)}</div>
+                <br>
+                <div><strong>Length:</strong> ${alert.purge_time.secs ? secondsToHM(alert.purge_time.secs) : "-"}</div>
+                ${renderData.capDescription ? `<br><div><strong>CAP Description:</strong> <pre>${escapeHtml(renderData.capDescription)}</pre></div><br>` : ""}
+                <br>
+                <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "-"}</pre></div>
+                <br>
+                <div class="alert-audio-row"><strong>Recording audio:</strong><span class="alert-audio-controls" data-alert-audio-controls>${renderData.recordingAudioMarkup}</span></div>
+            </div>
+        `;
+        bindAudioUnavailableFallback(card);
+        return card;
+    }
+
+    function patchAlertCard(card, alert) {
+        const renderData = buildAlertRenderData(alert);
+        const stateTextEl = card.querySelector("[data-alert-recording-state-text]");
+        const fileTextEl = card.querySelector("[data-alert-recording-file-text]");
+        const audioControlsEl = card.querySelector("[data-alert-audio-controls]");
+        const previousAudioSrc = card.dataset.audioSrc || "";
+        const nextAudioSrc = renderData.availableAudioSrc || "";
+        const previousRecordingState = card.dataset.recordingState || "";
+        const previousRecordingFileName = card.dataset.recordingFileName || "";
+
+        card.className = `alert-card ${renderData.severity}`;
+        if (stateTextEl) {
+            stateTextEl.textContent = renderData.recordingStateText;
+        }
+        if (fileTextEl) {
+            fileTextEl.innerHTML = renderData.recordingFileName
+                ? `<code>${escapeHtml(renderData.recordingFileName)}</code>`
+                : "-";
+        }
+
+        const shouldReplaceAudioControls =
+            previousAudioSrc !== nextAudioSrc
+            || previousRecordingState !== renderData.recordingState
+            || previousRecordingFileName !== renderData.recordingFileName;
+
+        if (audioControlsEl && shouldReplaceAudioControls) {
+            if (previousAudioSrc && nextAudioSrc && previousAudioSrc === nextAudioSrc) {
+                // Preserve active audio element when src is unchanged.
+            } else {
+                audioControlsEl.innerHTML = renderData.recordingAudioMarkup;
+                bindAudioUnavailableFallback(card);
+            }
+        }
+
+        const sourceLinkEl = card.querySelector("[data-alert-source-stream-link]");
+        if (sourceLinkEl) {
+            if (renderData.hasSourceStream) {
+                sourceLinkEl.setAttribute("href", renderData.sourceStream);
+            } else {
+                sourceLinkEl.removeAttribute("href");
+            }
+        }
+
+        card.dataset.audioSrc = nextAudioSrc;
+        card.dataset.recordingState = renderData.recordingState;
+        card.dataset.recordingFileName = renderData.recordingFileName;
+    }
+
     function renderAlerts() {
         const container = elements.alertList;
-        container.innerHTML = "";
         const alerts = getSortedActiveAlerts();
         elements.alertCount.textContent = alerts.length ? `${alerts.length} active` : "None";
 
         if (!alerts.length) {
+            state.alertCardByKey.forEach((card) => card.remove());
+            state.alertCardByKey.clear();
             container.innerHTML = '<div class="empty-state">No active alerts.</div>';
             return;
         }
 
+        const emptyNode = container.querySelector(".empty-state");
+        if (emptyNode) {
+            emptyNode.remove();
+        }
+
+        const nextKeys = [];
         alerts.forEach((alert) => {
-            const card = document.createElement("article");
-            const capAlert = isCapAlert(alert);
-            const normalizedEventText = String(alert?.data?.event_text || "").replace(/^(?:a|an|the)\s+/i, "").trim();
-            const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
-            const eventText = normalizedEventText || parsedEventText?.[1] || "No headline available";
-            const severity = RegExp(/(warning|watch|advisory|emergency|test|alert|message|statement)/i).exec(eventText)?.[1]?.toLowerCase();
             const alertKey = getAlertKey(alert);
-            const availableAudioSrc = state.activeAlertAudioSrcByAlert.get(alertKey) || "";
-            const eventCode = eventCodeForAlert(alert) || "-";
-            const originator = originatorForAlert(alert) || "-";
-            const locationCodes = locationCodesForAlert(alert);
-            const capDescription = capAlert ? String(alert?.data?.description || "").trim() : "";
-
-            card.className = `alert-card ${severity || "unknown"}`;
-            card.innerHTML = `
-                <div class="event-code">${eventCode}</div>
-                <div class="headline">${eventText}</div>
-                <div class="meta">
-                    <div>${alert.data.eas_text || "Alert received."}</div>
-                    <br>
-                    <div><strong>Source:</strong> ${capAlert ? "CAP" : "EAS"}</div>
-                    <br>
-                    <div><strong>Originator:</strong> ${originator}</div>
-                    <br>
-                    <div><strong>Severity:</strong> ${severity ? severity.toUpperCase() : "Unknown"}</div>
-                    <br>
-                    <div><strong>Received:</strong> ${formatTimestamp(alert.received_at * 1000)}</div>
-                    <br>
-                    <div><strong>Expires:</strong> ${formatTimestamp(alert.expires_at * 1000)}</div>
-                    <br>
-                    <div><strong>Length:</strong> ${alert.purge_time.secs ? secondsToHM(alert.purge_time.secs) : "-"}</div>
-                    <br>
-                    ${capDescription ? `<div><strong>CAP Description:</strong> <pre>${escapeHtml(capDescription)}</pre></div><br>` : ""}
-                    <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "-"}</pre></div>
-                    <br>
-                    <div class="alert-audio-row"><strong>Recording audio:</strong><span class="alert-audio-controls">${fetch_audio(availableAudioSrc)}${availableAudioSrc ? `<button type="button" class="download" onclick="window.downloadAudio('${availableAudioSrc}')">Download</button>` : ""}</span></div>
-                </div>
-            `;
-
-            container.appendChild(card);
-            bindAudioUnavailableFallback(card, alertKey);
+            let card = state.alertCardByKey.get(alertKey);
+            if (!card) {
+                card = createAlertCard(alert, alertKey);
+                state.alertCardByKey.set(alertKey, card);
+            } else {
+                patchAlertCard(card, alert);
+            }
+            nextKeys.push(alertKey);
         });
+
+        const nextKeySet = new Set(nextKeys);
+        state.alertCardByKey.forEach((card, key) => {
+            if (!nextKeySet.has(key)) {
+                card.remove();
+                state.alertCardByKey.delete(key);
+            }
+        });
+
+        for (let index = 0; index < nextKeys.length; index += 1) {
+            const card = state.alertCardByKey.get(nextKeys[index]);
+            if (!card) continue;
+            const currentAtIndex = container.children[index];
+            if (currentAtIndex !== card) {
+                container.insertBefore(card, currentAtIndex || null);
+            }
+        }
     }
 
     function renderLogs() {

@@ -756,7 +756,8 @@ fn process_stream(
                                     },
                                     raw_header.clone(),
                                     Duration::from_secs(15 * 60),
-                                );
+                                )
+                                .with_source_stream_url(stream_for_timeout.clone());
 
                                 send_alert_webhook(
                                     &stream_for_timeout,

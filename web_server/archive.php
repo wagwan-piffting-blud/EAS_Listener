@@ -276,6 +276,30 @@ function resolve_id($id) {
     return $manifest["files"][$recording_id];
 }
 
+function resolve_recording_name($name) {
+    if(!is_string($name)) {
+        return null;
+    }
+
+    $recording_name = trim($name);
+    if($recording_name === "") {
+        return null;
+    }
+
+    if($recording_name !== basename($recording_name)) {
+        return null;
+    }
+
+    $manifest = get_recording_manifest();
+    foreach($manifest["files"] as $file) {
+        if(basename($file) === $recording_name) {
+            return $file;
+        }
+    }
+
+    return null;
+}
+
 function get_latest_recording_id(): int {
     $manifest = get_recording_manifest();
     return (int) ($manifest["count"] ?? 0) - 1;
@@ -366,42 +390,10 @@ function hhmmToSeconds(string $hhmmString): int {
     return $totalSeconds;
 }
 
-if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
-        session_set_cookie_params(259200, "/", "", true, true);
-    }
-
-    else {
-        session_set_cookie_params(259200, "/", "", false, true);
-    }
-    session_start();
-}
-
-$requestHeaders = getallheaders();
-
-if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
-    $_SESSION['authed'] = true;
-}
-
-if(!isset($_SESSION['authed'])) {
-    header("Location: index.php?redirect=" . urlencode($_SERVER['REQUEST_URI']));
-    exit();
-}
-
-if(session_status() === PHP_SESSION_ACTIVE) {
-    session_write_close();
-}
-
-if(isset($_GET["latest_id"]) && $_GET["latest_id"] !== null && $_SESSION['authed'] === true) {
-    echo get_latest_recording_id();
-    exit();
-}
-
-if(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null && $_SESSION['authed'] === true) {
+function serve_recording_file(string $file): void {
     $is_head_request = ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD';
-    $file = resolve_id($_GET["recording_id"]);
 
-    if($file === null || $file === false || !file_exists($file)) {
+    if($file === "" || !file_exists($file)) {
         http_response_code(404);
         if(!$is_head_request) {
             echo "File not found.";
@@ -500,6 +492,55 @@ if(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null && $_SESSION['
 
     fclose($handle);
     exit();
+}
+
+if(!session_id()) {
+    if(getenv('USE_REVERSE_PROXY') === 'true') {
+        session_set_cookie_params(259200, "/", "", true, true);
+    }
+
+    else {
+        session_set_cookie_params(259200, "/", "", false, true);
+    }
+    session_start();
+}
+
+$requestHeaders = getallheaders();
+
+if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
+    $_SESSION['authed'] = true;
+}
+
+if(!isset($_SESSION['authed'])) {
+    header("Location: index.php?redirect=" . urlencode($_SERVER['REQUEST_URI']));
+    exit();
+}
+
+if(session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
+if(isset($_GET["latest_id"]) && $_GET["latest_id"] !== null && $_SESSION['authed'] === true) {
+    echo get_latest_recording_id();
+    exit();
+}
+
+if($_SESSION['authed'] === true && (isset($_GET["recording_id"]) || isset($_GET["recording_name"]))) {
+    $file = null;
+
+    if(isset($_GET["recording_name"]) && $_GET["recording_name"] !== null) {
+        $file = resolve_recording_name((string) $_GET["recording_name"]);
+    } elseif(isset($_GET["recording_id"]) && $_GET["recording_id"] !== null) {
+        $file = resolve_id($_GET["recording_id"]);
+    }
+
+    if($file === null || $file === false) {
+        http_response_code(404);
+        echo "File not found.";
+        exit();
+    }
+
+    serve_recording_file($file);
 }
 
 if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {

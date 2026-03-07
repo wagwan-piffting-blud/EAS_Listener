@@ -4,7 +4,7 @@ use crate::filter::{self, FilterAction};
 use crate::header;
 use crate::monitoring::MonitoringHub;
 use crate::relay::RelayState;
-use crate::state::{ActiveAlert, AppState, EasAlertData};
+use crate::state::{ActiveAlert, AlertRecordingState, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
@@ -13,7 +13,7 @@ use hound::{WavSpec, WavWriter};
 use roxmltree::{Document, Node};
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::fs;
@@ -392,6 +392,40 @@ fn parsed_identifier_from_url(url: &str) -> String {
         .to_string()
 }
 
+fn recording_file_name_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
+async fn update_cap_alert_recording_metadata(
+    config: &Config,
+    app_state: &Arc<Mutex<AppState>>,
+    monitoring: &MonitoringHub,
+    raw_header: &str,
+    recording_state: AlertRecordingState,
+    recording_file_name: Option<String>,
+) {
+    let active_snapshot = {
+        let mut guard = app_state.lock().await;
+        if !guard.update_alert_recording_metadata(raw_header, recording_state, recording_file_name)
+        {
+            return;
+        }
+
+        if let Err(err) = update_alert_files(&config.shared_state_dir, &guard).await {
+            warn!(
+                "Failed to update alert files with CAP recording metadata for {}: {}",
+                raw_header, err
+            );
+        }
+
+        guard.active_alerts.clone()
+    };
+
+    monitoring.broadcast_alerts(active_snapshot, None, None);
+}
+
 async fn process_cap_alert(
     config: &Config,
     app_state: &Arc<Mutex<AppState>>,
@@ -466,7 +500,8 @@ async fn process_cap_alert(
         parsed_header,
     };
 
-    let active_alert = ActiveAlert::new(alert_data, raw_header.clone(), purge_time);
+    let active_alert = ActiveAlert::new(alert_data, raw_header.clone(), purge_time)
+        .with_source_stream_url(source_stream.to_string());
 
     let active_snapshot = {
         let mut guard = app_state.lock().await;
@@ -496,6 +531,27 @@ async fn process_cap_alert(
             }
         };
 
+    let recording_state = if cap_recording_path.is_some() {
+        AlertRecordingState::Ready
+    } else {
+        AlertRecordingState::Missing
+    };
+    let recording_file_name = cap_recording_path
+        .as_ref()
+        .and_then(|path| recording_file_name_from_path(path));
+    update_cap_alert_recording_metadata(
+        config,
+        app_state,
+        monitoring,
+        &raw_header,
+        recording_state.clone(),
+        recording_file_name.clone(),
+    )
+    .await;
+
+    let mut alert_for_webhook = active_alert.clone();
+    let _ = alert_for_webhook.update_recording_metadata(recording_state, recording_file_name);
+
     if cap_recording_path.is_none() {
         debug!(
             "CAP alert {} ({}) has no usable audio payload/recording",
@@ -506,7 +562,7 @@ async fn process_cap_alert(
     if filter::should_forward_action(action) {
         send_alert_webhook(
             source_stream,
-            &active_alert,
+            &alert_for_webhook,
             &eas_text,
             &raw_header,
             cap_recording_path.clone(),
@@ -1385,11 +1441,7 @@ fn looks_like_alert_xml(xml: &str) -> bool {
 }
 
 fn build_dedupe_key(alert: &CapAlert) -> String {
-    let sent = alert.sent.map(|dt| dt.to_rfc3339()).unwrap_or_default();
-    format!(
-        "id:{}|sent:{}|code:{}",
-        alert.identifier, sent, alert.event_code
-    )
+    format!("id:{}", alert.identifier)
 }
 
 fn extract_parameter_value<'a, 'input>(

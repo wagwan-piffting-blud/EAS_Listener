@@ -4,7 +4,7 @@ use crate::filter;
 use crate::monitoring::MonitoringHub;
 use crate::recording::{self, RecordingState};
 use crate::relay::RelayState;
-use crate::state::{ActiveAlert, AppState, EasAlertData};
+use crate::state::{ActiveAlert, AlertRecordingState, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -91,7 +91,6 @@ fn is_alert_relevant(alert_data: &EasAlertData, watched_fips: &HashSet<String>) 
 
 #[derive(Debug, Clone)]
 struct AlertDedupEntry {
-    sender_id: String,
     received_at: Instant,
 }
 
@@ -128,18 +127,18 @@ fn should_process_alert(
 
     let preferred = preferred_senderid.trim();
     let incoming_is_preferred = !preferred.is_empty() && sender_id.eq_ignore_ascii_case(preferred);
+    if incoming_is_preferred {
+        cache.insert(
+            dedup_key,
+            AlertDedupEntry {
+                received_at: now,
+            },
+        );
+        return true;
+    }
 
     if let Some(existing) = cache.get_mut(&dedup_key) {
         if now.duration_since(existing.received_at) < ALERT_DEDUP_WINDOW {
-            let existing_is_preferred =
-                !preferred.is_empty() && existing.sender_id.eq_ignore_ascii_case(preferred);
-
-            if incoming_is_preferred && !existing_is_preferred {
-                existing.sender_id = sender_id;
-                existing.received_at = now;
-                return true;
-            }
-
             existing.received_at = now;
             return false;
         }
@@ -148,7 +147,6 @@ fn should_process_alert(
     cache.insert(
         dedup_key,
         AlertDedupEntry {
-            sender_id,
             received_at: now,
         },
     );
@@ -183,6 +181,15 @@ async fn restore_active_alert_state(
     let mut persisted_alerts = read_persisted_active_alerts(state_dir).await?;
     let now = Utc::now();
     persisted_alerts.retain(|alert| alert.expires_at > now);
+    for alert in &mut persisted_alerts {
+        if matches!(alert.recording_state, AlertRecordingState::Pending) {
+            alert.recording_state = if alert.recording_file_name.is_some() {
+                AlertRecordingState::Ready
+            } else {
+                AlertRecordingState::Missing
+            };
+        }
+    }
 
     let mut app_state_guard = state.lock().await;
     let initial_len = app_state_guard.active_alerts.len();
@@ -329,7 +336,8 @@ pub async fn run_alert_manager(
 
         if is_alert_relevant(&alert_data, &config.watched_fips) {
             info!("Alert for watched zone(s) received. Relaying...");
-            let alert = ActiveAlert::new(alert_data.clone(), raw_header.clone(), purge_time);
+            let alert = ActiveAlert::new(alert_data.clone(), raw_header.clone(), purge_time)
+                .with_source_stream_url(stream_id.clone());
 
             let active_snapshot = {
                 let mut app_state_guard = state.lock().await;
@@ -360,6 +368,7 @@ pub async fn run_alert_manager(
             let value = handle_recording_and_webhook(
                 config.clone(),
                 state.clone(),
+                monitoring.clone(),
                 recording_state.clone(),
                 alert,
                 dsame_text,
@@ -381,9 +390,44 @@ pub async fn run_alert_manager(
     Ok(())
 }
 
+fn recording_file_name_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
+async fn update_alert_recording_metadata(
+    config: &Config,
+    state: &Arc<Mutex<AppState>>,
+    monitoring: &MonitoringHub,
+    raw_header: &str,
+    recording_state: AlertRecordingState,
+    recording_file_name: Option<String>,
+) {
+    let active_snapshot = {
+        let mut guard = state.lock().await;
+        if !guard.update_alert_recording_metadata(raw_header, recording_state, recording_file_name)
+        {
+            return;
+        }
+
+        if let Err(err) = update_alert_files(&config.shared_state_dir, &guard).await {
+            error!(
+                "Failed to update alert files with recording metadata: {}",
+                err
+            );
+        }
+
+        guard.active_alerts.clone()
+    };
+
+    monitoring.broadcast_alerts(active_snapshot, None, None);
+}
+
 async fn handle_recording_and_webhook(
     config: Config,
     state: Arc<Mutex<AppState>>,
+    monitoring: MonitoringHub,
     recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     alert: ActiveAlert,
     dsame_text: String,
@@ -396,6 +440,7 @@ async fn handle_recording_and_webhook(
     let event_code = alert.data.event_code.clone();
     let mut recorded_state: Option<(PathBuf, String)> = None;
     let mut join_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
+    let mut initial_recording_metadata: Option<(AlertRecordingState, Option<String>)> = None;
 
     let mut recorder = recording_state.lock().await;
     if !recorder.contains_key(stream_id.as_str()) {
@@ -405,10 +450,31 @@ async fn handle_recording_and_webhook(
                 recorder.insert(stream_id.clone(), new_state);
                 join_handle = Some(handle);
             }
-            Err(e) => warn!("Failed to start recording: {}", e),
+            Err(e) => {
+                warn!("Failed to start recording: {}", e);
+                initial_recording_metadata = Some((AlertRecordingState::Missing, None));
+            }
         }
+    } else {
+        warn!(
+            "Recording already active for stream {}; alert {} will not receive a dedicated recording.",
+            stream_id, event_code
+        );
+        initial_recording_metadata = Some((AlertRecordingState::Missing, None));
     }
     drop(recorder);
+
+    if let Some((recording_state_value, recording_file_name)) = initial_recording_metadata {
+        update_alert_recording_metadata(
+            &config,
+            &state,
+            &monitoring,
+            &raw_header,
+            recording_state_value,
+            recording_file_name,
+        )
+        .await;
+    }
 
     if let Some(handle) = join_handle {
         let sleep_duration = Duration::from_secs(300);
@@ -463,6 +529,24 @@ async fn handle_recording_and_webhook(
         if let Err(e) = handle.await {
             warn!("Encoder task failed: {:?}", e);
         }
+
+        let final_recording_state = if recorded_state.is_some() {
+            AlertRecordingState::Ready
+        } else {
+            AlertRecordingState::Missing
+        };
+        let final_recording_file_name = recorded_state
+            .as_ref()
+            .and_then(|(recording_path, _)| recording_file_name_from_path(recording_path));
+        update_alert_recording_metadata(
+            &config,
+            &state,
+            &monitoring,
+            &raw_header,
+            final_recording_state,
+            final_recording_file_name,
+        )
+        .await;
     }
 
     if filter::should_forward_action(action) {
@@ -759,20 +843,33 @@ mod tests {
     }
 
     #[test]
+    fn should_process_alert_always_processes_preferred_sender_duplicates() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        let raw = "ZCZC-WXR-TOR-031055+0030-1231645-KIH61-";
+
+        assert!(should_process_alert(&mut cache, raw, "KIH61", now));
+        assert!(should_process_alert(
+            &mut cache,
+            raw,
+            "KIH61",
+            now + Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
     fn prune_dedup_cache_removes_stale_entries() {
         let mut cache = HashMap::new();
         let now = Instant::now();
         cache.insert(
             "recent".to_string(),
             AlertDedupEntry {
-                sender_id: "A".to_string(),
                 received_at: now - Duration::from_secs(30),
             },
         );
         cache.insert(
             "stale".to_string(),
             AlertDedupEntry {
-                sender_id: "B".to_string(),
                 received_at: now - ALERT_DEDUP_WINDOW - Duration::from_secs(1),
             },
         );

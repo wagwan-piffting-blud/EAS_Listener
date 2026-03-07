@@ -10,15 +10,12 @@ RUN apt-get update && apt-get install -y pkg-config ffmpeg libssl-dev build-esse
 COPY Cargo.toml Cargo.lock ./
 
 RUN mkdir src && echo "fn main(){}" > src/main.rs
-RUN cargo build --release --locked
 
 COPY src ./src
 COPY include ./include
 COPY tests ./tests
 
-RUN touch -c src/main.rs
-RUN cargo test --locked
-RUN cargo build --release --locked
+RUN touch -c src/main.rs && cargo test --release --locked && cargo build --release --locked
 
 # ----------------------------------------------------------------------------------------- #
 
@@ -53,4 +50,3 @@ EXPOSE ${MONITORING_BIND_PORT}
 EXPOSE 8000
 
 ENTRYPOINT ["/docker_entrypoint.sh"]
-

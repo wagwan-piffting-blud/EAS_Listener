@@ -19,6 +19,21 @@ pub struct EasAlertData {
     pub parsed_header: Option<ParsedEasSerialized>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertRecordingState {
+    Pending,
+    Recording,
+    Ready,
+    Missing,
+}
+
+impl Default for AlertRecordingState {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct ActiveAlert {
@@ -29,6 +44,12 @@ pub struct ActiveAlert {
     #[serde(with = "chrono::serde::ts_seconds")]
     pub expires_at: DateTime<Utc>,
     pub purge_time: Duration,
+    #[serde(default)]
+    pub recording_state: AlertRecordingState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stream_url: Option<String>,
 }
 
 impl ActiveAlert {
@@ -41,7 +62,29 @@ impl ActiveAlert {
             received_at,
             expires_at,
             purge_time,
+            recording_state: AlertRecordingState::Pending,
+            recording_file_name: None,
+            source_stream_url: None,
         }
+    }
+
+    pub fn with_source_stream_url(mut self, source_stream_url: impl Into<String>) -> Self {
+        self.source_stream_url = Some(source_stream_url.into());
+        self
+    }
+
+    pub fn update_recording_metadata(
+        &mut self,
+        recording_state: AlertRecordingState,
+        recording_file_name: Option<String>,
+    ) -> bool {
+        let changed = self.recording_state != recording_state
+            || self.recording_file_name != recording_file_name;
+        if changed {
+            self.recording_state = recording_state;
+            self.recording_file_name = recording_file_name;
+        }
+        changed
     }
 }
 
@@ -87,6 +130,22 @@ impl AppState {
     pub fn update_filters(&mut self, filters: Vec<FilterRule>) {
         filter::install_filters(filters.clone());
         self.filters = filters;
+    }
+
+    pub fn update_alert_recording_metadata(
+        &mut self,
+        raw_header: &str,
+        recording_state: AlertRecordingState,
+        recording_file_name: Option<String>,
+    ) -> bool {
+        let Some(alert) = self
+            .active_alerts
+            .iter_mut()
+            .find(|alert| alert.raw_header == raw_header)
+        else {
+            return false;
+        };
+        alert.update_recording_metadata(recording_state, recording_file_name)
     }
 }
 
@@ -139,5 +198,31 @@ mod tests {
         let cloned = state.cloned_filters();
         assert_eq!(cloned.len(), updated.len());
         assert_eq!(filter::determine_filter_name("TOR"), "Block TOR");
+    }
+
+    #[test]
+    fn app_state_updates_alert_recording_metadata() {
+        let mut state = AppState::new(Vec::new());
+        let alert = ActiveAlert::new(
+            sample_data(),
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-".to_string(),
+            Duration::from_secs(120),
+        );
+        state.active_alerts.push(alert);
+
+        let changed = state.update_alert_recording_metadata(
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-",
+            AlertRecordingState::Ready,
+            Some("EAS_Recording_foo.wav".to_string()),
+        );
+        assert!(changed);
+        assert!(matches!(
+            state.active_alerts[0].recording_state,
+            AlertRecordingState::Ready
+        ));
+        assert_eq!(
+            state.active_alerts[0].recording_file_name.as_deref(),
+            Some("EAS_Recording_foo.wav")
+        );
     }
 }

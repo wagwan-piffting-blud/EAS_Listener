@@ -103,7 +103,7 @@ if (!isset($_SESSION['authed'])) {
         <div class="container">
             <h1>Please login to view the EAS Monitoring Dashboard.</h1>
             <form method="POST" action="<?php print_r(basename($_SERVER["SCRIPT_FILENAME"])); ?>">
-                <input type="text" name="username" placeholder="Username" required /><br /><br />
+                <input type="text" name="username" placeholder="Username" required autofocus /><br /><br />
                 <input type="password" name="password" placeholder="Password" required /><br /><br />
                 <button type="submit">Login</button>
             </form>
