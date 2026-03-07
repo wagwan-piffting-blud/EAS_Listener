@@ -89,3 +89,55 @@ impl AppState {
         self.filters = filters;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_data() -> EasAlertData {
+        EasAlertData {
+            eas_text: "Sample text".to_string(),
+            event_text: "Sample Event".to_string(),
+            event_code: "TOR".to_string(),
+            fips: vec!["031055".to_string()],
+            locations: "Douglas County".to_string(),
+            originator: "WXR".to_string(),
+            description: None,
+            parsed_header: None,
+        }
+    }
+
+    #[test]
+    fn active_alert_new_sets_expiration_from_purge_time() {
+        let purge = Duration::from_secs(180);
+        let alert = ActiveAlert::new(sample_data(), "ZCZC-test".to_string(), purge);
+        assert_eq!(alert.purge_time, purge);
+        assert!(alert.expires_at > alert.received_at);
+        let delta = alert.expires_at - alert.received_at;
+        assert!(delta.num_seconds() >= 179 && delta.num_seconds() <= 181);
+    }
+
+    #[test]
+    fn app_state_update_filters_refreshes_global_filters() {
+        let initial_filters = filter::parse_filters(&json!({
+            "FILTERS": [
+                { "name": "Initial", "event_codes": ["*"], "action": "relay" }
+            ]
+        }));
+        let mut state = AppState::new(initial_filters);
+        assert_eq!(filter::determine_filter_name("TOR"), "Initial");
+
+        let updated = filter::parse_filters(&json!({
+            "FILTERS": [
+                { "name": "Block TOR", "event_codes": ["TOR"], "action": "ignore" },
+                { "name": "Fallback", "event_codes": ["*"], "action": "relay" }
+            ]
+        }));
+        state.update_filters(updated.clone());
+
+        let cloned = state.cloned_filters();
+        assert_eq!(cloned.len(), updated.len());
+        assert_eq!(filter::determine_filter_name("TOR"), "Block TOR");
+    }
+}

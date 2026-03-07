@@ -1,0 +1,8 @@
+{
+  "PROCESS_CAP_ALERTS": true,
+  "CAP_ENDPOINTS": [
+    "https://alerts.example/feed",
+    { "name": "Named Feed", "url": "https://alerts.example/atom" }
+  ],
+  "ICECAST_STREAM_URL_ARRAY": ["http://example.local/stream1.mp3"]
+}

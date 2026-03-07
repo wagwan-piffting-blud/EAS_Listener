@@ -124,8 +124,8 @@ if (!isset($_SESSION['authed'])) {
             <div id="header-right">
                 <span id="wsStatus" class="ws-status">Connecting...</span>
                 <div id="logout-container">
-                    <a class="custom-button" href="reload.php" class="button">Reload Rust Backend</a>
-                    <a class="custom-button" href="logout.php" class="button">Logout</a>
+                    <a class="custom-button button" href="reload.php">Reload Rust Backend</a>
+                    <a class="custom-button button" href="logout.php">Logout</a>
                 </div>
             </div>
         </header>
@@ -160,6 +160,7 @@ if (!isset($_SESSION['authed'])) {
         <footer>
             <span>Powered by <a id="updateLink" data-text="Wags' Rust EAS Listener" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a> v<span id="currentVersion"></span> | <a href="/chargen.php">Enter Character Generator mode</a> | <a href="/vacuum.php">Vacuum old alerts</a></span>
         </footer>
+        <script src="shared.js"></script>
         <script>
             async function fetchGitHubCargoVersion({owner, repo, branch = "main", path = "Cargo.toml", timeoutMs = 8000}) {
                 const url = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(branch)}/${path

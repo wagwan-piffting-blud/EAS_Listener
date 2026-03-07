@@ -1,0 +1,4 @@
+{
+  "MONITORING_BIND_PORT": "not-a-port",
+  "MONITORING_BIND_ADDR": "127.0.0.1:8080"
+}

@@ -169,3 +169,55 @@ pub fn generate_silence_for_duration(sr: u32, duration_sec: f64) -> Vec<i16> {
     let total_samples = (sr as f64 * duration_sec).floor() as usize;
     vec![0i16; total_samples]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_same_header_samples_for_nnnn_is_sized_from_clamped_sample_rate() {
+        let samples = generate_same_header_samples("NNNN", 2000, 0.5).expect("samples");
+        let sr = MIN_SAMPLE_RATE as usize;
+        let samples_per_bit = (MIN_SAMPLE_RATE as f64 * BIT_DURATION_SEC).floor() as usize;
+        let bits_len = (16 + 4) * 8;
+        let per_burst = (bits_len * samples_per_bit) + sr;
+        let expected = per_burst * BURST_COUNT;
+        assert_eq!(samples.len(), expected);
+    }
+
+    #[test]
+    fn generate_same_header_samples_rejects_bad_input() {
+        let err = generate_same_header_samples("BAD", 48_000, 0.5).expect_err("bad header");
+        match err {
+            HeaderError::InvalidConfig(msg) => assert!(msg.contains("start with 'ZCZC-'")),
+            _ => panic!("unexpected error"),
+        }
+
+        let err = generate_attention_tone(48_000, 1.5).expect_err("bad amp");
+        match err {
+            HeaderError::InvalidConfig(msg) => assert!(msg.contains("between 0.0 and 1.0")),
+            _ => panic!("unexpected error"),
+        }
+    }
+
+    #[test]
+    fn generate_attention_tone_and_silence_have_expected_lengths() {
+        let tone = generate_attention_tone(4_000, 0.4).expect("tone");
+        assert_eq!(tone.len(), MIN_SAMPLE_RATE as usize * 8);
+
+        let silence = generate_silence_for_duration(4_000, 1.5);
+        assert_eq!(
+            silence.len(),
+            MIN_SAMPLE_RATE as usize + MIN_SAMPLE_RATE as usize / 2
+        );
+        assert!(silence.iter().all(|sample| *sample == 0));
+    }
+
+    #[test]
+    fn generate_same_header_samples_for_standard_header_is_not_silent() {
+        let header = "ZCZC-WXR-RWT-031055+0015-1231645-KWO35-";
+        let samples = generate_same_header_samples(header, 48_000, 0.8).expect("samples");
+        assert!(!samples.is_empty());
+        assert!(samples.iter().any(|sample| *sample != 0));
+    }
+}

@@ -5,27 +5,8 @@ const filterOptions = document.getElementById("filterOptions");
 const fipsFilterToggle = document.getElementById("fipsFilterToggle");
 const WATCHED_FIPS_FILTER_DEFAULT = true;
 let filterWatchedFips = WATCHED_FIPS_FILTER_DEFAULT;
-
-function formatTimestamp(ts, withTime = true) {
-    if (ts === null || ts === undefined) return "—";
-    const date = new Date(ts);
-    if (Number.isNaN(date.getTime())) return "—";
-    const options = withTime
-    ? {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        }
-    : {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        };
-    return new Intl.DateTimeFormat(undefined, options).format(date);
-}
+const formatTimestamp = window.formatTimestamp;
+const fetch_audio = window.fetch_audio;
 
 async function fetchArchivedAlerts() {
     const maxAlertsInput = document.getElementById("maxAlertCount");
@@ -41,21 +22,6 @@ async function fetchArchivedAlerts() {
     return fetch(`archive.php?${params.toString()}`)
         .then((response) => response.json())
         .catch(() => []);
-}
-
-function fetch_audio(src) {
-    if (!src) return false;
-    return `<audio controls><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
-}
-
-function downloadAudio(src) {
-    if (!src) return;
-    const link = document.createElement("a");
-    link.href = src;
-    link.download = src.split("/").pop();
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
 }
 
 async function renderAlerts() {
@@ -75,7 +41,7 @@ async function renderAlerts() {
         const recordingMarkup = filterWatchedFips && alert.data.audio_recording
             ? `
                 <br>
-                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)} <button type="button" class="download" onclick="downloadAudio('${alert.data.audio_recording}')">Download</button></div>
+                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)} <button type="button" class="download" onclick="window.downloadAudio('${alert.data.audio_recording}')">Download</button></div>
             `
             : "";
 

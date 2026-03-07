@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert>
+  <identifier>TEST-SAME-002</identifier>
+  <sender>nws@example.com</sender>
+  <senderName>National Weather Service</senderName>
+  <sent>2026-03-06T15:30:00Z</sent>
+  <status>Actual</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <info>
+    <event>Tornado Warning</event>
+    <eventCode>
+      <valueName>SAME</valueName>
+      <value>tor</value>
+    </eventCode>
+    <parameter>
+      <valueName>EAS-ORG</valueName>
+      <value>wxr</value>
+    </parameter>
+    <description>TOR TOR TOR\nThe National Weather Service has issued a tornado warning until 330 PM CDT.</description>
+    <instruction>Take shelter now.</instruction>
+    <expires>2026-03-06T16:00:00Z</expires>
+    <resource>
+      <mimeType>audio/mpeg</mimeType>
+      <uri>https://alerts.example/audio/test-alert.mp3</uri>
+    </resource>
+    <area>
+      <areaDesc>Douglas County, NE; Sarpy County, NE</areaDesc>
+      <geocode>
+        <valueName>SAME</valueName>
+        <value>031055, 031153</value>
+      </geocode>
+    </area>
+  </info>
+</alert>

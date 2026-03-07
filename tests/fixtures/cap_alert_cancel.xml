@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert>
+  <identifier>TEST-CANCEL-003</identifier>
+  <sender>sender@example.com</sender>
+  <sent>2026-03-06T15:30:00Z</sent>
+  <status>Actual</status>
+  <msgType>Cancel</msgType>
+  <scope>Public</scope>
+  <info>
+    <event>Tornado Warning</event>
+  </info>
+</alert>

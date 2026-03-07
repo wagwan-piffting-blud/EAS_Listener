@@ -1,0 +1,7 @@
+{
+  "ICECAST_STREAM_URL_ARRAY": [
+    "http://example.local/stream1.mp3"
+  ],
+  "WATCHED_FIPS": "031055,031153",
+  "MONITORING_BIND_ADDR": "127.0.0.1:18080"
+}

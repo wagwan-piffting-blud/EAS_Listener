@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert>
+  <identifier>TEST-VALID-001</identifier>
+  <sender>sender@example.com</sender>
+  <sent>2026-03-06T15:30:00Z</sent>
+  <status>Actual</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <info>
+    <event>Special Weather Statement</event>
+    <urgency>Expected</urgency>
+    <severity>Minor</severity>
+    <certainty>Possible</certainty>
+    <description>Line one of description.</description>
+    <expires>2026-03-06T16:30:00Z</expires>
+    <area>
+      <areaDesc>Douglas County, NE</areaDesc>
+      <geocode>
+        <valueName>SAME</valueName>
+        <value>031055</value>
+      </geocode>
+    </area>
+  </info>
+</alert>

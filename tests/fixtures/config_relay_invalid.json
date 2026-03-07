@@ -1,0 +1,5 @@
+{
+  "SHOULD_RELAY": true,
+  "SHOULD_RELAY_ICECAST": true,
+  "ICECAST_STREAM_URL_ARRAY": ["http://example.local/stream1.mp3"]
+}

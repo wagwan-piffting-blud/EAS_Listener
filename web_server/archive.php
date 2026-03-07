@@ -655,6 +655,7 @@ else { ?><!DOCTYPE html>
                 <div id="oldAlertList" class="section-scroll"></div>
             </section>
         </main>
+        <script src="shared.js"></script>
         <script src="archive.js"></script>
     </body>
 </html>

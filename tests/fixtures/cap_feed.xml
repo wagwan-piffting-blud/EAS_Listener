@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>https://alerts.example/id-only-1</id>
+  </entry>
+  <entry>
+    <link href="https://alerts.example/a1" />
+    <id>https://alerts.example/a1-id</id>
+  </entry>
+  <entry>
+    <link href="https://alerts.example/a2" />
+  </entry>
+  <entry>
+    <link href="https://alerts.example/a1" />
+  </entry>
+</feed>

@@ -295,6 +295,20 @@ pub async fn run_alert_manager(
             continue;
         }
 
+        let action = {
+            let guard = state.lock().await;
+            let filters = guard.cloned_filters();
+            filter::evaluate_action(filters.as_slice(), &event)
+        };
+
+        if action == filter::FilterAction::Ignore {
+            info!(
+                "Ignoring alert due to filter action=ignore: {}",
+                &raw_header
+            );
+            continue;
+        }
+
         info!("Processing alert: {}", &raw_header);
 
         let dsame_result =
@@ -352,6 +366,7 @@ pub async fn run_alert_manager(
                 raw_header,
                 purge_time,
                 stream_id,
+                action,
                 nnnn_rx.resubscribe(),
             );
 
@@ -375,6 +390,7 @@ async fn handle_recording_and_webhook(
     raw_header: String,
     _purge_time: Duration,
     stream_id: String,
+    action: filter::FilterAction,
     mut nnnn_rx: BroadcastReceiver<String>,
 ) {
     let event_code = alert.data.event_code.clone();
@@ -449,7 +465,7 @@ async fn handle_recording_and_webhook(
         }
     }
 
-    if filter::should_forward_alert(&event_code) {
+    if filter::should_forward_action(action) {
         info!("Forwarding alert {} to configured webhook(s)", event_code);
         let recording_path_for_webhook = recorded_state.as_ref().map(|(path, _)| path.clone());
         send_alert_webhook(
@@ -460,6 +476,9 @@ async fn handle_recording_and_webhook(
             recording_path_for_webhook,
         )
         .await;
+    }
+
+    if action != filter::FilterAction::Relay {
         return;
     }
 
@@ -653,4 +672,113 @@ pub async fn update_alert_files(state_dir: &Path, app_state: &AppState) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_alert_data(event_code: &str, fips: &[&str]) -> EasAlertData {
+        EasAlertData {
+            eas_text: "sample text".to_string(),
+            event_text: "Sample Event".to_string(),
+            event_code: event_code.to_string(),
+            fips: fips.iter().map(|value| value.to_string()).collect(),
+            locations: "Sample Location".to_string(),
+            originator: "WXR".to_string(),
+            description: None,
+            parsed_header: None,
+        }
+    }
+
+    #[test]
+    fn classify_severe_and_impact_codes() {
+        assert!(is_severe_alert_event_code("TOR"));
+        assert!(!is_severe_alert_event_code("RWT"));
+        assert!(is_impact_day_event_code("TOA"));
+        assert!(!is_impact_day_event_code("SVR"));
+    }
+
+    #[test]
+    fn alert_relevance_respects_watched_fips() {
+        let alert = sample_alert_data("TOR", &["031055", "031153"]);
+
+        let empty = HashSet::new();
+        assert!(is_alert_relevant(&alert, &empty));
+
+        let mut watched = HashSet::new();
+        watched.insert("031055".to_string());
+        assert!(is_alert_relevant(&alert, &watched));
+
+        watched.clear();
+        watched.insert("000000".to_string());
+        assert!(is_alert_relevant(&alert, &watched));
+
+        watched.clear();
+        watched.insert("999999".to_string());
+        assert!(!is_alert_relevant(&alert, &watched));
+    }
+
+    #[test]
+    fn dedup_key_without_sender_extracts_key_and_sender() {
+        let header = "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-";
+        let (key, sender) = dedup_key_without_sender(header).expect("dedup key");
+        assert_eq!(key, "ZCZC-WXR-TOR-031055+0030-1231645-");
+        assert_eq!(sender, "KWO35");
+        assert!(dedup_key_without_sender("invalid").is_none());
+    }
+
+    #[test]
+    fn should_process_alert_prefers_preferred_senderid() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        let raw_1 = "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-";
+        let raw_2 = "ZCZC-WXR-TOR-031055+0030-1231645-KIH61-";
+
+        assert!(should_process_alert(&mut cache, raw_1, "KIH61", now));
+        assert!(!should_process_alert(
+            &mut cache,
+            raw_1,
+            "KIH61",
+            now + Duration::from_secs(5)
+        ));
+
+        assert!(should_process_alert(
+            &mut cache,
+            raw_2,
+            "KIH61",
+            now + Duration::from_secs(10)
+        ));
+
+        assert!(!should_process_alert(
+            &mut cache,
+            raw_1,
+            "KIH61",
+            now + Duration::from_secs(11)
+        ));
+    }
+
+    #[test]
+    fn prune_dedup_cache_removes_stale_entries() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        cache.insert(
+            "recent".to_string(),
+            AlertDedupEntry {
+                sender_id: "A".to_string(),
+                received_at: now - Duration::from_secs(30),
+            },
+        );
+        cache.insert(
+            "stale".to_string(),
+            AlertDedupEntry {
+                sender_id: "B".to_string(),
+                received_at: now - ALERT_DEDUP_WINDOW - Duration::from_secs(1),
+            },
+        );
+
+        prune_dedup_cache(&mut cache, now);
+        assert!(cache.contains_key("recent"));
+        assert!(!cache.contains_key("stale"));
+    }
 }

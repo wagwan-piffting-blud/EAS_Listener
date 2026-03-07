@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert>
+  <identifier>TEST-MISSING-004</identifier>
+  <sender>sender@example.com</sender>
+  <sent>2026-03-06T15:30:00Z</sent>
+  <status>Actual</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+</alert>

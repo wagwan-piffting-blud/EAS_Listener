@@ -186,7 +186,9 @@ impl Config {
         if let Some(value) = optional_string(&config_json, "SHARED_STATE_DIR")? {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                return Err(anyhow!("SHARED_STATE_DIR cannot be empty in your config.json file"));
+                return Err(anyhow!(
+                    "SHARED_STATE_DIR cannot be empty in your config.json file"
+                ));
             }
             merged.shared_state_dir = PathBuf::from(trimmed);
             shared_dir_overridden = true;
@@ -210,7 +212,9 @@ impl Config {
         if let Some(value) = optional_string(&config_json, "RECORDING_DIR")? {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                return Err(anyhow!("RECORDING_DIR cannot be empty in your config.json file"));
+                return Err(anyhow!(
+                    "RECORDING_DIR cannot be empty in your config.json file"
+                ));
             }
             merged.recording_dir = merged.shared_state_dir.join(trimmed);
         } else if shared_dir_overridden {
@@ -318,7 +322,9 @@ impl Config {
 
         if let Some(cap_entries) = config_json.get("CAP_ENDPOINTS") {
             let Some(entries) = cap_entries.as_array() else {
-                return Err(anyhow!("CAP_ENDPOINTS must be an array in your config.json file"));
+                return Err(anyhow!(
+                    "CAP_ENDPOINTS must be an array in your config.json file"
+                ));
             };
 
             merged.cap_endpoints = entries
@@ -415,5 +421,161 @@ impl Config {
         merged.filters = filter::parse_filters(&config_json);
 
         Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::NamedTempFile;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn materialize_config_fixture(name: &str) -> NamedTempFile {
+        let content = fs::read_to_string(fixture_path(name)).expect("read fixture");
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(content.as_bytes()).expect("write fixture");
+        file
+    }
+
+    fn with_env_var(key: &str, value: Option<&str>, test: impl FnOnce()) {
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        test();
+        if let Some(prev) = previous {
+            std::env::set_var(key, prev);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn safe_defaults_have_expected_values() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("SHARED_STATE_DIR", None, || {
+            with_env_var("MONITORING_BIND_ADDR", None, || {
+                with_env_var("MONITORING_BIND_PORT", None, || {
+                    with_env_var("LOCAL_DEEPLINK_HOST", None, || {
+                        with_env_var("RUST_LOG", None, || {
+                            let cfg = Config::safe_internal_defaults();
+                            assert!(!cfg.shared_state_dir.as_os_str().is_empty());
+                            assert_eq!(cfg.monitoring_bind_addr.port(), cfg.monitoring_bind_port);
+                            assert_eq!(cfg.local_deeplink_host, "auto");
+                            assert_eq!(cfg.log_level, "INFO");
+                            assert_eq!(cfg.icecast_stream_urls.len(), 1);
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn safe_defaults_respect_env_overrides() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("SHARED_STATE_DIR", Some("C:/tmp/eas-unit"), || {
+            with_env_var("MONITORING_BIND_ADDR", Some("127.0.0.1:18999"), || {
+                with_env_var("MONITORING_BIND_PORT", Some("19001"), || {
+                    with_env_var("LOCAL_DEEPLINK_HOST", Some("example.local"), || {
+                        with_env_var("RUST_LOG", Some("DEBUG"), || {
+                            let cfg = Config::safe_internal_defaults();
+                            assert_eq!(cfg.shared_state_dir, PathBuf::from("C:/tmp/eas-unit"));
+                            assert_eq!(cfg.monitoring_bind_addr.to_string(), "127.0.0.1:18999");
+                            assert_eq!(cfg.monitoring_bind_port, 19001);
+                            assert_eq!(cfg.local_deeplink_host, "example.local");
+                            assert_eq!(cfg.log_level, "DEBUG");
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn from_config_json_merges_minimal_fixture() {
+        let file = materialize_config_fixture("config_minimal.json");
+        let cfg =
+            Config::from_config_json(file.path().to_str().expect("path str")).expect("config");
+        assert_eq!(
+            cfg.icecast_stream_urls,
+            vec!["http://example.local/stream1.mp3"]
+        );
+        assert!(cfg.watched_fips.contains("031055"));
+        assert!(cfg.watched_fips.contains("031153"));
+        assert_eq!(cfg.monitoring_bind_addr.to_string(), "127.0.0.1:18080");
+    }
+
+    #[test]
+    fn from_config_json_parses_cap_endpoints_mixed_entries() {
+        let file = materialize_config_fixture("config_cap_endpoints_mixed.json");
+        let cfg =
+            Config::from_config_json(file.path().to_str().expect("path str")).expect("config");
+        assert!(cfg.process_cap_alerts);
+        assert_eq!(cfg.cap_endpoints.len(), 2);
+        assert_eq!(cfg.cap_endpoints[0].name, None);
+        assert_eq!(cfg.cap_endpoints[0].url, "https://alerts.example/feed");
+        assert_eq!(cfg.cap_endpoints[1].name.as_deref(), Some("Named Feed"));
+    }
+
+    #[test]
+    fn from_config_json_rejects_relay_misconfiguration() {
+        let file = materialize_config_fixture("config_relay_invalid.json");
+        let err = Config::from_config_json(file.path().to_str().expect("path str"))
+            .expect_err("expected relay config error");
+        assert!(err.to_string().contains(
+            "ICECAST_RELAY must be set if SHOULD_RELAY and SHOULD_RELAY_ICECAST are true"
+        ));
+    }
+
+    #[test]
+    fn from_config_json_rejects_cap_without_endpoints() {
+        let file = materialize_config_fixture("config_cap_invalid.json");
+        let err = Config::from_config_json(file.path().to_str().expect("path str"))
+            .expect_err("expected cap config error");
+        assert!(err
+            .to_string()
+            .contains("CAP_ENDPOINTS must contain at least one endpoint"));
+    }
+
+    #[test]
+    fn from_config_json_rejects_bad_monitoring_port_type() {
+        let file = materialize_config_fixture("config_malformed_types.json");
+        let err = Config::from_config_json(file.path().to_str().expect("path str"))
+            .expect_err("expected malformed config error");
+        assert!(err
+            .to_string()
+            .contains("MONITORING_BIND_PORT must be a valid integer"));
+    }
+
+    #[test]
+    fn from_config_json_env_local_deeplink_host_takes_precedence() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        with_env_var("LOCAL_DEEPLINK_HOST", Some("env-host.test"), || {
+            let mut file = NamedTempFile::new().expect("temp file");
+            file.write_all(
+                br#"{
+                    "LOCAL_DEEPLINK_HOST": "config-host.test",
+                    "ICECAST_STREAM_URL_ARRAY": ["http://example.local/stream1.mp3"]
+                }"#,
+            )
+            .expect("write");
+            let cfg =
+                Config::from_config_json(file.path().to_str().expect("path str")).expect("config");
+            assert_eq!(cfg.local_deeplink_host, "env-host.test");
+        });
     }
 }

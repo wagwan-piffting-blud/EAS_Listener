@@ -527,3 +527,98 @@ async fn send_ws_message(socket: &mut WebSocket, message: &WsMessage) -> Result<
     socket.send(Message::Text(payload)).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::EasAlertData;
+
+    fn sample_config(username: &str, password: &str) -> Config {
+        let mut cfg = Config::safe_internal_defaults();
+        cfg.dashboard_username = username.to_string();
+        cfg.dashboard_password = password.to_string();
+        cfg
+    }
+
+    fn make_alert(raw_header: &str) -> ActiveAlert {
+        let data = EasAlertData {
+            eas_text: "sample".to_string(),
+            event_text: "Sample Event".to_string(),
+            event_code: "TOR".to_string(),
+            fips: vec!["031055".to_string()],
+            locations: "Douglas County".to_string(),
+            originator: "WXR".to_string(),
+            description: None,
+            parsed_header: None,
+        };
+        ActiveAlert::new(data, raw_header.to_string(), Duration::from_secs(120))
+    }
+
+    #[test]
+    fn token_validation_rejects_default_and_accepts_matching_bearer() {
+        let default_cfg = sample_config("admin", "password");
+        assert!(!token_is_valid("Bearer abc", &default_cfg));
+
+        let cfg = sample_config("alice", "s3cret");
+        assert!(!token_is_valid("Basic abc", &cfg));
+
+        let expected = base64::engine::general_purpose::STANDARD.encode("alice:s3cret");
+        let auth_header = format!("Bearer {expected}");
+        assert!(token_is_valid(auth_header.as_str(), &cfg));
+        assert!(!token_is_valid("Bearer wrong", &cfg));
+    }
+
+    #[test]
+    fn sanitize_host_header_handles_ports_ipv6_and_lists() {
+        assert_eq!(
+            sanitize_host_header("example.com:8080"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            sanitize_host_header("[2001:db8::1]:443"),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(
+            sanitize_host_header("proxy.example.com, origin.example.com"),
+            Some("proxy.example.com".to_string())
+        );
+        assert_eq!(sanitize_host_header("  "), None);
+    }
+
+    #[test]
+    fn extract_deeplink_host_candidate_prefers_forwarded_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-host",
+            "edge.example.net:443".parse().expect("header"),
+        );
+        headers.insert("host", "fallback.local:8080".parse().expect("header"));
+
+        assert_eq!(
+            extract_deeplink_host_candidate(&headers),
+            Some("edge.example.net".to_string())
+        );
+
+        headers.remove("x-forwarded-host");
+        assert_eq!(
+            extract_deeplink_host_candidate(&headers),
+            Some("fallback.local".to_string())
+        );
+    }
+
+    #[test]
+    fn loopback_detection_and_cap_status_payload_work() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("example.com"));
+
+        let alerts = vec![
+            make_alert("ZCZC-WXR-TOR-031055+0030-1231645-IPAWSCAP-"),
+            make_alert("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-"),
+        ];
+        let runtime = CapRuntimeStatus::default();
+        let payload = build_cap_status_payload(&alerts, &runtime);
+        assert_eq!(payload.active_alerts, 1);
+    }
+}

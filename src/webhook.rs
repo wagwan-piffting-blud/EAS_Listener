@@ -762,3 +762,78 @@ fn html_escape(input: &str) -> String {
     }
     escaped
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn event_and_originator_lookup_are_humanized() {
+        assert_eq!(determine_event_title("TOR"), "Tornado Warning");
+        assert_eq!(
+            determine_originator_name("WXR"),
+            "The National Weather Service"
+        );
+        assert_eq!(determine_event_title("ZZZ"), "ZZZ");
+    }
+
+    #[test]
+    fn article_and_escape_helpers_work() {
+        assert_eq!(a_or_an("Emergency"), "An");
+        assert_eq!(a_or_an("Warning"), "A");
+        assert_eq!(html_escape("<a&\"'>"), "&lt;a&amp;&quot;&#39;&gt;");
+    }
+
+    #[test]
+    fn truncate_for_log_preserves_char_boundaries() {
+        let input = "éééé";
+        let clipped = truncate_for_log(input, 3);
+        assert!(clipped.starts_with("é"));
+        assert!(clipped.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn validate_discord_payload_detects_and_accepts_payloads() {
+        let invalid = json!({ "embeds": [] });
+        let issues = validate_discord_payload(&invalid);
+        assert!(!issues.is_empty());
+
+        let embed = build_discord_embed_body(
+            "unknown-stream",
+            "Tornado Warning",
+            "TOR",
+            "The National Weather Service",
+            "2026-03-06 10:00:00 PM",
+            "Sample EAS text",
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-",
+            Some("CAP Description"),
+        );
+        let valid = json!({ "embeds": [embed] });
+        let issues = validate_discord_payload(&valid);
+        assert!(issues.is_empty(), "expected no issues, got: {:?}", issues);
+    }
+
+    #[test]
+    fn markdown_and_plain_body_include_cap_description_when_present() {
+        let markdown = build_markdown_body(
+            "Tornado Warning",
+            "The National Weather Service",
+            "2026-03-06 10:00:00 PM",
+            "Text",
+            "Header",
+            Some("CAP details"),
+        );
+        assert!(markdown.contains("CAP Description"));
+
+        let plain = build_plain_body(
+            "Tornado Warning",
+            "The National Weather Service",
+            "2026-03-06 10:00:00 PM",
+            "Text",
+            "Header",
+            Some("CAP details"),
+        );
+        assert!(plain.contains("CAP Description"));
+    }
+}

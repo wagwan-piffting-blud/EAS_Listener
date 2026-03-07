@@ -14,8 +14,10 @@ RUN cargo build --release --locked
 
 COPY src ./src
 COPY include ./include
+COPY tests ./tests
 
 RUN touch -c src/main.rs
+RUN cargo test --locked
 RUN cargo build --release --locked
 
 # ----------------------------------------------------------------------------------------- #
@@ -51,3 +53,4 @@ EXPOSE ${MONITORING_BIND_PORT}
 EXPOSE 8000
 
 ENTRYPOINT ["/docker_entrypoint.sh"]
+

@@ -1505,3 +1505,58 @@ pub fn E2T(
         humanize_eas(&parsed, endec_mode, canadian_mode)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn valid_header() -> &'static str {
+        include_str!("../tests/fixtures/eas_valid_header.txt").trim()
+    }
+
+    #[test]
+    fn parse_header_extracts_core_fields() {
+        let parsed = parse_header(valid_header()).expect("parsed header");
+        assert_eq!(parsed.originator, "WXR");
+        assert_eq!(parsed.event_code, "TOR");
+        assert_eq!(parsed.fips_codes, vec!["031055", "031153"]);
+        assert_eq!(parsed.duration.hours, 0);
+        assert_eq!(parsed.duration.minutes, 30);
+        assert_eq!(parsed.sender_id, "KWO35");
+        assert_eq!(parsed.start_time.ordinal(), 123);
+        assert_eq!(parsed.start_time.hour(), 16);
+        assert_eq!(parsed.start_time.minute(), 45);
+    }
+
+    #[test]
+    fn parse_header_json_serializes_result() {
+        let json = parse_header_json(valid_header()).expect("json");
+        let value: Value = serde_json::from_str(&json).expect("value");
+        assert_eq!(value["originator"], "WXR");
+        assert_eq!(value["event_code"], "TOR");
+        assert_eq!(value["sender_id"], "KWO35");
+    }
+
+    #[test]
+    fn parse_header_rejects_invalid_input() {
+        let invalid = include_str!("../tests/fixtures/eas_invalid_header.txt").trim();
+        assert!(parse_header(invalid).is_none());
+        let err = parse_header_json(invalid).expect_err("invalid header should fail");
+        assert_eq!(err, "Invalid EAS header format");
+    }
+
+    #[test]
+    fn e2t_returns_error_for_invalid_header() {
+        let text = E2T("not-a-header", "", false, None);
+        assert_eq!(text, "Invalid EAS header format");
+    }
+
+    #[test]
+    fn e2t_generates_humanized_text_for_valid_header() {
+        let text = E2T(valid_header(), "", false, Some("UTC"));
+        assert!(text.contains("The National Weather Service"));
+        assert!(text.to_ascii_lowercase().contains("tornado warning"));
+        assert!(text.contains("Message from KWO35"));
+    }
+}

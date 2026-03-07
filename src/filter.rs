@@ -147,23 +147,42 @@ pub fn match_filter<'a>(filters: &'a [FilterRule], event_code: &str) -> Option<&
 #[allow(dead_code)]
 pub fn should_relay_alert(event_code: &str) -> bool {
     let filters = GLOBAL_FILTERS.read();
-    match_filter(&filters, event_code)
-        .map(|rule| rule.action != FilterAction::Ignore)
-        .unwrap_or(true)
+    matches!(resolve_action(&filters, event_code), FilterAction::Relay)
 }
 
+#[allow(dead_code)]
 pub fn should_log_alert(event_code: &str) -> bool {
     let filters = GLOBAL_FILTERS.read();
-    match_filter(&filters, event_code)
-        .map(|rule| rule.action == FilterAction::Log || rule.action == FilterAction::Relay)
-        .unwrap_or(true)
+    matches!(
+        resolve_action(&filters, event_code),
+        FilterAction::Log | FilterAction::Forward | FilterAction::Relay
+    )
 }
 
+#[allow(dead_code)]
 pub fn should_forward_alert(event_code: &str) -> bool {
     let filters = GLOBAL_FILTERS.read();
-    match_filter(&filters, event_code)
-        .map(|rule| rule.action == FilterAction::Forward)
-        .unwrap_or(false)
+    matches!(
+        resolve_action(&filters, event_code),
+        FilterAction::Forward | FilterAction::Relay
+    )
+}
+
+pub fn should_log_action(action: FilterAction) -> bool {
+    matches!(
+        action,
+        FilterAction::Log | FilterAction::Forward | FilterAction::Relay
+    )
+}
+
+pub fn should_forward_action(action: FilterAction) -> bool {
+    matches!(action, FilterAction::Forward | FilterAction::Relay)
+}
+
+fn resolve_action(filters: &[FilterRule], event_code: &str) -> FilterAction {
+    match_filter(filters, event_code)
+        .map(|rule| rule.action)
+        .unwrap_or(FilterAction::Relay)
 }
 
 fn parse_action(action: &str, filter_name: &str) -> FilterAction {
@@ -186,4 +205,98 @@ fn normalize_event_code(code: &str) -> String {
     let mut normalized = code.trim().to_owned();
     normalized.make_ascii_uppercase();
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_filters_returns_empty_when_disabled() {
+        let cfg = json!({
+            "ENABLE_FILTERS": false,
+            "FILTERS": [
+                {
+                    "name": "Ignored",
+                    "event_codes": ["TOR"],
+                    "action": "ignore"
+                }
+            ]
+        });
+        let filters = parse_filters(&cfg);
+        assert!(filters.is_empty());
+    }
+
+    #[test]
+    fn parse_filters_prefers_exact_over_wildcard() {
+        let cfg = json!({
+            "FILTERS": [
+                {
+                    "name": "Default",
+                    "event_codes": ["*"],
+                    "action": "relay"
+                },
+                {
+                    "name": "Tornado",
+                    "event_codes": ["tor"],
+                    "action": "ignore"
+                }
+            ]
+        });
+        let filters = parse_filters(&cfg);
+        let matched = match_filter(&filters, "TOR").expect("match");
+        assert_eq!(matched.name, "Tornado");
+        assert_eq!(evaluate_action(&filters, "TOR"), FilterAction::Ignore);
+        assert_eq!(evaluate_action(&filters, "SVR"), FilterAction::Relay);
+    }
+
+    #[test]
+    fn parse_filters_invalid_action_defaults_to_relay() {
+        let cfg = json!({
+            "FILTERS": [
+                {
+                    "name": "Broken",
+                    "event_codes": ["RWT"],
+                    "action": "drop"
+                }
+            ]
+        });
+        let filters = parse_filters(&cfg);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].action, FilterAction::Relay);
+    }
+
+    #[test]
+    fn global_filters_drive_helper_functions() {
+        let cfg = json!({
+            "FILTERS": [
+                {
+                    "name": "RWT ignore",
+                    "event_codes": ["RWT"],
+                    "action": "ignore"
+                },
+                {
+                    "name": "Fallback",
+                    "event_codes": ["*"],
+                    "action": "forward"
+                }
+            ]
+        });
+        let filters = parse_filters(&cfg);
+        install_filters(filters.clone());
+
+        assert_eq!(determine_filter_name("RWT"), "RWT ignore");
+        assert!(!should_relay_alert("RWT"));
+        assert!(!should_log_alert("RWT"));
+        assert!(!should_forward_alert("RWT"));
+
+        assert_eq!(determine_filter_name("TOR"), "Fallback");
+        assert!(!should_relay_alert("TOR"));
+        assert!(should_log_alert("TOR"));
+        assert!(should_forward_alert("TOR"));
+
+        assert!(should_log_action(FilterAction::Relay));
+        assert!(should_forward_action(FilterAction::Forward));
+    }
 }

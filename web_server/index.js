@@ -9,19 +9,6 @@
     const AUDIO_PROBE_BACKOFF_MAX_MS = 60000;
     const AUDIO_NOT_AVAILABLE_TEXT = "Audio is not currently available. Maybe it's still recording? Retrying in __SECOND__s...";
     const STREAM_RENDER_FALLBACK_DELAY_MS = 16;
-    const TIMESTAMP_WITH_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-    });
-    const TIMESTAMP_DATE_ONLY_FORMATTER = new Intl.DateTimeFormat(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-    });
     const LOCATION_CODE_PATTERN = /\d{6}/g;
     const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
     const CAP_HEADER_SOURCE_MARKER = "IPAWSCAP";
@@ -121,17 +108,11 @@
         capStatusSection: document.getElementById("capStatusSection"),
         capStatus: document.getElementById("capStatus"),
     };
+    const formatTimestamp = window.formatTimestamp;
 
     function setWsStatus(text, statusClass) {
         elements.wsStatus.textContent = text;
         elements.wsStatus.className = `ws-status ${statusClass || ""}`.trim();
-    }
-
-    function formatTimestamp(ts, withTime = true) {
-        if (ts === null || ts === undefined) return "-";
-        const date = new Date(ts);
-        if (Number.isNaN(date.getTime())) return "-";
-        return (withTime ? TIMESTAMP_WITH_TIME_FORMATTER : TIMESTAMP_DATE_ONLY_FORMATTER).format(date);
     }
 
     function formatDuration(seconds) {
@@ -600,12 +581,11 @@
         return `${hoursPart}${hoursPart && minutesPart ? ' ' : ''}${minutesPart}`;
     }
 
-    function fetch_audio(src) {
-        if (!src) {
-            return `<span data-audio-unavailable="true">${getAudioUnavailableText()}</span>`;
-        }
-        return `<audio controls preload="none" data-alert-audio="true"><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
-    }
+    const fetch_audio = (src) => window.fetch_audio(src, {
+        preload: "none",
+        dataAlertAudio: true,
+        unavailableMarkup: `<span data-audio-unavailable="true">${getAudioUnavailableText()}</span>`,
+    });
 
     async function fetchAudioUrl() {
         try {
@@ -923,16 +903,6 @@
         return expanded;
     }
 
-    function downloadAudio(src) {
-        if (!src) return;
-        const link = document.createElement("a");
-        link.href = `/${src}`;
-        link.download = src.split("/").pop() || "alert_audio.wav";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    }
-
     function renderAlerts() {
         const container = elements.alertList;
         container.innerHTML = "";
@@ -980,7 +950,7 @@
                     ${capDescription ? `<div><strong>CAP Description:</strong> <pre>${escapeHtml(capDescription)}</pre></div><br>` : ""}
                     <div><strong>Raw ZCZC String:</strong> <pre>${alert.raw_header || "-"}</pre></div>
                     <br>
-                    <div class="alert-audio-row"><strong>Recording audio:</strong><span class="alert-audio-controls">${fetch_audio(availableAudioSrc)}${availableAudioSrc ? `<button type="button" class="download" onclick="downloadAudio('${availableAudioSrc}')">Download</button>` : ""}</span></div>
+                    <div class="alert-audio-row"><strong>Recording audio:</strong><span class="alert-audio-controls">${fetch_audio(availableAudioSrc)}${availableAudioSrc ? `<button type="button" class="download" onclick="window.downloadAudio('${availableAudioSrc}')">Download</button>` : ""}</span></div>
                 </div>
             `;
 

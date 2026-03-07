@@ -402,8 +402,22 @@ async fn process_cap_alert(
 ) {
     let event_code = normalize_event_code(&alert.event_code);
 
+    let filters = {
+        let guard = app_state.lock().await;
+        guard.cloned_filters()
+    };
+    let action = filter::evaluate_action(filters.as_slice(), &event_code);
+    if action == FilterAction::Ignore {
+        debug!(
+            "Skipping CAP alert {} ({}) due to filter action=ignore",
+            alert.identifier, event_code
+        );
+        return;
+    }
+
     let cap_relevant = is_cap_relevant(&alert.fips, &config.watched_fips);
-    let should_log_cap_entry = cap_relevant || config.should_log_all_alerts;
+    let should_log_cap_entry =
+        filter::should_log_action(action) && (cap_relevant || config.should_log_all_alerts);
     if should_log_cap_entry {
         if let Err(err) = append_cap_log(config, &alert).await {
             warn!("Failed to append CAP log entry: {}", err);
@@ -414,20 +428,6 @@ async fn process_cap_alert(
         debug!(
             "Skipping CAP alert {} ({}) because FIPS {:?} does not match watched set",
             alert.identifier, event_code, alert.fips
-        );
-        return;
-    }
-
-    let filters = {
-        let guard = app_state.lock().await;
-        guard.cloned_filters()
-    };
-
-    let action = filter::evaluate_action(filters.as_slice(), &event_code);
-    if action == FilterAction::Ignore {
-        debug!(
-            "Skipping CAP alert {} ({}) due to filter action=ignore",
-            alert.identifier, event_code
         );
         return;
     }
@@ -503,7 +503,7 @@ async fn process_cap_alert(
         );
     }
 
-    if filter::should_log_alert(&event_code) || filter::should_forward_alert(&event_code) {
+    if filter::should_forward_action(action) {
         send_alert_webhook(
             source_stream,
             &active_alert,
@@ -1746,5 +1746,157 @@ fn sanitize_filename_label(label: &str) -> String {
         "UNKNOWN".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn parse_feed_alert_links_collects_and_deduplicates() {
+        let xml = include_str!("../tests/fixtures/cap_feed.xml");
+        let links = parse_feed_alert_links(xml).expect("links");
+        assert_eq!(
+            links,
+            vec![
+                "https://alerts.example/a1",
+                "https://alerts.example/a2",
+                "https://alerts.example/id-only-1"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cap_alert_valid_fixture_parses_core_fields() {
+        let xml = include_str!("../tests/fixtures/cap_alert_valid.xml");
+        let alert = parse_cap_alert(xml, "https://alerts.example/valid").expect("alert");
+        assert_eq!(alert.identifier, "TEST-VALID-001");
+        assert_eq!(alert.event_text, "Special Weather Statement");
+        assert_eq!(alert.event_code, "SPE");
+        assert_eq!(alert.originator_code, "CIV");
+        assert_eq!(alert.fips, vec!["031055"]);
+        assert!(alert.audio_uri.is_none());
+    }
+
+    #[test]
+    fn parse_cap_alert_same_audio_fixture_uses_same_fields() {
+        let xml = include_str!("../tests/fixtures/cap_alert_same_audio.xml");
+        let alert = parse_cap_alert(xml, "https://alerts.example/same").expect("alert");
+        assert_eq!(alert.identifier, "TEST-SAME-002");
+        assert_eq!(alert.event_code, "TOR");
+        assert_eq!(alert.originator_code, "WXR");
+        assert_eq!(alert.fips, vec!["031055", "031153"]);
+        assert_eq!(
+            alert.audio_uri.as_deref(),
+            Some("https://alerts.example/audio/test-alert.mp3")
+        );
+        assert_eq!(alert.audio_mime_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(alert.instructions.as_deref(), Some("Take shelter now."));
+    }
+
+    #[test]
+    fn parse_cap_alert_rejects_cancel_and_missing_info() {
+        let cancel_xml = include_str!("../tests/fixtures/cap_alert_cancel.xml");
+        assert!(parse_cap_alert(cancel_xml, "https://alerts.example/cancel").is_err());
+
+        let missing_info_xml = include_str!("../tests/fixtures/cap_alert_missing_info.xml");
+        assert!(parse_cap_alert(missing_info_xml, "https://alerts.example/missing").is_err());
+    }
+
+    #[test]
+    fn normalize_helpers_work_for_event_originator_and_fips() {
+        assert_eq!(normalize_event_code("to"), "TO0");
+        assert_eq!(normalize_event_code("   !!!"), "CAP");
+        assert_eq!(normalize_originator_code("wx"), "WXX");
+        assert_eq!(normalize_originator_code(""), "CIV");
+        assert_eq!(normalize_fips_code("31055"), Some("031055".to_string()));
+        assert_eq!(normalize_fips_code("0310559"), Some("031055".to_string()));
+        assert_eq!(normalize_fips_code("abc"), None);
+    }
+
+    #[test]
+    fn encode_expiration_and_header_building_are_stable() {
+        let sent = Utc
+            .with_ymd_and_hms(2026, 3, 6, 15, 0, 0)
+            .single()
+            .expect("sent");
+        let expires = Utc
+            .with_ymd_and_hms(2026, 3, 6, 16, 35, 0)
+            .single()
+            .expect("expires");
+        assert_eq!(
+            encode_expiration_from_cap(Some(sent), Some(expires)),
+            "0135"
+        );
+        assert_eq!(encode_expiration_from_cap(Some(sent), Some(sent)), "0030");
+
+        let header = build_cap_raw_header("wx", "to", &[], Some(sent), Some(expires), "id");
+        assert!(header.starts_with("ZCZC-WXX-TO0-099999+0135-"));
+        assert!(header.ends_with("-IPAWSCAP-"));
+    }
+
+    #[test]
+    fn deref_uri_decode_supports_data_uri_and_raw_base64() {
+        let data_uri = "data:audio/wav;base64,SGVsbG8=";
+        let raw = "SGVsbG8=";
+        assert_eq!(decode_deref_uri_audio(data_uri).expect("decode"), b"Hello");
+        assert_eq!(decode_deref_uri_audio(raw).expect("decode"), b"Hello");
+        assert!(decode_deref_uri_audio("not-base64").is_err());
+    }
+
+    #[test]
+    fn audio_resource_and_extension_detection_work() {
+        assert!(is_audio_resource(Some("audio/mpeg"), None, None));
+        assert!(is_audio_resource(None, Some("https://x/y/test.wav"), None));
+        assert!(is_audio_resource(None, None, Some("SGVsbG8=")));
+        assert!(!is_audio_resource(
+            Some("text/plain"),
+            Some("https://x/y/test.txt"),
+            None
+        ));
+
+        assert_eq!(audio_extension(Some("audio/mpeg"), None), "mp3");
+        assert_eq!(audio_extension(None, Some("https://x/y/test.ogg")), "ogg");
+        assert_eq!(
+            audio_extension(Some("application/octet-stream"), None),
+            "bin"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_and_time_helpers_work() {
+        assert_eq!(
+            sanitize_filename_label("tor/warning 2026"),
+            "TOR_WARNING_2026"
+        );
+        assert_eq!(sanitize_filename_label("***"), "UNKNOWN");
+
+        assert_eq!(parse_compact_time("9"), Some((9, 0)));
+        assert_eq!(parse_compact_time("1234"), Some((12, 34)));
+        assert_eq!(parse_compact_time("1360"), None);
+
+        let expanded = expand_cap_times_for_tts("Until 930 AM CDT in effect.");
+        assert!(expanded.contains("9:30 AM Central Daylight Time"));
+    }
+
+    #[test]
+    fn cap_relevance_respects_watched_fips_and_wildcards() {
+        let alert_fips = vec!["031055".to_string(), "031153".to_string()];
+        let empty = HashSet::new();
+        assert!(is_cap_relevant(&alert_fips, &empty));
+
+        let mut watched = HashSet::new();
+        watched.insert("031055".to_string());
+        assert!(is_cap_relevant(&alert_fips, &watched));
+
+        watched.clear();
+        watched.insert("000000".to_string());
+        assert!(is_cap_relevant(&alert_fips, &watched));
+
+        watched.clear();
+        watched.insert("999999".to_string());
+        assert!(!is_cap_relevant(&alert_fips, &watched));
     }
 }
