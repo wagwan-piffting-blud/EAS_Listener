@@ -45,7 +45,7 @@ This project is licensed under the **GNU GPL-3.0** (see [`LICENSE`](LICENSE)).
 ---
 
 ## Acknowledgments
-- [\@\_spchalethorpe09\_](https://sterlingvaspc.neocities.org/) and @aimaismog on Discord for thorough testing, feedback, and suggestions
+- [\@\_spchalethorpe09\_](https://sterlingvaspc.neocities.org/) and [\@aimaismog](https://github.com/aimaismog) on Discord for thorough testing, feedback, and suggestions
 - Global Weather and EAS Society (GWES) for their overall support and resources
 - SAME decoders and EAS/NWR community research
 - Rust ecosystem maintainers
