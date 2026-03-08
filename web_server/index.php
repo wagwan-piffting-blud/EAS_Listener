@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . "/config.php";
+
 function handle_redirect($current_url, $redirect_url = null)
 {
     if (!empty($redirect_url) && isset($redirect_url)) {
@@ -12,7 +14,7 @@ function handle_redirect($current_url, $redirect_url = null)
 }
 
 if (!session_id()) {
-    if (getenv('USE_REVERSE_PROXY') === 'true') {
+    if (app_use_reverse_proxy()) {
         session_set_cookie_params(259200, "/", "", true, true);
     } else {
         session_set_cookie_params(259200, "/", "", false, true);
@@ -22,8 +24,8 @@ if (!session_id()) {
 }
 
 if (!empty($_POST["username"]) && !empty($_POST["password"])) {
-    $valid_user = getenv('DASHBOARD_USERNAME');
-    $valid_pass = getenv('DASHBOARD_PASSWORD');
+    $valid_user = app_dashboard_username();
+    $valid_pass = app_dashboard_password();
 
     if ($_POST["username"] === $valid_user && $_POST["password"] === $valid_pass) {
         $_SESSION['authed'] = true;
@@ -124,7 +126,7 @@ if (!isset($_SESSION['authed'])) {
             <div id="header-right">
                 <span id="wsStatus" class="ws-status">Connecting...</span>
                 <div id="logout-container">
-                    <a class="custom-button button" href="reload.php">Reload Rust Backend</a>
+                    <button id="reloadButton" class="custom-button button">Reload Config/Backend</button>
                     <a class="custom-button button" href="logout.php">Logout</a>
                 </div>
             </div>
@@ -275,22 +277,23 @@ if (!isset($_SESSION['authed'])) {
                 console.warn("Update check failed:", err);
             });
 
-            window.API_BASE = "<?php if (getenv('USE_REVERSE_PROXY') == 'true') {
-                print_r(getenv('WS_REVERSE_PROXY_URL'));
-            } else {
-                print_r(substr($_SERVER['HTTP_HOST'], 0, strpos($_SERVER['HTTP_HOST'], ':') ?: strlen($_SERVER['HTTP_HOST'])) . ":" . getenv('MONITORING_BIND_PORT') ?: '8080');
-            }
-            ?>";
+            document.getElementById("reloadButton").addEventListener("click", () => {
+                if (confirm("Are you sure you want to reload the configuration and Rust backend? This will temporarily interrupt monitoring while the backend restarts.")) {
+                    window.location.href = "reload.php";
+                }
+            });
 
-            window.TOKEN = "<?php print_r(base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))); ?>";
+            window.API_BASE = "<?php print_r(app_monitoring_api_base((string) ($_SERVER['HTTP_HOST'] ?? 'localhost'))); ?>";
 
-            window.MONITORING_MAX_LOGS = <?php echo getenv('MONITORING_MAX_LOGS') ?: '500'; ?>;
+            window.TOKEN = "<?php print_r(app_auth_token()); ?>";
+
+            window.MONITORING_MAX_LOGS = <?php echo (int) app_config('MONITORING_MAX_LOGS', 500); ?>;
 
             window.ALERTSOUNDDATA = "<?php include 'alert_noise.php'; ?>";
 
-            window.ALERTSOUNDENABLED = <?php echo (getenv('ALERT_SOUND_ENABLED') === 'true') ? 'true' : 'false'; ?>;
+            window.ALERTSOUNDENABLED = <?php echo app_bool('ALERT_SOUND_ENABLED', false) ? 'true' : 'false'; ?>;
 
-            window.ICECAST_STREAM_URL_MAPPING = <?php echo json_encode(getenv('ICECAST_STREAM_URL_MAPPING') ? json_decode(getenv('ICECAST_STREAM_URL_MAPPING')) : []); ?>;
+            window.ICECAST_STREAM_URL_MAPPING = <?php echo json_encode(app_array('ICECAST_STREAM_URL_MAPPING', [])); ?>;
         </script>
         <script src="index.js"></script>
     </body>

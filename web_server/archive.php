@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . "/config.php";
+
 function get_watched_fips_lookup(): array {
     static $lookup = null;
 
@@ -8,7 +10,7 @@ function get_watched_fips_lookup(): array {
     }
 
     $lookup = [];
-    $watched_fips_env = trim(getenv("WATCHED_FIPS") ?: "");
+    $watched_fips_env = trim(app_string("WATCHED_FIPS", ""));
 
     if($watched_fips_env === "" || $watched_fips_env === "000000") {
         return $lookup;
@@ -57,7 +59,7 @@ function get_active_raw_headers_lookup(): array {
     }
 
     $lookup = [];
-    $shared_state_dir = rtrim((string) (getenv("SHARED_STATE_DIR") ?: ""), "/\\");
+    $shared_state_dir = app_shared_state_dir();
     if($shared_state_dir === "") {
         return $lookup;
     }
@@ -109,7 +111,7 @@ function extract_logged_raw_header(string $alert_line): string {
 }
 
 function get_recording_dir(): string {
-    return rtrim((string) (getenv("RECORDING_DIR") ?: ""), "/\\");
+    return app_recording_dir();
 }
 
 function get_recording_manifest_path(string $recording_dir): string {
@@ -495,7 +497,7 @@ function serve_recording_file(string $file): void {
 }
 
 if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
+    if(app_use_reverse_proxy()) {
         session_set_cookie_params(259200, "/", "", true, true);
     }
 
@@ -507,7 +509,7 @@ if(!session_id()) {
 
 $requestHeaders = getallheaders();
 
-if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
+if(app_request_is_authorized($requestHeaders)) {
     $_SESSION['authed'] = true;
 }
 
@@ -544,10 +546,10 @@ if($_SESSION['authed'] === true && (isset($_GET["recording_id"]) || isset($_GET[
 }
 
 if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
-    date_default_timezone_set(getenv("TZ") ?: "UTC");
+    date_default_timezone_set(app_string("TZ", "UTC"));
     header("Content-Type: application/json");
 
-    $alerts_file_path = getenv("SHARED_STATE_DIR") . "/" . getenv("DEDICATED_ALERT_LOG_FILE");
+    $alerts_file_path = app_dedicated_alert_log_path();
     $max_alerts = $_GET['max_alerts'] ?? 50;
     $alert_lines = [];
     $alertdata = [];

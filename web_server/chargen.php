@@ -1,7 +1,9 @@
 <?php
 
+require_once __DIR__ . "/config.php";
+
 if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
+    if(app_use_reverse_proxy()) {
         session_set_cookie_params(259200, "/", "", true, true);
     }
 
@@ -13,7 +15,7 @@ if(!session_id()) {
 
 $requestHeaders = getallheaders();
 
-if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
+if(app_request_is_authorized($requestHeaders)) {
     $_SESSION['authed'] = true;
 }
 
@@ -33,16 +35,8 @@ else { ?><!DOCTYPE html>
     <body>
         <main
             id="chargen"
-            data-api-base="<?php
-                if(getenv('USE_REVERSE_PROXY') == 'true') {
-                    print_r(getenv('WS_REVERSE_PROXY_URL'));
-                }
-
-                else {
-                    print_r(substr($_SERVER['HTTP_HOST'], 0, strpos($_SERVER['HTTP_HOST'], ':') ?: strlen($_SERVER['HTTP_HOST'])) . ":" . getenv('MONITORING_BIND_PORT') ?: '8080');
-                }
-            ?>"
-            data-token="<?php print_r(base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))); ?>"
+            data-api-base="<?php print_r(app_monitoring_api_base((string) ($_SERVER['HTTP_HOST'] ?? 'localhost'))); ?>"
+            data-token="<?php print_r(app_auth_token()); ?>"
             data-default-text="EAS DETAILS CHANNEL"
         >
             <div id="cgControls" aria-label="Character generator options">

@@ -30,12 +30,15 @@ const CAP_HTTP_TIMEOUT_SECS: u64 = 10;
 const CAP_DEFAULT_PURGE_SECS: u64 = 30 * 60;
 const CAP_SEEN_DEFAULT_TTL_SECS: i64 = 6 * 60 * 60;
 const CAP_FORBIDDEN_SKIP_TTL_SECS: i64 = 24 * 60 * 60;
+const CAP_PARSE_ERROR_SKIP_TTL_SECS: i64 = 24 * 60 * 60;
 const CAP_AUDIO_MAX_BYTES: usize = 25 * 1024 * 1024;
 const CAP_RECORDING_SAMPLE_RATE: u32 = 48_000;
-const CAP_HEADER_AMPLITUDE: f64 = 0.79;
+const CAP_HEADER_AMPLITUDE: f64 = 0.42;
 const CAP_TTS_WINE_PATH: &str = "/usr/lib/wine/wine";
 const CAP_TTS_DUMPER_PATH: &str = "/app/Speechify/bin/spfy_dumpwav32.exe";
 const CAP_TTS_REPLACEMENT_DICT_PATH: &str = "/app/cap_tts_replacement_config.json";
+const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
+const CAP_HEADER_SOURCE_MARKER: &str = "IPAWSCAP";
 
 static CAP_TTS_SYNTH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -171,6 +174,8 @@ pub async fn run_cap_processor(
         .context("Failed to create CAP HTTP client")?;
 
     let mut seen_alerts: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut persisted_active_cap_headers =
+        load_persisted_active_cap_headers(&config.shared_state_dir).await;
     let mut ticker = interval(Duration::from_secs(CAP_POLL_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -229,6 +234,23 @@ pub async fn run_cap_processor(
                     endpoint_url
                 );
                 vec![(endpoint_url.to_string(), feed_xml)]
+            } else if let Some(alerts) = match parse_inline_alert_documents(&feed_xml, endpoint_url)
+            {
+                Ok(alerts) => alerts,
+                Err(err) => {
+                    warn!(
+                        "Failed to parse embedded CAP alerts from {}: {}",
+                        endpoint_url, err
+                    );
+                    continue;
+                }
+            } {
+                debug!(
+                    "Parsed {} embedded CAP alert(s) from {}",
+                    alerts.len(),
+                    endpoint_url
+                );
+                alerts
             } else {
                 let links = match parse_feed_alert_links(&feed_xml) {
                     Ok(links) => {
@@ -282,6 +304,12 @@ pub async fn run_cap_processor(
             };
 
             for (alert_url, alert_xml) in alert_sources {
+                let url_seen_key = format!("url:{}", alert_url);
+                if seen_alerts.contains_key(&url_seen_key) {
+                    debug!("Skipping already-seen CAP alert URL {}", alert_url);
+                    continue;
+                }
+
                 let parsed = match parse_cap_alert(&alert_xml, &alert_url) {
                     Ok(alert) => {
                         debug!(
@@ -296,14 +324,11 @@ pub async fn run_cap_processor(
                             alert_url, err
                         );
 
-                        let dedupe_key = HashMap::from([
-                            ("id", parsed_identifier_from_url(&alert_url)),
-                            ("url", alert_url.clone()),
-                        ])
-                        .into_iter()
-                        .map(|(k, v)| format!("{}:{}", k, v))
-                        .collect::<Vec<_>>()
-                        .join(",");
+                        let dedupe_key = format!(
+                            "parse-error:id:{}|url:{}",
+                            parsed_identifier_from_url(&alert_url),
+                            alert_url
+                        );
 
                         if seen_alerts.contains_key(&dedupe_key) {
                             debug!(
@@ -313,9 +338,10 @@ pub async fn run_cap_processor(
                             continue;
                         }
 
-                        let seen_until = Utc::now() + ChronoDuration::seconds(86400);
+                        let seen_until =
+                            Utc::now() + ChronoDuration::seconds(CAP_PARSE_ERROR_SKIP_TTL_SECS);
                         seen_alerts.insert(dedupe_key, seen_until);
-                        seen_alerts.insert(format!("url:{}", alert_url), seen_until);
+                        seen_alerts.insert(url_seen_key, seen_until);
                         continue;
                     }
                 };
@@ -343,9 +369,34 @@ pub async fn run_cap_processor(
                             CAP_SEEN_DEFAULT_TTL_SECS
                         );
                         seen_alerts.insert(dedupe_key, seen_until);
-                        seen_alerts.insert(format!("url:{}", alert_url), seen_until);
+                        seen_alerts.insert(url_seen_key, seen_until);
                         continue;
                     }
+                }
+
+                let normalized_event_code = normalize_event_code(&parsed.event_code);
+                let raw_header = build_cap_raw_header(
+                    &parsed.originator_code,
+                    &normalized_event_code,
+                    &parsed.fips,
+                    parsed.sent,
+                    parsed.expires,
+                    &parsed.identifier,
+                );
+                if persisted_active_cap_headers.contains(&raw_header)
+                    || cap_header_is_active(&app_state, &raw_header).await
+                {
+                    let seen_until = match parsed.expires {
+                        Some(expires_at) if expires_at > Utc::now() => expires_at,
+                        _ => Utc::now() + ChronoDuration::seconds(CAP_SEEN_DEFAULT_TTL_SECS),
+                    };
+                    debug!(
+                        "Skipping CAP alert {} (identifier={}, event_code={}) because it already exists in active state",
+                        alert_url, parsed.identifier, parsed.event_code
+                    );
+                    seen_alerts.insert(dedupe_key, seen_until);
+                    seen_alerts.insert(url_seen_key, seen_until);
+                    continue;
                 }
 
                 debug!(
@@ -375,14 +426,22 @@ pub async fn run_cap_processor(
                     Some(expires_at) if expires_at > Utc::now() => expires_at,
                     _ => Utc::now() + ChronoDuration::seconds(CAP_SEEN_DEFAULT_TTL_SECS),
                 };
+                persisted_active_cap_headers.insert(raw_header);
                 seen_alerts.insert(dedupe_key, seen_until);
-                seen_alerts.insert(format!("url:{}", alert_url), seen_until);
+                seen_alerts.insert(url_seen_key, seen_until);
             }
         }
     }
 }
 
 fn parsed_identifier_from_url(url: &str) -> String {
+    if let Some((_, fragment)) = url.rsplit_once('#') {
+        let fragment = fragment.trim();
+        if !fragment.is_empty() {
+            return fragment.to_string();
+        }
+    }
+
     url.rsplit('/')
         .next()
         .unwrap_or(url)
@@ -390,6 +449,56 @@ fn parsed_identifier_from_url(url: &str) -> String {
         .next()
         .unwrap_or(url)
         .to_string()
+}
+
+async fn load_persisted_active_cap_headers(shared_state_dir: &Path) -> HashSet<String> {
+    let path = shared_state_dir.join(CAP_ACTIVE_ALERTS_FILE);
+    let bytes = match fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
+        Err(err) => {
+            warn!(
+                "Failed reading persisted CAP active alerts from {}: {}",
+                path.display(),
+                err
+            );
+            return HashSet::new();
+        }
+    };
+
+    if bytes.is_empty() {
+        return HashSet::new();
+    }
+
+    let alerts = match serde_json::from_slice::<Vec<ActiveAlert>>(&bytes) {
+        Ok(alerts) => alerts,
+        Err(err) => {
+            warn!(
+                "Failed parsing persisted CAP active alerts from {}: {}",
+                path.display(),
+                err
+            );
+            return HashSet::new();
+        }
+    };
+
+    let now = Utc::now();
+    alerts
+        .into_iter()
+        .filter(|alert| {
+            alert.expires_at > now && alert.raw_header.contains(CAP_HEADER_SOURCE_MARKER)
+        })
+        .map(|alert| alert.raw_header)
+        .collect()
+}
+
+async fn cap_header_is_active(app_state: &Arc<Mutex<AppState>>, raw_header: &str) -> bool {
+    let now = Utc::now();
+    let guard = app_state.lock().await;
+    guard
+        .active_alerts
+        .iter()
+        .any(|alert| alert.expires_at > now && alert.raw_header == raw_header)
 }
 
 fn recording_file_name_from_path(path: &Path) -> Option<String> {
@@ -657,6 +766,53 @@ fn parse_feed_alert_links(xml: &str) -> Result<Vec<String>> {
     Ok(links)
 }
 
+fn parse_inline_alert_documents(
+    xml: &str,
+    endpoint_url: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !xml.contains("<alert") {
+        return Ok(None);
+    }
+
+    let doc = match Document::parse(xml) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return Err(anyhow!("Invalid CAP alert collection XML: {}", err));
+        }
+    };
+
+    let mut alerts = Vec::new();
+    let mut seen_sources = HashSet::new();
+    for (index, alert_node) in doc
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "alert")
+        .enumerate()
+    {
+        let range = alert_node.range();
+        if range.start >= range.end || range.end > xml.len() {
+            continue;
+        }
+
+        let alert_xml = xml[range.start..range.end].trim();
+        if alert_xml.is_empty() {
+            continue;
+        }
+
+        let identifier = child_text(alert_node, "identifier")
+            .unwrap_or_else(|| format!("embedded-alert-{}", index + 1));
+        let source = format!("{endpoint_url}#{}", identifier.trim());
+        if seen_sources.insert(source.clone()) {
+            alerts.push((source, alert_xml.to_string()));
+        }
+    }
+
+    if alerts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(alerts))
+    }
+}
+
 fn simple_sanitize_description(description: &str) -> String {
     let mut return_value = description.trim().to_string();
 
@@ -758,7 +914,14 @@ fn parse_cap_alert(xml: &str, source_url: &str) -> Result<CapAlert> {
     let severity = child_text(info_node, "severity");
     let certainty = child_text(info_node, "certainty");
     let instructions = child_text(info_node, "instruction");
-    let description_raw = child_text(info_node, "description")
+    let cmam_long_text = extract_parameter_value(info_node, "CMAMlongtext")
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    let description_text = child_text(info_node, "description")
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    let description_raw = cmam_long_text
+        .or(description_text)
         .unwrap_or_else(|| "No CAP description provided.".to_string());
     let description = sanitize_cap_description(&description_raw);
     let expires = child_text(info_node, "expires")
@@ -1821,6 +1984,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_inline_alert_documents_reads_embedded_alerts() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ns1:alerts xmlns:ns1="http://gov.fema.ipaws.services/feed">
+  <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+    <identifier>WEA-1</identifier>
+  </alert>
+  <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+    <identifier>WEA-2</identifier>
+  </alert>
+</ns1:alerts>"#;
+
+        let alerts = parse_inline_alert_documents(xml, "https://example.test/wea")
+            .expect("embedded parse")
+            .expect("embedded alerts");
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].0, "https://example.test/wea#WEA-1");
+        assert!(alerts[0].1.contains("<identifier>WEA-1</identifier>"));
+        assert_eq!(alerts[1].0, "https://example.test/wea#WEA-2");
+    }
+
+    #[test]
     fn parse_cap_alert_valid_fixture_parses_core_fields() {
         let xml = include_str!("../tests/fixtures/cap_alert_valid.xml");
         let alert = parse_cap_alert(xml, "https://alerts.example/valid").expect("alert");
@@ -1849,6 +2033,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_cap_alert_prefers_cmam_long_text_for_description() {
+        let xml = r#"<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>TEST-WEA-001</identifier>
+  <sender>sender.test</sender>
+  <sent>2026-03-07T18:23:55-05:00</sent>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <info>
+    <event>Local Area Emergency</event>
+    <parameter>
+      <valueName>CMAMlongtext</valueName>
+      <value>Lee County: Lightning Alert: Seek shelter NOW</value>
+    </parameter>
+  </info>
+</alert>"#;
+        let alert = parse_cap_alert(xml, "https://alerts.example/wea").expect("alert");
+        assert_eq!(
+            alert.description_raw,
+            "Lee County: Lightning Alert: Seek shelter NOW"
+        );
+        assert_eq!(
+            alert.simple_description,
+            "Lee County: Lightning Alert: Seek shelter NOW"
+        );
+    }
+
+    #[test]
     fn parse_cap_alert_rejects_cancel_and_missing_info() {
         let cancel_xml = include_str!("../tests/fixtures/cap_alert_cancel.xml");
         assert!(parse_cap_alert(cancel_xml, "https://alerts.example/cancel").is_err());
@@ -1866,6 +2077,18 @@ mod tests {
         assert_eq!(normalize_fips_code("31055"), Some("031055".to_string()));
         assert_eq!(normalize_fips_code("0310559"), Some("031055".to_string()));
         assert_eq!(normalize_fips_code("abc"), None);
+    }
+
+    #[test]
+    fn parsed_identifier_from_url_prefers_fragment() {
+        assert_eq!(
+            parsed_identifier_from_url("https://example.test/PublicWEA/recent#2393260467162972"),
+            "2393260467162972"
+        );
+        assert_eq!(
+            parsed_identifier_from_url("https://alerts.example/id-only-1.xml"),
+            "id-only-1"
+        );
     }
 
     #[test]

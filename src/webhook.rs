@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::RwLock;
 use tokio::process::Command;
 use tracing::warn;
 
@@ -21,27 +22,60 @@ struct SameUsLookup {
     events: HashMap<String, String>,
 }
 
-lazy_static! {
-    static ref json_config: Config = Config::from_config_json("/app/config.json").unwrap_or_else(
-        |err| {
+#[derive(Debug, Clone)]
+struct WebhookRuntimeConfig {
+    apprise_config_path: String,
+    station_name: String,
+    stream_index_map: HashMap<String, usize>,
+}
+
+impl WebhookRuntimeConfig {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            apprise_config_path: config.apprise_config_path.clone(),
+            station_name: config.eas_relay_name.clone(),
+            stream_index_map: config
+                .icecast_stream_urls
+                .iter()
+                .enumerate()
+                .map(|(idx, url)| (url.clone(), idx + 1))
+                .collect(),
+        }
+    }
+
+    fn from_disk_or_default() -> Self {
+        let config = Config::from_config_json("/app/config.json").unwrap_or_else(|err| {
             eprintln!(
                 "Warning: failed to load /app/config.json for webhook config: {:?}. Using built-in safe defaults.",
                 err
             );
             Config::safe_internal_defaults()
-        },
-    );
-    static ref station_name: String = json_config.eas_relay_name.clone();
-    static ref STREAM_INDEX_MAP: HashMap<String, usize> = json_config
-        .icecast_stream_urls
-        .iter()
-        .enumerate()
-        .map(|(idx, url)| (url.clone(), idx + 1))
-        .collect();
+        });
+        Self::from_config(&config)
+    }
+}
+
+lazy_static! {
+    static ref WEBHOOK_RUNTIME_CONFIG: RwLock<WebhookRuntimeConfig> =
+        RwLock::new(WebhookRuntimeConfig::from_disk_or_default());
     static ref github_url: String =
         "https://github.com/wagwan-piffting-blud/EAS_Listener".to_string();
     static ref same_us_lookup: SameUsLookup =
         serde_json::from_str(include_str!("../include/same-us.json")).expect("parse same-us.json");
+}
+
+fn runtime_config_snapshot() -> WebhookRuntimeConfig {
+    WEBHOOK_RUNTIME_CONFIG
+        .read()
+        .expect("webhook runtime config lock poisoned")
+        .clone()
+}
+
+pub fn apply_runtime_config(config: &Config) {
+    let mut guard = WEBHOOK_RUNTIME_CONFIG
+        .write()
+        .expect("webhook runtime config lock poisoned");
+    *guard = WebhookRuntimeConfig::from_config(config);
 }
 
 pub fn determine_event_title(event_code: &str) -> String {
@@ -90,7 +124,8 @@ pub async fn send_alert_webhook(
     _raw_header: &str,
     recording_path: Option<PathBuf>,
 ) {
-    let config_path = json_config.apprise_config_path.to_string();
+    let runtime_config = runtime_config_snapshot();
+    let config_path = runtime_config.apprise_config_path;
     let apprise_urls_from_config_array: Vec<String> = match fs::File::open(&config_path) {
         Ok(mut file) => {
             let mut contents = String::new();
@@ -442,7 +477,12 @@ fn build_discord_embed_body(
     raw_header: &str,
     description: Option<&str>,
 ) -> serde_json::Value {
-    let monitor_number = STREAM_INDEX_MAP.get(stream_id).copied().unwrap_or(999);
+    let runtime_config = runtime_config_snapshot();
+    let monitor_number = runtime_config
+        .stream_index_map
+        .get(stream_id)
+        .copied()
+        .unwrap_or(999);
     let normalized_event_code = event_code
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
@@ -477,7 +517,7 @@ fn build_discord_embed_body(
         256,
     );
     let author_name = truncate_discord_text(
-        format!("{} - Software ENDEC Logs", station_name.as_str()).as_str(),
+        format!("{} - Software ENDEC Logs", runtime_config.station_name).as_str(),
         256,
     );
 
@@ -544,6 +584,7 @@ fn build_markdown_body(
     raw_header: &str,
     description: Option<&str>,
 ) -> String {
+    let runtime_config = runtime_config_snapshot();
     let description_section = match description {
         Some(value) => format!("\n\n**CAP Description:**\n```\n{}\n```", value),
         None => String::new(),
@@ -551,7 +592,7 @@ fn build_markdown_body(
 
     format!(
         "**{} - Software ENDEC Logs**\n\n**{} {}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```{}\n\nPowered by [Wags' Software ENDEC]({})",
-        station_name.as_str(),
+        runtime_config.station_name,
         a_or_an(title),
         title,
         originator,
@@ -691,6 +732,7 @@ fn build_html_body(
     raw_header: &str,
     description: Option<&str>,
 ) -> String {
+    let runtime_config = runtime_config_snapshot();
     let description_section = match description {
         Some(value) => format!(
             "<p><strong>CAP Description:</strong></p><pre>{}</pre>",
@@ -709,7 +751,7 @@ fn build_html_body(
          <pre>{}</pre>\
          {}\
          <p>Powered by <a href=\"{}\">Wags' Software ENDEC</a></p>",
-        html_escape(&station_name.as_str()),
+        html_escape(&runtime_config.station_name),
         html_escape(a_or_an(title)),
         html_escape(title),
         html_escape(originator),
@@ -729,6 +771,7 @@ fn build_plain_body(
     raw_header: &str,
     description: Option<&str>,
 ) -> String {
+    let runtime_config = runtime_config_snapshot();
     let description_section = match description {
         Some(value) => format!("\n\nCAP Description:\n{}", value),
         None => String::new(),
@@ -736,7 +779,7 @@ fn build_plain_body(
 
     format!(
         "{} - Software ENDEC Logs\n\n{} {} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}{}\n\nPowered by Wags' Software ENDEC ({})",
-        station_name.as_str(),
+        runtime_config.station_name,
         a_or_an(title),
         title,
         originator,

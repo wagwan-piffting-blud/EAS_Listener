@@ -233,6 +233,13 @@ a {
     border-color: rgba(255, 82, 82, 0.6);
 }
 
+.button-danger:disabled {
+    background: rgba(255, 26, 26, 0.4);
+    border-color: rgba(255, 107, 107, 0.2);
+    color: rgba(0, 0, 0, 0.4);
+    cursor: not-allowed;
+}
+
 .button-safety {
     background: #3dd068;
     border: 1px solid rgba(61, 208, 104, 0.4);
@@ -247,6 +254,13 @@ a {
     cursor: pointer;
     background: #2aa14a;
     border-color: rgba(61, 208, 104, 0.6);
+}
+
+.button-safety:disabled {
+    background: rgba(61, 208, 104, 0.4);
+    border-color: rgba(61, 208, 104, 0.2);
+    color: rgba(0, 0, 0, 0.4);
+    cursor: not-allowed;
 }
 
 .filter-dialog {
@@ -461,6 +475,7 @@ a {
     border: 1px solid var(--border);
     color: var(--muted);
     font-size: 0.9rem;
+    cursor: pointer;
     transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 

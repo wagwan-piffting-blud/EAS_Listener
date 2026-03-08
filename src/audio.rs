@@ -9,8 +9,9 @@ use bytes::Bytes;
 use chrono::{Local, Utc};
 use rubato::{Resampler, SincFixedIn};
 use sameold::{Message as SameMessage, SameReceiverBuilder};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Result as IoResult};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -26,6 +27,7 @@ use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender as TokioSender;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{error, info, warn};
 
@@ -49,7 +51,7 @@ fn nwr_tone_header_for_recording(
     {
         header.to_string()
     } else {
-        format!("ZCZC-WXR-??W-000000+0015-{julian_timestamp}-WAGSENDC-")
+        format!("ZCZC-WXR-??S-099999+0015-{julian_timestamp}-NOAA1050-")
     }
 }
 
@@ -57,6 +59,11 @@ struct ChannelReader {
     rx: crossbeam_channel::Receiver<Bytes>,
     buffer: Bytes,
     pos: usize,
+}
+
+struct StreamWorkerHandle {
+    stop_signal: Arc<AtomicBool>,
+    task: JoinHandle<()>,
 }
 
 struct GoertzelToneDetector {
@@ -153,35 +160,27 @@ pub async fn run_audio_processor(
         .context("build reqwest client")?;
 
     let current_config = Arc::new(RwLock::new(config.clone()));
-
+    let mut stream_tasks: HashMap<String, StreamWorkerHandle> = HashMap::new();
     for stream_url in config.icecast_stream_urls.clone() {
-        let config_clone = current_config.clone();
-        let client_clone = client.clone();
-        let tx_clone = tx.clone();
-        let recording_state_clone = recording_state.clone();
-        let nnnn_tx_clone = nnnn_tx.clone();
-        let monitoring_clone = monitoring.clone();
+        if stream_tasks.contains_key(&stream_url) {
+            warn!(
+                stream = %stream_url,
+                "Duplicate stream URL in ICECAST_STREAM_URL_ARRAY; only one worker will run for this URL."
+            );
+            continue;
+        }
 
-        tokio::spawn(async move {
-            let stream_for_log = stream_url.clone();
-            if let Err(e) = run_stream_task(
-                config_clone,
-                stream_url,
-                client_clone,
-                tx_clone,
-                recording_state_clone,
-                nnnn_tx_clone,
-                monitoring_clone,
-            )
-            .await
-            {
-                error!(stream = %stream_for_log, "Stream task terminated: {e:?}");
-            }
-        });
+        let handle = spawn_stream_worker(
+            current_config.clone(),
+            stream_url.clone(),
+            client.clone(),
+            tx.clone(),
+            recording_state.clone(),
+            nnnn_tx.clone(),
+            monitoring.clone(),
+        );
+        stream_tasks.insert(stream_url, handle);
     }
-
-    drop(tx);
-    drop(nnnn_tx);
 
     let mut reload_enabled = true;
     while reload_enabled {
@@ -192,13 +191,90 @@ pub async fn run_audio_processor(
                     .expect("audio config lock poisoned")
                     .icecast_stream_urls
                     .clone();
-                if old_stream_urls != new_config.icecast_stream_urls {
-                    warn!(
-                        "The reload updated ICECAST_STREAM_URL_ARRAY; a full Docker container restart is required to apply ANY stream URL changes."
-                    );
+
+                let old_stream_set: HashSet<String> = old_stream_urls.into_iter().collect();
+                let mut new_stream_set: HashSet<String> = HashSet::new();
+                for stream_url in &new_config.icecast_stream_urls {
+                    if !new_stream_set.insert(stream_url.clone()) {
+                        warn!(
+                            stream = %stream_url,
+                            "Duplicate stream URL in ICECAST_STREAM_URL_ARRAY; only one worker will run for this URL."
+                        );
+                    }
                 }
 
                 *current_config.write().expect("audio config lock poisoned") = new_config;
+
+                let mut removed_count = 0usize;
+                for stream_url in old_stream_set.difference(&new_stream_set) {
+                    if let Some(handle) = stream_tasks.remove(stream_url) {
+                        let mut handle = handle;
+                        handle.stop_signal.store(true, Ordering::Relaxed);
+                        match tokio::time::timeout(Duration::from_secs(5), &mut handle.task).await {
+                            Ok(join_result) => {
+                                if let Err(join_err) = join_result {
+                                    if !join_err.is_cancelled() {
+                                        warn!(
+                                            stream = %stream_url,
+                                            "Stream worker ended with join error while stopping: {}",
+                                            join_err
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                handle.task.abort();
+                                if let Err(join_err) = handle.task.await {
+                                    if !join_err.is_cancelled() {
+                                        warn!(
+                                            stream = %stream_url,
+                                            "Stream worker did not stop cleanly after timeout: {}",
+                                            join_err
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        monitoring.remove_stream(stream_url);
+                        info!(
+                            stream = %stream_url,
+                            "Stopped Icecast stream worker after configuration reload."
+                        );
+                        removed_count += 1;
+                    } else {
+                        monitoring.remove_stream(stream_url);
+                    }
+                }
+
+                let mut added_count = 0usize;
+                for stream_url in new_stream_set.difference(&old_stream_set) {
+                    if stream_tasks.contains_key(stream_url) {
+                        continue;
+                    }
+                    let handle = spawn_stream_worker(
+                        current_config.clone(),
+                        stream_url.clone(),
+                        client.clone(),
+                        tx.clone(),
+                        recording_state.clone(),
+                        nnnn_tx.clone(),
+                        monitoring.clone(),
+                    );
+                    stream_tasks.insert(stream_url.clone(), handle);
+                    info!(
+                        stream = %stream_url,
+                        "Started Icecast stream worker after configuration reload."
+                    );
+                    added_count += 1;
+                }
+
+                if added_count > 0 || removed_count > 0 {
+                    info!(
+                        "Audio processor applied stream hot reload: {} added, {} removed.",
+                        added_count, removed_count
+                    );
+                }
+
                 info!("Audio processor loaded updated configuration.");
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -219,6 +295,39 @@ pub async fn run_audio_processor(
     Ok(())
 }
 
+fn spawn_stream_worker(
+    config: Arc<RwLock<Config>>,
+    stream_url: String,
+    client: reqwest::Client,
+    tx: TokioSender<(String, String, String, String, Duration, String)>,
+    recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
+    nnnn_tx: BroadcastSender<String>,
+    monitoring: MonitoringHub,
+) -> StreamWorkerHandle {
+    let stop_signal = Arc::new(AtomicBool::new(false));
+    let stop_signal_for_worker = Arc::clone(&stop_signal);
+
+    let task = tokio::spawn(async move {
+        let stream_for_log = stream_url.clone();
+        if let Err(e) = run_stream_task(
+            config,
+            stream_url,
+            client,
+            tx,
+            recording_state,
+            nnnn_tx,
+            monitoring,
+            stop_signal_for_worker,
+        )
+        .await
+        {
+            error!(stream = %stream_for_log, "Stream task terminated: {e:?}");
+        }
+    });
+
+    StreamWorkerHandle { stop_signal, task }
+}
+
 async fn run_stream_task(
     config: Arc<RwLock<Config>>,
     stream_url: String,
@@ -227,6 +336,7 @@ async fn run_stream_task(
     recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
+    stop_signal: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut last_log_time = Instant::now() - Duration::from_secs(61);
     let mut last_log_time2 = Instant::now() - Duration::from_secs(61);
@@ -235,6 +345,10 @@ async fn run_stream_task(
     let mut suppressed_connect_errors: u32 = 0;
 
     loop {
+        if stop_signal.load(Ordering::Relaxed) {
+            break;
+        }
+
         monitoring.note_connecting(&stream_url);
         if last_log_time.elapsed() > Duration::from_secs(60) {
             info!(stream = %stream_url, "Connecting to Icecast stream");
@@ -252,6 +366,10 @@ async fn run_stream_task(
             .await
         {
             Ok(response) => {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 if !response.status().is_success() {
                     connect_retry_attempt = connect_retry_attempt.saturating_add(1);
                     let retry_delay_secs = (1u64 << connect_retry_attempt.min(6)).min(60);
@@ -288,12 +406,17 @@ async fn run_stream_task(
 
                 let stream_for_reader = stream_url.clone();
                 let monitoring_reader = monitoring.clone();
+                let stop_signal_for_reader = Arc::clone(&stop_signal);
                 tokio::spawn(async move {
                     let mut response = response;
 
                     let mut last_warn = std::time::Instant::now();
 
                     loop {
+                        if stop_signal_for_reader.load(Ordering::Relaxed) {
+                            break;
+                        }
+
                         match tokio::time::timeout(stream_inactivity_timeout(), response.chunk())
                             .await
                         {
@@ -338,6 +461,7 @@ async fn run_stream_task(
                 let nnnn_tx_clone = nnnn_tx.clone();
                 let config_for_decode = config.clone();
                 let stream_for_decode = stream_url.clone();
+                let stop_signal_for_decode = Arc::clone(&stop_signal);
                 let decoding_task = tokio::task::spawn_blocking(move || {
                     let reader = ChannelReader {
                         rx: byte_rx,
@@ -354,19 +478,28 @@ async fn run_stream_task(
                         &recording_state_clone,
                         &nnnn_tx_clone,
                         &stream_for_decode,
+                        &stop_signal_for_decode,
                     )
                 });
                 if let Err(e) = decoding_task.await? {
-                    monitoring.note_error(&stream_url, format!("decode error: {e}"));
-                    error!(
-                        stream = %stream_url,
-                        "Error processing audio stream: {}. Reconnecting...",
-                        e
-                    );
+                    if !stop_signal.load(Ordering::Relaxed) {
+                        monitoring.note_error(&stream_url, format!("decode error: {e}"));
+                        error!(
+                            stream = %stream_url,
+                            "Error processing audio stream: {}. Reconnecting...",
+                            e
+                        );
+                    }
+                }
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
                 }
                 monitoring.note_disconnected(&stream_url);
             }
             Err(e) => {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
+                }
                 connect_retry_attempt = connect_retry_attempt.saturating_add(1);
                 let retry_delay_secs = (1u64 << connect_retry_attempt.min(6)).min(60);
                 let retry_delay = Duration::from_secs(retry_delay_secs);
@@ -391,6 +524,8 @@ async fn run_stream_task(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+
+    Ok(())
 }
 
 fn process_stream(
@@ -401,6 +536,7 @@ fn process_stream(
     recording_state: &Arc<Mutex<HashMap<String, RecordingState>>>,
     nnnn_tx: &BroadcastSender<String>,
     stream_label: &str,
+    stop_signal: &Arc<AtomicBool>,
 ) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
 
@@ -439,8 +575,14 @@ fn process_stream(
     let min_tone_samples_required =
         (TARGET_SAMPLE_RATE as f64 * NWR_TONE_MIN_DURATION.as_secs_f64()) as usize;
     let mut sustained_tone_samples: usize = 0;
+    const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 8;
+    let mut consecutive_decode_errors: u32 = 0;
 
     loop {
+        if stop_signal.load(Ordering::Relaxed) {
+            break;
+        }
+
         let packet = match format.next_packet() {
             Ok(pkt) => pkt,
             Err(SymphoniaError::ResetRequired) => {
@@ -468,6 +610,8 @@ fn process_stream(
 
         match decoder.decode(&packet) {
             Ok(decoded) => {
+                consecutive_decode_errors = 0;
+
                 if decoded.frames() == 0 {
                     continue;
                 }
@@ -537,6 +681,10 @@ fn process_stream(
                 audio_buffer.extend_from_slice(&mono_samples);
 
                 while audio_buffer.len() >= CHUNK_SIZE {
+                    if stop_signal.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     let chunk_to_process = audio_buffer[..CHUNK_SIZE].to_vec();
                     let resampled = rs.process(&[chunk_to_process], None)?;
                     let samples_f32 = resampled[0].clone();
@@ -809,7 +957,14 @@ fn process_stream(
                 }
             }
             Err(e) => {
-                warn!(stream = %stream_label, "Decode error: {}", e);
+                consecutive_decode_errors = consecutive_decode_errors.saturating_add(1);
+                if consecutive_decode_errors >= MAX_CONSECUTIVE_DECODE_ERRORS {
+                    return Err(anyhow!(
+                        "Too many consecutive decode errors ({}). Dropping stream for reconnect. Last decode error: {}",
+                        consecutive_decode_errors,
+                        e
+                    ));
+                }
             }
         }
     }

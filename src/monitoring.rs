@@ -33,6 +33,8 @@ pub struct LogEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamStatusPayload {
     pub stream_url: String,
+    #[serde(default)]
+    pub is_removed: bool,
     pub is_connected: bool,
     pub is_receiving_audio: bool,
     pub connection_attempts: u64,
@@ -264,6 +266,32 @@ impl MonitoringHub {
         });
     }
 
+    pub fn remove_stream(&self, stream: &str) {
+        let removed = {
+            let mut guard = self.inner.write();
+            guard.streams.remove(stream).is_some()
+        };
+
+        if removed {
+            let payload = StreamStatusPayload {
+                stream_url: stream.to_string(),
+                is_removed: true,
+                is_connected: false,
+                is_receiving_audio: false,
+                connection_attempts: 0,
+                alerts_received: 0,
+                connected_since: None,
+                last_activity: None,
+                last_disconnect: Some(Utc::now()),
+                last_alert_received_ts: None,
+                last_alert_received: None,
+                last_error: None,
+                uptime_seconds: None,
+            };
+            let _ = self.events_tx.send(MonitoringEvent::Stream(payload));
+        }
+    }
+
     pub fn recent_logs(&self, count: usize) -> Vec<LogEntry> {
         let guard = self.inner.read();
         guard.logs.iter().rev().take(count).cloned().collect()
@@ -325,8 +353,9 @@ impl MonitoringHub {
         };
         StreamStatusPayload {
             stream_url: state.stream_url.clone(),
+            is_removed: false,
             is_connected: state.is_connected,
-            is_receiving_audio,
+            is_receiving_audio: state.is_connected && is_receiving_audio,
             connection_attempts: state.attempts,
             alerts_received: state.alerts_received,
             connected_since: state.connected_since,

@@ -1,8 +1,10 @@
 <?php
 
+require_once __DIR__ . "/config.php";
+
 function get_active_alert_headers_lookup(): array {
     $lookup = [];
-    $shared_state_dir = rtrim((string) (getenv("SHARED_STATE_DIR") ?: ""), "/\\");
+    $shared_state_dir = app_shared_state_dir();
     if($shared_state_dir === "") {
         return $lookup;
     }
@@ -186,7 +188,7 @@ function build_alert_log_payload(array $entries): string {
 }
 
 if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
+    if(app_use_reverse_proxy()) {
         session_set_cookie_params(259200, "/", "", true, true);
     }
 
@@ -198,7 +200,7 @@ if(!session_id()) {
 
 $requestHeaders = getallheaders();
 
-if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
+if(app_request_is_authorized($requestHeaders)) {
     $_SESSION['authed'] = true;
 }
 
@@ -209,9 +211,9 @@ if(!isset($_SESSION['authed'])) {
 
 elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POST['vacuum']) && $_POST['vacuum'] === "true") {
     try {
-        $recordingsDir = rtrim((string) (getenv("RECORDING_DIR") ?: ""), "/\\");
+        $recordingsDir = app_recording_dir();
         $oldDir = $recordingsDir . "/__old__";
-        $alerts_file_path = getenv("SHARED_STATE_DIR") . "/" . getenv("DEDICATED_ALERT_LOG_FILE");
+        $alerts_file_path = app_dedicated_alert_log_path();
         $active_headers_lookup = get_active_alert_headers_lookup();
         $recording_files = get_recording_files_sorted($recordingsDir);
         $alerts_entries = parse_alert_log_entries($alerts_file_path);
@@ -313,10 +315,20 @@ else { ?><!DOCTYPE html>
                 <p>This action will move all existing, not active recordings to an __old__ subdirectory and clear the current alert log of non-active alerts. It is recommended to back up any important recordings or alert data within your data directory before proceeding. This will <strong>not delete</strong> any data, but it will move recordings and back up the alert log as described.</p>
                 <form method="POST" action="vacuum.php">
                     <input type="hidden" name="vacuum" value="true" />
-                    <button type="submit" class="button-danger">Yes, vacuum old recordings and truncate alert log</button>
-                    <button type="button" onclick="window.location.href='index.php'" class="button-safety">No, cancel</button>
+                    <button type="button" class="button-danger" id="vacuumButton">Yes, vacuum old recordings and truncate alert log</button>
+                    <button type="button" onclick="window.location.href='index.php'" class="button-safety" id="cancelButton">No, cancel</button>
                 </form>
             </section>
         </main>
+        <script>
+            document.getElementById("vacuumButton").addEventListener("click", function() {
+                if(confirm("Are you absolutely sure you want to vacuum old recordings and truncate the alert log? This action cannot be undone automatically!")) {
+                    document.getElementById("vacuumButton").disabled = true;
+                    document.getElementById("cancelButton").disabled = true;
+                    document.getElementById("vacuumButton").textContent = "Vacuuming in progress...";
+                    this.closest("form").submit();
+                }
+            });
+        </script>
     </body>
 </html><?php } ?>

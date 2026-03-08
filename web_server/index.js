@@ -1278,8 +1278,13 @@
                     break;
                 case "Stream":
                     if (payload.payload?.stream_url) {
-                        state.streams.set(payload.payload.stream_url, payload.payload);
-                        queueStreamRender(payload.payload.stream_url);
+                        if (payload.payload.is_removed === true) {
+                            state.streams.delete(payload.payload.stream_url);
+                            renderStreams();
+                        } else {
+                            state.streams.set(payload.payload.stream_url, payload.payload);
+                            queueStreamRender(payload.payload.stream_url);
+                        }
                     }
                     break;
                 case "Log":

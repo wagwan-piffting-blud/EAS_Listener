@@ -1,7 +1,9 @@
 <?php
 
+require_once __DIR__ . "/config.php";
+
 if(!session_id()) {
-    if(getenv('USE_REVERSE_PROXY') === 'true') {
+    if(app_use_reverse_proxy()) {
         session_set_cookie_params(259200, "/", "", true, true);
     }
 
@@ -13,7 +15,7 @@ if(!session_id()) {
 
 $requestHeaders = getallheaders();
 
-if(isset($requestHeaders['Authorization']) && $requestHeaders['Authorization'] === "Bearer " . base64_encode(getenv('DASHBOARD_USERNAME') . ':' . getenv('DASHBOARD_PASSWORD'))) {
+if(app_request_is_authorized($requestHeaders)) {
     $_SESSION['authed'] = true;
 }
 
@@ -43,7 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         <main id="oldAlerts">
             <section id="oldAlertSection">
                 <h1>The reload signal has been sent to the Rust backend.</h1>
-                <p>The Rust backend will reload its configuration and reconnect to the stream(s) within a few seconds. If you have made changes to the stream URLs, please note that a full Docker container restart is required to apply those changes. This page will now redirect back to the dashboard in a few seconds.</p>
+                <p>The Rust backend will reload its configuration and adjust active streams momentarily. This page will now redirect back to the dashboard in a few seconds...</p>
             </section>
         </main>
         <script>

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 const TARGET_SAMPLE_RATE: u32 = 48000;
-const HEADER_AMPLITUDE: f64 = 0.79;
+const HEADER_AMPLITUDE: f64 = 0.42;
 const SAME_MARK_FREQ_HZ: f32 = 2083.3;
 const SAME_SPACE_FREQ_HZ: f32 = 1562.5;
 const SAME_BIT_DURATION_SEC: f64 = 0.00192;
