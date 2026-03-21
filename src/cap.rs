@@ -38,7 +38,8 @@ const CAP_TTS_WINE_PATH: &str = "/usr/lib/wine/wine";
 const CAP_TTS_DUMPER_PATH: &str = "/app/Speechify/bin/spfy_dumpwav32.exe";
 const CAP_TTS_REPLACEMENT_DICT_PATH: &str = "/app/cap_tts_replacement_config.json";
 const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
-const CAP_HEADER_SOURCE_MARKER: &str = "IPAWSCAP";
+const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
+const CAP_HEADER_SOURCE_MARKER_WEA: &str = "IPAWSWEA";
 
 static CAP_TTS_SYNTH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -174,8 +175,8 @@ pub async fn run_cap_processor(
         .context("Failed to create CAP HTTP client")?;
 
     let mut seen_alerts: HashMap<String, DateTime<Utc>> = HashMap::new();
-    let mut persisted_active_cap_headers =
-        load_persisted_active_cap_headers(&config.shared_state_dir).await;
+    let mut persisted_active_dedupe_keys =
+        load_persisted_active_dedupe_keys(&config.shared_state_dir).await;
     let mut ticker = interval(Duration::from_secs(CAP_POLL_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -374,17 +375,8 @@ pub async fn run_cap_processor(
                     }
                 }
 
-                let normalized_event_code = normalize_event_code(&parsed.event_code);
-                let raw_header = build_cap_raw_header(
-                    &parsed.originator_code,
-                    &normalized_event_code,
-                    &parsed.fips,
-                    parsed.sent,
-                    parsed.expires,
-                    &parsed.identifier,
-                );
-                if persisted_active_cap_headers.contains(&raw_header)
-                    || cap_header_is_active(&app_state, &raw_header).await
+                if persisted_active_dedupe_keys.contains(&dedupe_key)
+                    || cap_alert_is_active(&app_state, &dedupe_key).await
                 {
                     let seen_until = match parsed.expires {
                         Some(expires_at) if expires_at > Utc::now() => expires_at,
@@ -426,7 +418,7 @@ pub async fn run_cap_processor(
                     Some(expires_at) if expires_at > Utc::now() => expires_at,
                     _ => Utc::now() + ChronoDuration::seconds(CAP_SEEN_DEFAULT_TTL_SECS),
                 };
-                persisted_active_cap_headers.insert(raw_header);
+                persisted_active_dedupe_keys.insert(dedupe_key.clone());
                 seen_alerts.insert(dedupe_key, seen_until);
                 seen_alerts.insert(url_seen_key, seen_until);
             }
@@ -451,7 +443,7 @@ fn parsed_identifier_from_url(url: &str) -> String {
         .to_string()
 }
 
-async fn load_persisted_active_cap_headers(shared_state_dir: &Path) -> HashSet<String> {
+async fn load_persisted_active_dedupe_keys(shared_state_dir: &Path) -> HashSet<String> {
     let path = shared_state_dir.join(CAP_ACTIVE_ALERTS_FILE);
     let bytes = match fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -485,20 +477,22 @@ async fn load_persisted_active_cap_headers(shared_state_dir: &Path) -> HashSet<S
     let now = Utc::now();
     alerts
         .into_iter()
-        .filter(|alert| {
-            alert.expires_at > now && alert.raw_header.contains(CAP_HEADER_SOURCE_MARKER)
-        })
-        .map(|alert| alert.raw_header)
+        .filter(|alert| alert.expires_at > now)
+        .filter_map(|alert| build_dedupe_key_from_raw_header(&alert.raw_header))
         .collect()
 }
 
-async fn cap_header_is_active(app_state: &Arc<Mutex<AppState>>, raw_header: &str) -> bool {
+fn active_alert_has_dedupe_key(alerts: &[ActiveAlert], dedupe_key: &str) -> bool {
     let now = Utc::now();
+    alerts.iter().any(|alert| {
+        alert.expires_at > now
+            && build_dedupe_key_from_raw_header(&alert.raw_header).as_deref() == Some(dedupe_key)
+    })
+}
+
+async fn cap_alert_is_active(app_state: &Arc<Mutex<AppState>>, dedupe_key: &str) -> bool {
     let guard = app_state.lock().await;
-    guard
-        .active_alerts
-        .iter()
-        .any(|alert| alert.expires_at > now && alert.raw_header == raw_header)
+    active_alert_has_dedupe_key(&guard.active_alerts, dedupe_key)
 }
 
 fn recording_file_name_from_path(path: &Path) -> Option<String> {
@@ -581,7 +575,7 @@ async fn process_cap_alert(
         &alert.fips,
         alert.sent,
         alert.expires,
-        &alert.identifier,
+        &alert.source_url,
     );
     let parsed_header = crate::e2t_ng::parse_header_json(raw_header.as_str())
         .ok()
@@ -1384,7 +1378,7 @@ fn build_eas_text(alert: &CapAlert, timezone: &str) -> String {
         &alert.fips,
         alert.sent,
         alert.expires,
-        &alert.identifier,
+        &alert.source_url,
     );
 
     if !header.ends_with('-') {
@@ -1459,13 +1453,14 @@ fn build_cap_raw_header(
     fips_list: &[String],
     sent: Option<DateTime<Utc>>,
     expires: Option<DateTime<Utc>>,
-    _identifier: &str,
+    source_hint: &str,
 ) -> String {
     let org = normalize_originator_code(originator_code);
     let code = normalize_event_code(event_code);
     let sent_utc = sent.unwrap_or_else(Utc::now);
     let issue_jjj_hhmm = sent_utc.format("%j%H%M").to_string();
     let exp = encode_expiration_from_cap(sent, expires);
+    let source_marker = cap_header_source_marker(source_hint);
 
     let mut cleaned_fips: Vec<String> = fips_list
         .iter()
@@ -1478,9 +1473,40 @@ fn build_cap_raw_header(
     }
 
     format!(
-        "ZCZC-{org}-{code}-{}+{exp}-{issue_jjj_hhmm}-IPAWSCAP-",
+        "ZCZC-{org}-{code}-{}+{exp}-{issue_jjj_hhmm}-{source_marker}-",
         cleaned_fips.join("-"),
     )
+}
+
+fn cap_header_source_marker(source_hint: &str) -> &'static str {
+    if source_hint
+        .get(..4)
+        .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
+        || contains_ascii_ignore_case(source_hint, b"publicwea")
+        || contains_ascii_ignore_case(source_hint, b"/wea/")
+        || contains_ascii_ignore_case(source_hint, b"/wea#")
+        || source_hint
+            .rsplit_once('#')
+            .map_or(false, |(_, fragment)| {
+                fragment
+                    .get(..4)
+                    .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
+            })
+    {
+        CAP_HEADER_SOURCE_MARKER_WEA
+    } else {
+        CAP_HEADER_SOURCE_MARKER_CAP
+    }
+}
+
+fn contains_ascii_ignore_case(haystack: &str, needle: &[u8]) -> bool {
+    let haystack = haystack.as_bytes();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn is_cap_relevant(alert_fips: &[String], watched_fips: &HashSet<String>) -> bool {
@@ -1503,7 +1529,7 @@ async fn append_cap_log(config: &Config, alert: &CapAlert) -> Result<()> {
         &alert.fips,
         alert.sent,
         alert.expires,
-        &alert.identifier,
+        &alert.source_url,
     );
 
     let timezone = config.timezone.to_string();
@@ -1603,8 +1629,69 @@ fn looks_like_alert_xml(xml: &str) -> bool {
     xml.contains("<alert")
 }
 
+fn build_dedupe_key_components(
+    originator: &str,
+    event_code: &str,
+    issuance: &str,
+    fips: &[String],
+) -> Option<String> {
+    let originator = normalize_originator_code(originator);
+    let event_code = normalize_event_code(event_code);
+    let issuance: String = issuance
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(7)
+        .collect();
+    if issuance.len() != 7 {
+        return None;
+    }
+
+    let mut cleaned_fips: Vec<String> = fips
+        .iter()
+        .filter_map(|value| normalize_fips_code(value))
+        .collect();
+    cleaned_fips.sort();
+    cleaned_fips.dedup();
+    if cleaned_fips.is_empty() {
+        cleaned_fips.push("099999".to_string());
+    }
+
+    Some(format!(
+        "org:{originator}|evt:{event_code}|iss:{issuance}|fips:{}",
+        cleaned_fips.join(",")
+    ))
+}
+
 fn build_dedupe_key(alert: &CapAlert) -> String {
-    format!("id:{}", alert.identifier)
+    let issuance = alert
+        .sent
+        .map(|sent| sent.format("%j%H%M").to_string())
+        .unwrap_or_else(|| "0000000".to_string());
+    build_dedupe_key_components(
+        &alert.originator_code,
+        &alert.event_code,
+        &issuance,
+        &alert.fips,
+    )
+    .unwrap_or_else(|| format!("id:{}", alert.identifier))
+}
+
+fn build_dedupe_key_from_raw_header(raw_header: &str) -> Option<String> {
+    let trimmed = raw_header.trim().trim_end_matches('-');
+    let (prefix, _) = trimmed.rsplit_once('-')?;
+    let body = prefix.strip_prefix("ZCZC-")?;
+    let mut parts = body.splitn(3, '-');
+    let originator = parts.next()?;
+    let event_code = parts.next()?;
+    let fips_duration_and_issuance = parts.next()?;
+    let (fips_and_duration, issuance) = fips_duration_and_issuance.rsplit_once('-')?;
+    let (fips_segment, _) = fips_and_duration.rsplit_once('+')?;
+    let fips: Vec<String> = fips_segment
+        .split('-')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.to_string())
+        .collect();
+    build_dedupe_key_components(originator, event_code, issuance, &fips)
 }
 
 fn extract_parameter_value<'a, 'input>(
@@ -1967,7 +2054,21 @@ fn sanitize_filename_label(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Duration as ChronoDuration, TimeZone};
+    use std::time::Duration;
+
+    fn sample_alert_data(event_code: &str, fips: &[&str]) -> EasAlertData {
+        EasAlertData {
+            eas_text: "sample text".to_string(),
+            event_text: "Sample Event".to_string(),
+            event_code: event_code.to_string(),
+            fips: fips.iter().map(|value| value.to_string()).collect(),
+            locations: "Sample Location".to_string(),
+            originator: "WXR".to_string(),
+            description: None,
+            parsed_header: None,
+        }
+    }
 
     #[test]
     fn parse_feed_alert_links_collects_and_deduplicates() {
@@ -2110,6 +2211,40 @@ mod tests {
         let header = build_cap_raw_header("wx", "to", &[], Some(sent), Some(expires), "id");
         assert!(header.starts_with("ZCZC-WXX-TO0-099999+0135-"));
         assert!(header.ends_with("-IPAWSCAP-"));
+    }
+
+    #[test]
+    fn build_dedupe_key_ignores_fips_order_and_duration() {
+        let xml = include_str!("../tests/fixtures/cap_alert_same_audio.xml");
+        let first = parse_cap_alert(xml, "https://alerts.example/same").expect("first");
+        let mut second = first.clone();
+        second.identifier = "SECOND-ID".to_string();
+        second.fips.reverse();
+        second.expires = second.expires.map(|value| value + ChronoDuration::minutes(30));
+
+        assert_eq!(build_dedupe_key(&first), build_dedupe_key(&second));
+    }
+
+    #[test]
+    fn build_dedupe_key_from_raw_header_ignores_fips_order_and_duration() {
+        let first = "ZCZC-EAS-RMT-031000-031055+0100-0011530-KETV    -";
+        let second = "ZCZC-EAS-RMT-031055-031000+0030-0011530-KISO    -";
+        let first_key = build_dedupe_key_from_raw_header(first).expect("first key");
+        let second_key = build_dedupe_key_from_raw_header(second).expect("second key");
+        assert_eq!(first_key, second_key);
+    }
+
+    #[test]
+    fn active_alert_has_dedupe_key_matches_non_cap_sources_too() {
+        let dedupe_key = build_dedupe_key_from_raw_header("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-")
+            .expect("dedupe key");
+        let eas_alert = ActiveAlert::new(
+            sample_alert_data("TOR", &["031055"]),
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-".to_string(),
+            Duration::from_secs(120),
+        );
+
+        assert!(active_alert_has_dedupe_key(&[eas_alert], dedupe_key.as_str()));
     }
 
     #[test]

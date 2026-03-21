@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 
 const DEEPLINK_HOST_CACHE_FILE: &str = "deeplink_host.txt";
 const DEEPLINK_HOST_LAST_SEEN_CACHE_FILE: &str = "deeplink_host_last_seen.txt";
-const CAP_HEADER_SOURCE_MARKER: &str = "IPAWSCAP";
+const CAP_HEADER_SOURCE_MARKER: &str = "IPAWS";
 static SAME_US_LOOKUP_JSON: Lazy<serde_json::Value> = Lazy::new(|| {
     serde_json::from_str(include_str!("../include/same-us.json")).expect("parse same-us.json")
 });

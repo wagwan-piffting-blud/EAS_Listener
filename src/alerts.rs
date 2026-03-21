@@ -26,6 +26,7 @@ const SEVERE_DAY_FILE: &str = "severe_day.txt";
 const ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 const ALERT_DEDUP_WINDOW: Duration = Duration::from_secs(15 * 60);
 const ALERT_DEDUP_PRUNE_INTERVAL: usize = 256;
+const CAP_HEADER_SOURCE_MARKER: &str = "IPAWS";
 
 #[inline]
 fn is_severe_alert_event_code(event_code: &str) -> bool {
@@ -95,18 +96,79 @@ struct AlertDedupEntry {
 }
 
 #[inline]
+fn build_dedup_key_components(
+    originator: &str,
+    event_code: &str,
+    issuance: &str,
+    fips_segment: &str,
+) -> Option<String> {
+    let mut fips: Vec<String> = fips_segment
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.trim().to_ascii_uppercase())
+        .collect();
+    if fips.is_empty() {
+        return None;
+    }
+    fips.sort_unstable();
+    fips.dedup();
+
+    let originator = originator.trim().to_ascii_uppercase();
+    let event_code = event_code.trim().to_ascii_uppercase();
+    let issuance: String = issuance
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(7)
+        .collect();
+    if originator.is_empty() || event_code.is_empty() || issuance.len() != 7 {
+        return None;
+    }
+
+    Some(format!(
+        "org:{originator}|evt:{event_code}|iss:{issuance}|fips:{}",
+        fips.join(",")
+    ))
+}
+
+#[inline]
 fn dedup_key_without_sender(raw_header: &str) -> Option<(String, String)> {
     let trimmed = raw_header.trim().trim_end_matches('-');
     let (prefix, sender_id) = trimmed.rsplit_once('-')?;
+    let sender_id = sender_id.trim();
     if prefix.is_empty() || sender_id.is_empty() {
         return None;
     }
 
-    let mut key = String::with_capacity(prefix.len() + 1);
-    key.push_str(prefix);
-    key.push('-');
+    let body = prefix.strip_prefix("ZCZC-")?;
+    let mut parts = body.splitn(3, '-');
+    let originator = parts.next()?;
+    let event_code = parts.next()?;
+    let fips_duration_and_issuance = parts.next()?;
+    let (fips_and_duration, issuance) = fips_duration_and_issuance.rsplit_once('-')?;
+    let (fips_segment, _) = fips_and_duration.rsplit_once('+')?;
 
-    Some((key, sender_id.to_string()))
+    let dedup_key = build_dedup_key_components(originator, event_code, issuance, fips_segment)?;
+    Some((dedup_key, sender_id.to_string()))
+}
+
+#[inline]
+fn dedup_key_from_raw_header(raw_header: &str) -> Option<String> {
+    dedup_key_without_sender(raw_header).map(|(dedup_key, _)| dedup_key)
+}
+
+#[inline]
+fn cap_alert_has_dedup_key(active_alerts: &[ActiveAlert], dedup_key: &str) -> bool {
+    let now = Utc::now();
+    active_alerts.iter().any(|alert| {
+        alert.expires_at > now
+            && alert.raw_header.contains(CAP_HEADER_SOURCE_MARKER)
+            && dedup_key_from_raw_header(&alert.raw_header).as_deref() == Some(dedup_key)
+    })
+}
+
+async fn cap_dedup_key_is_active(state: &Arc<Mutex<AppState>>, dedup_key: &str) -> bool {
+    let guard = state.lock().await;
+    cap_alert_has_dedup_key(&guard.active_alerts, dedup_key)
 }
 
 #[inline]
@@ -300,6 +362,16 @@ pub async fn run_alert_manager(
                 &raw_header
             );
             continue;
+        }
+
+        if let Some(dedup_key) = dedup_key_from_raw_header(&raw_header) {
+            if cap_dedup_key_is_active(&state, &dedup_key).await {
+                info!(
+                    "Skipping EAS alert because matching CAP/IPAWS alert is already active (dedupe key={}): {}",
+                    dedup_key, &raw_header
+                );
+                continue;
+            }
         }
 
         let action = {
@@ -807,9 +879,37 @@ mod tests {
     fn dedup_key_without_sender_extracts_key_and_sender() {
         let header = "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-";
         let (key, sender) = dedup_key_without_sender(header).expect("dedup key");
-        assert_eq!(key, "ZCZC-WXR-TOR-031055+0030-1231645-");
+        assert_eq!(key, "org:WXR|evt:TOR|iss:1231645|fips:031055");
         assert_eq!(sender, "KWO35");
         assert!(dedup_key_without_sender("invalid").is_none());
+    }
+
+    #[test]
+    fn dedup_key_without_sender_ignores_duration_and_fips_order() {
+        let first = "ZCZC-EAS-RMT-031000-031055+0100-0011530-KETV    -";
+        let second = "ZCZC-EAS-RMT-031055-031000+0030-0011530-KISO    -";
+        let (first_key, _) = dedup_key_without_sender(first).expect("first key");
+        let (second_key, _) = dedup_key_without_sender(second).expect("second key");
+        assert_eq!(first_key, second_key);
+    }
+
+    #[test]
+    fn cap_alert_has_dedup_key_only_matches_ipaws_source_alerts() {
+        let dedup_key = dedup_key_from_raw_header("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-")
+            .expect("dedup key");
+        let cap_alert = ActiveAlert::new(
+            sample_alert_data("TOR", &["031055"]),
+            "ZCZC-WXR-TOR-031055+0030-1231645-IPAWSCAP-".to_string(),
+            Duration::from_secs(120),
+        );
+        let eas_alert = ActiveAlert::new(
+            sample_alert_data("TOR", &["031055"]),
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-".to_string(),
+            Duration::from_secs(120),
+        );
+
+        assert!(cap_alert_has_dedup_key(&[cap_alert], dedup_key.as_str()));
+        assert!(!cap_alert_has_dedup_key(&[eas_alert], dedup_key.as_str()));
     }
 
     #[test]
@@ -853,6 +953,22 @@ mod tests {
             &mut cache,
             raw,
             "KIH61",
+            now + Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn should_process_alert_ignores_duration_and_fips_order() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        let first = "ZCZC-EAS-RMT-031000-031055+0100-0011530-KETV    -";
+        let second = "ZCZC-EAS-RMT-031055-031000+0030-0011530-KISO    -";
+
+        assert!(should_process_alert(&mut cache, first, "", now));
+        assert!(!should_process_alert(
+            &mut cache,
+            second,
+            "",
             now + Duration::from_secs(5)
         ));
     }

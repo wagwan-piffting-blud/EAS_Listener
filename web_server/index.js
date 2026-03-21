@@ -12,6 +12,7 @@
     const LOCATION_CODE_PATTERN = /\d{6}/g;
     const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
     const CAP_HEADER_SOURCE_MARKER = "IPAWSCAP";
+    const WEA_HEADER_SOURCE_MARKER = "IPAWSWEA";
     const STATE_AND_TERRITORY_NAMES = Object.freeze({
         AL: "Alabama",
         AK: "Alaska",
@@ -204,8 +205,20 @@
         return alert?.data?.originator || parsedHeaderForAlert(alert)?.originator || "";
     }
 
+    function sourceForAlert(alert) {
+        const rawHeader = String(alert?.raw_header || "");
+        if (rawHeader.includes(WEA_HEADER_SOURCE_MARKER)) {
+            return "WEA";
+        }
+        if (rawHeader.includes(CAP_HEADER_SOURCE_MARKER)) {
+            return "CAP";
+        }
+        return "EAS";
+    }
+
     function isCapAlert(alert) {
-        return String(alert?.raw_header || "").includes(CAP_HEADER_SOURCE_MARKER);
+        const source = sourceForAlert(alert);
+        return source === "CAP" || source === "WEA";
     }
 
     function locationCodesForAlert(alert) {
@@ -925,6 +938,7 @@
 
     function buildAlertRenderData(alert) {
         const capAlert = isCapAlert(alert);
+        const source = sourceForAlert(alert);
         const normalizedEventText = String(alert?.data?.event_text || "").replace(/^(?:a|an|the)\s+/i, "").trim();
         const parsedEventText = /has issued(?: an?| the)? (.*?) for/i.exec(alert?.data?.eas_text || "");
         const eventText = normalizedEventText || parsedEventText?.[1] || "No headline available";
@@ -950,6 +964,7 @@
 
         return {
             capAlert,
+            source,
             eventText,
             severity: severity || "unknown",
             recordingState,
@@ -979,7 +994,7 @@
             <div class="meta">
                 <div>${alert.data.eas_text.replace(/Message from (.*)./, `Message from <a style="color: rgba(243, 245, 249, 0.65) !important;" href="${escapeHtml(renderData.sourceStream ? renderData.sourceStream : '')}" target="_blank" rel="noopener noreferrer">$1</a>.`) || "Alert received."}</div>
                 <br>
-                <div><strong>Source:</strong> ${renderData.capAlert ? "CAP" : "EAS"}</div>
+                <div><strong>Source:</strong> ${renderData.source}</div>
                 <br>
                 <div><strong>Originator:</strong> ${renderData.originator}</div>
                 <br>
