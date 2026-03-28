@@ -1055,8 +1055,17 @@ fn sanitize_cap_description(description: &str) -> String {
     let mut replaced = cleaned.clone();
 
     for (target, replacement) in replacements {
-        // Case-insensitive replacement: match the target regardless of case in the CAP text
-        let re = match regex::RegexBuilder::new(&regex::escape(&target))
+        // Case-insensitive whole-word replacement: add \b word boundaries at each end of the
+        // pattern that touches a word character, so "EM" won't match inside "EMERGENCY" but
+        // "w/ " still works as-is since "/" and " " are non-word characters.
+        let escaped = regex::escape(&target);
+        let pattern = format!(
+            "{}{}{}",
+            if target.starts_with(|c: char| c.is_alphanumeric() || c == '_') { "\\b" } else { "" },
+            escaped,
+            if target.ends_with(|c: char| c.is_alphanumeric() || c == '_') { "\\b" } else { "" },
+        );
+        let re = match regex::RegexBuilder::new(&pattern)
             .case_insensitive(true)
             .build()
         {
@@ -1118,6 +1127,7 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     let bytes = slice.as_bytes();
     let mut idx = 0usize;
 
+    // Parse 1-4 leading digits
     while idx < bytes.len() && bytes[idx].is_ascii_digit() {
         idx += 1;
     }
@@ -1128,14 +1138,15 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     let digits = &slice[..idx];
     let mut cursor = idx;
 
-    let ws_start = cursor;
+    // Skip optional whitespace between digits and AM/PM
     while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
-    if cursor == ws_start || cursor + 2 > bytes.len() {
+
+    // Require AM or PM
+    if cursor + 2 > bytes.len() {
         return None;
     }
-
     let am_pm = if slice[cursor..cursor + 2].eq_ignore_ascii_case("AM") {
         "AM"
     } else if slice[cursor..cursor + 2].eq_ignore_ascii_case("PM") {
@@ -1145,35 +1156,39 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     };
     cursor += 2;
 
+    // Reject if AM/PM is followed immediately by more letters (e.g. "230pmph")
     if cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
         return None;
     }
 
-    let ws_start = cursor;
-    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-        cursor += 1;
-    }
-    if cursor == ws_start {
-        return None;
-    }
-
-    let tz_start = cursor;
-    while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
-        cursor += 1;
-    }
-    if cursor == tz_start {
-        return None;
-    }
-
-    let timezone = &slice[tz_start..cursor];
-    let timezone_spoken = spoken_timezone_name(timezone)?;
     let (hour, minute) = parse_compact_time(digits)?;
 
-    if cursor < bytes.len() && bytes[cursor].is_ascii_alphanumeric() {
-        return None;
+    // Optionally consume whitespace + timezone
+    let tz_probe = cursor;
+    let mut tz_cursor = tz_probe;
+    while tz_cursor < bytes.len() && bytes[tz_cursor].is_ascii_whitespace() {
+        tz_cursor += 1;
+    }
+    // Only look for timezone if there was at least one space after AM/PM
+    if tz_cursor > tz_probe {
+        let tz_start = tz_cursor;
+        while tz_cursor < bytes.len() && bytes[tz_cursor].is_ascii_alphabetic() {
+            tz_cursor += 1;
+        }
+        if tz_cursor > tz_start {
+            let timezone = &slice[tz_start..tz_cursor];
+            if let Some(tz_spoken) = spoken_timezone_name(timezone) {
+                // Make sure the timezone isn't part of a longer word
+                if tz_cursor >= bytes.len() || !bytes[tz_cursor].is_ascii_alphanumeric() {
+                    let expanded = format!("{hour}:{minute:02} {am_pm} {tz_spoken}");
+                    return Some((tz_cursor, expanded));
+                }
+            }
+        }
     }
 
-    let expanded = format!("{hour}:{minute:02} {am_pm} {timezone_spoken}");
+    // No timezone — just emit the colon-separated time
+    let expanded = format!("{hour}:{minute:02} {am_pm}");
     Some((cursor, expanded))
 }
 
