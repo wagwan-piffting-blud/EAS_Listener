@@ -25,9 +25,9 @@ FROM debian:trixie-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_RUNTIME_DIR=/run/user/1000
 
-ARG VERSION=1
+ARG VERSION=2
 ARG ASSET_NAME=Speechify.7z
-ARG ASSET_SHA256="b1df25c9ef0322d0b419e7bfcb4d563ff62569c6fadcc546128efb9981eb6a4c"
+ARG ASSET_SHA256="a9a136b74444db88a24fd5982c9bbc4ec19f9bf2e2f55c00bad1620177b44cdc"
 
 RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && mkdir -p /var/lib/apt/lists/partial && apt-get update && apt-get install -y --no-install-recommends wget libssl3 ca-certificates gnupg2 xvfb xauth git bash nginx jq ffmpeg curl bash p7zip-full tmux php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip icecast2 liquidsoap && mkdir -pm755 /etc/apt/keyrings && wget -O - https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key - && dpkg --add-architecture i386 && wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/debian/dists/trixie/winehq-trixie.sources && apt-get update && apt-get install -y --no-install-recommends winehq-stable wine64 wine32 && rm -rf /var/lib/apt/lists/* && chsh -s /bin/bash && mkdir -p /data /var/www/html /app
 

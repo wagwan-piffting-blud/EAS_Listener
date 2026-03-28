@@ -35,7 +35,7 @@ const CAP_AUDIO_MAX_BYTES: usize = 25 * 1024 * 1024;
 const CAP_RECORDING_SAMPLE_RATE: u32 = 48_000;
 const CAP_HEADER_AMPLITUDE: f64 = 0.42;
 const CAP_TTS_WINE_PATH: &str = "/usr/lib/wine/wine";
-const CAP_TTS_DUMPER_PATH: &str = "/app/Speechify/bin/spfy_dumpwav32.exe";
+const CAP_TTS_DUMPER_PATH: &str = "/app/Speechify/bin/spfy_dumpwav.exe";
 const CAP_TTS_REPLACEMENT_DICT_PATH: &str = "/app/cap_tts_replacement_config.json";
 const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
@@ -1055,7 +1055,21 @@ fn sanitize_cap_description(description: &str) -> String {
     let mut replaced = cleaned.clone();
 
     for (target, replacement) in replacements {
-        replaced = replaced.replace(&target, &replacement);
+        // Case-insensitive replacement: match the target regardless of case in the CAP text
+        let re = match regex::RegexBuilder::new(&regex::escape(&target))
+            .case_insensitive(true)
+            .build()
+        {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(
+                    "Failed to build regex for CAP TTS replacement target '{}': {}. Skipping.",
+                    target, err
+                );
+                continue;
+            }
+        };
+        replaced = re.replace_all(&replaced, replacement.as_str()).into_owned();
     }
 
     expand_cap_times_for_tts(&replaced)
