@@ -135,7 +135,12 @@ fn build_web_runtime_config_payload(
     );
     map.insert(
         "DEDICATED_ALERT_LOG_FILE".to_string(),
-        serde_json::Value::String(config.dedicated_alert_log_file.to_string_lossy().to_string()),
+        serde_json::Value::String(
+            config
+                .dedicated_alert_log_file
+                .to_string_lossy()
+                .to_string(),
+        ),
     );
     map.insert(
         "MONITORING_BIND_PORT".to_string(),
@@ -144,7 +149,7 @@ fn build_web_runtime_config_payload(
     map.insert(
         "MONITORING_MAX_LOGS".to_string(),
         serde_json::Value::Number(serde_json::Number::from(
-            config.monitoring_max_log_entries as u64
+            config.monitoring_max_log_entries as u64,
         )),
     );
     map.insert(
@@ -322,6 +327,7 @@ async fn main() -> Result<()> {
         recording_state.clone(),
         nnnn_tx.clone(),
         monitoring.clone(),
+        app_state.clone(),
         reload_tx.subscribe(),
     ));
     let alert_manager_handle = tokio::spawn(alerts::run_alert_manager(

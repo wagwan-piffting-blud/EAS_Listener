@@ -1,0 +1,79 @@
+# Stage 1: Builder
+FROM rust:1-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /usr/src/app
+
+RUN apt-get update && apt-get install -y pkg-config ffmpeg libssl-dev build-essential libc6 && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+
+RUN mkdir src && echo "fn main(){}" > src/main.rs
+
+COPY src ./src
+COPY include ./include
+COPY tests ./tests
+
+RUN touch -c src/main.rs && cargo test --release --locked && cargo build --release --locked
+
+# ----------------------------------------------------------------------------------------- #
+
+# Stage 2: Runner (lightweight — no Wine, no Speechify)
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV XDG_RUNTIME_DIR=/run/user/1000
+ENV TTS_ENGINE=piper
+
+ARG PIPER_VERSION=2023.11.14-2
+ARG PIPER_VOICE=en_US-lessac-medium
+
+RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 \
+    && mkdir -p /var/lib/apt/lists/partial \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       wget libssl3 ca-certificates gnupg2 git bash nginx jq ffmpeg curl \
+       php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip \
+       icecast2 liquidsoap \
+    && rm -rf /var/lib/apt/lists/* \
+    && chsh -s /bin/bash \
+    && mkdir -p /data /var/www/html /app /app/piper
+
+# Install Piper TTS binary + voice model
+# Map Debian arch names to Piper release names (amd64->x86_64, arm64->aarch64, armhf->armv7l)
+RUN DPKG_ARCH="$(dpkg --print-architecture)" \
+    && case "$DPKG_ARCH" in \
+         amd64) ARCH=x86_64 ;; \
+         arm64) ARCH=aarch64 ;; \
+         armhf) ARCH=armv7l ;; \
+         *) echo "Unsupported architecture: $DPKG_ARCH" >&2; exit 1 ;; \
+       esac \
+    && wget -qO /tmp/piper.tar.gz \
+       "https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_${ARCH}.tar.gz" \
+    && tar xzf /tmp/piper.tar.gz -C /app/piper --strip-components=1 \
+    && rm /tmp/piper.tar.gz \
+    && wget -qO "/app/piper/${PIPER_VOICE}.onnx" \
+       "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
+    && wget -qO "/app/piper/${PIPER_VOICE}.onnx.json" \
+       "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json" \
+    && ln -sf /app/piper/piper /usr/local/bin/piper
+
+RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:icecast2 /etc/icecast2 /var/log/icecast2
+
+COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
+COPY ./docker_entrypoint_lite.sh /docker_entrypoint.sh
+COPY ./nginx.conf /etc/nginx/sites-available/default
+COPY ./web_server/ /var/www/html
+COPY ./Cargo.toml /app/Cargo.toml
+
+WORKDIR /app
+
+RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /data /var/www/html
+
+HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl --fail http://localhost:${MONITORING_BIND_PORT}/api/health || exit 1
+
+EXPOSE 80
+EXPOSE ${MONITORING_BIND_PORT}
+EXPOSE 8000
+
+ENTRYPOINT ["/docker_entrypoint.sh"]

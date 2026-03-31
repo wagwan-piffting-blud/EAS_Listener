@@ -24,6 +24,7 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_RUNTIME_DIR=/run/user/1000
+ENV TTS_ENGINE=speechify
 
 ARG VERSION=2
 ARG ASSET_NAME=Speechify.7z

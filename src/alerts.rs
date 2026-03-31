@@ -190,12 +190,7 @@ fn should_process_alert(
     let preferred = preferred_senderid.trim();
     let incoming_is_preferred = !preferred.is_empty() && sender_id.eq_ignore_ascii_case(preferred);
     if incoming_is_preferred {
-        cache.insert(
-            dedup_key,
-            AlertDedupEntry {
-                received_at: now,
-            },
-        );
+        cache.insert(dedup_key, AlertDedupEntry { received_at: now });
         return true;
     }
 
@@ -206,12 +201,7 @@ fn should_process_alert(
         }
     }
 
-    cache.insert(
-        dedup_key,
-        AlertDedupEntry {
-            received_at: now,
-        },
-    );
+    cache.insert(dedup_key, AlertDedupEntry { received_at: now });
     true
 }
 

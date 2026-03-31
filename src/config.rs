@@ -23,6 +23,7 @@ pub struct Config {
     pub dasdec_url: String,
     pub should_relay_dasdec: bool,
     pub use_icecast_intro_outro: bool,
+    pub use_pre_post_roll_for_recordings: bool,
     pub icecast_intro: PathBuf,
     pub icecast_outro: PathBuf,
     pub should_relay: bool,
@@ -51,6 +52,8 @@ pub struct Config {
     pub web_server_port: String,
     pub filters: Vec<FilterRule>,
     pub log_level: String,
+    pub tts_engine: String,
+    pub tts_model: Option<String>,
 }
 
 fn optional_string(config_json: &Value, key: &str) -> Result<Option<String>> {
@@ -137,6 +140,17 @@ impl Config {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "INFO".to_string());
 
+        let tts_engine = std::env::var("TTS_ENGINE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "piper".to_string());
+
+        let tts_model = std::env::var("TTS_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         Self {
             apprise_config_path: "/app/apprise.yml".to_string(),
             should_relay_icecast: false,
@@ -144,6 +158,7 @@ impl Config {
             dasdec_url: String::new(),
             should_relay_dasdec: false,
             use_icecast_intro_outro: false,
+            use_pre_post_roll_for_recordings: false,
             icecast_intro: PathBuf::new(),
             icecast_outro: PathBuf::new(),
             should_relay: false,
@@ -172,6 +187,8 @@ impl Config {
             web_server_port: "3010".to_string(),
             filters: Vec::new(),
             log_level,
+            tts_engine,
+            tts_model,
         }
     }
 
@@ -236,6 +253,9 @@ impl Config {
         if let Some(value) = optional_bool(&config_json, "USE_ICECAST_INTRO_OUTRO")? {
             merged.use_icecast_intro_outro = value;
         }
+        if let Some(value) = optional_bool(&config_json, "USE_PRE_POST_ROLL_FOR_RECORDINGS")? {
+            merged.use_pre_post_roll_for_recordings = value;
+        }
         if let Some(value) = optional_bool(&config_json, "PROCESS_CAP_ALERTS")? {
             merged.process_cap_alerts = value;
         }
@@ -284,6 +304,12 @@ impl Config {
         }
         if let Some(value) = optional_string(&config_json, "RUST_LOG")? {
             merged.log_level = value;
+        }
+        if let Some(value) = optional_string(&config_json, "TTS_ENGINE")? {
+            merged.tts_engine = value;
+        }
+        if let Some(value) = optional_string(&config_json, "TTS_MODEL")? {
+            merged.tts_model = Some(value);
         }
 
         if let Some(value) = optional_string(&config_json, "TZ")? {
@@ -399,6 +425,15 @@ impl Config {
         {
             return Err(anyhow!(
                 "ICECAST_INTRO and ICECAST_OUTRO must be set if USE_ICECAST_INTRO_OUTRO is true in your config.json file"
+            ));
+        }
+
+        if merged.use_pre_post_roll_for_recordings
+            && (merged.icecast_intro.as_os_str().is_empty()
+                || merged.icecast_outro.as_os_str().is_empty())
+        {
+            return Err(anyhow!(
+                "ICECAST_INTRO and ICECAST_OUTRO must be set if USE_PRE_POST_ROLL_FOR_RECORDINGS is true in your config.json file"
             ));
         }
 

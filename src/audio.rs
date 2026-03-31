@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::monitoring::MonitoringHub;
 use crate::recording::{self, RecordingState};
 use crate::relay::RelayState;
-use crate::state::{ActiveAlert, EasAlertData};
+use crate::state::{ActiveAlert, AppState, EasAlertData};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -22,6 +22,8 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::mpsc::error::TrySendError;
@@ -149,6 +151,7 @@ pub async fn run_audio_processor(
     recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
+    app_state: Arc<Mutex<AppState>>,
     mut reload_rx: BroadcastReceiver<Config>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
@@ -178,6 +181,7 @@ pub async fn run_audio_processor(
             recording_state.clone(),
             nnnn_tx.clone(),
             monitoring.clone(),
+            app_state.clone(),
         );
         stream_tasks.insert(stream_url, handle);
     }
@@ -259,6 +263,7 @@ pub async fn run_audio_processor(
                         recording_state.clone(),
                         nnnn_tx.clone(),
                         monitoring.clone(),
+                        app_state.clone(),
                     );
                     stream_tasks.insert(stream_url.clone(), handle);
                     info!(
@@ -303,6 +308,7 @@ fn spawn_stream_worker(
     recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
+    app_state: Arc<Mutex<AppState>>,
 ) -> StreamWorkerHandle {
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_signal_for_worker = Arc::clone(&stop_signal);
@@ -317,6 +323,7 @@ fn spawn_stream_worker(
             recording_state,
             nnnn_tx,
             monitoring,
+            app_state,
             stop_signal_for_worker,
         )
         .await
@@ -336,6 +343,7 @@ async fn run_stream_task(
     recording_state: Arc<Mutex<HashMap<String, RecordingState>>>,
     nnnn_tx: BroadcastSender<String>,
     monitoring: MonitoringHub,
+    app_state: Arc<Mutex<AppState>>,
     stop_signal: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut last_log_time = Instant::now() - Duration::from_secs(61);
@@ -462,6 +470,8 @@ async fn run_stream_task(
                 let config_for_decode = config.clone();
                 let stream_for_decode = stream_url.clone();
                 let stop_signal_for_decode = Arc::clone(&stop_signal);
+                let app_state_for_decode = app_state.clone();
+                let monitoring_for_decode = monitoring.clone();
                 let decoding_task = tokio::task::spawn_blocking(move || {
                     let reader = ChannelReader {
                         rx: byte_rx,
@@ -479,6 +489,8 @@ async fn run_stream_task(
                         &nnnn_tx_clone,
                         &stream_for_decode,
                         &stop_signal_for_decode,
+                        &app_state_for_decode,
+                        &monitoring_for_decode,
                     )
                 });
                 if let Err(e) = decoding_task.await? {
@@ -537,6 +549,8 @@ fn process_stream(
     nnnn_tx: &BroadcastSender<String>,
     stream_label: &str,
     stop_signal: &Arc<AtomicBool>,
+    app_state: &Arc<Mutex<AppState>>,
+    monitoring: &MonitoringHub,
 ) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
 
@@ -823,6 +837,8 @@ fn process_stream(
                                 (config_snapshot, filters)
                             };
                             let same_header_for_relay = current_same_header.clone();
+                            let app_state_for_tone = Arc::clone(app_state);
+                            let monitoring_for_tone = monitoring.clone();
                             runtime.spawn(async move {
                                 tokio::time::sleep(NWR_TONE_RECORDING_DURATION).await;
 
@@ -915,6 +931,73 @@ fn process_stream(
                                     Some(output_path.clone()),
                                 )
                                 .await;
+
+                                {
+                                    let active_snapshot = {
+                                        let mut app_state_guard =
+                                            app_state_for_tone.lock().await;
+                                        let now_utc = Utc::now();
+                                        app_state_guard.active_alerts.retain(|existing| {
+                                            existing.expires_at > now_utc
+                                                && existing.raw_header != raw_header
+                                        });
+                                        app_state_guard.active_alerts.push(tone_alert.clone());
+
+                                        if let Err(e) = crate::alerts::update_alert_files(
+                                            &config_for_relay.shared_state_dir,
+                                            &app_state_guard,
+                                        )
+                                        .await
+                                        {
+                                            error!(
+                                                stream = %stream_for_timeout,
+                                                "Failed to update alert files for 1050 Hz tone: {}",
+                                                e
+                                            );
+                                        }
+
+                                        app_state_guard.active_alerts.clone()
+                                    };
+                                    monitoring_for_tone.broadcast_alerts(
+                                        active_snapshot,
+                                        Some(stream_for_timeout.as_str()),
+                                        Some(tone_alert.data.event_code.as_str()),
+                                    );
+                                }
+
+                                {
+                                    let received_at = Utc::now();
+                                    let local_time = received_at.with_timezone(&config_for_relay.timezone);
+                                    let timestamp = local_time.format("%Y-%m-%d %l:%M:%S %p");
+                                    let log_line = format!(
+                                        "{}: {} (Received @ {})\n\n",
+                                        raw_header, tone_details, timestamp
+                                    );
+
+                                    match OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&config_for_relay.dedicated_alert_log_file)
+                                        .await
+                                    {
+                                        Ok(mut file) => {
+                                            if let Err(e) = file.write_all(log_line.as_bytes()).await {
+                                                warn!(
+                                                    stream = %stream_for_timeout,
+                                                    "Failed to write 1050 Hz tone to dedicated alert log: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                stream = %stream_for_timeout,
+                                                "Failed to open dedicated alert log for 1050 Hz tone: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
 
                                 if config_for_relay.should_relay
                                     && (config_for_relay.should_relay_icecast

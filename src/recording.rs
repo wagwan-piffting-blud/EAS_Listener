@@ -1,15 +1,24 @@
 use crate::config::Config;
 use crate::header;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Local;
 use hound::{WavSpec, WavWriter};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::path::Path;
 use std::path::PathBuf;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 const TARGET_SAMPLE_RATE: u32 = 48000;
 const HEADER_AMPLITUDE: f64 = 0.42;
@@ -69,6 +78,54 @@ pub fn start_encoding_task_with_timestamp(
     );
     let output_path_clone = output_path.clone();
 
+    let intro_samples: Option<Vec<i16>> = if config.use_pre_post_roll_for_recordings
+        && !config.icecast_intro.as_os_str().is_empty()
+    {
+        match decode_audio_file_to_i16(&config.icecast_intro) {
+            Ok(samples) => {
+                info!(
+                    "Loaded intro audio ({} samples) from {:?}",
+                    samples.len(),
+                    config.icecast_intro
+                );
+                Some(samples)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load intro audio from {:?}: {}",
+                    config.icecast_intro, e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let outro_samples: Option<Vec<i16>> = if config.use_pre_post_roll_for_recordings
+        && !config.icecast_outro.as_os_str().is_empty()
+    {
+        match decode_audio_file_to_i16(&config.icecast_outro) {
+            Ok(samples) => {
+                info!(
+                    "Loaded outro audio ({} samples) from {:?}",
+                    samples.len(),
+                    config.icecast_outro
+                );
+                Some(samples)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load outro audio from {:?}: {}",
+                    config.icecast_outro, e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let header_samples =
         header::generate_same_header_samples(header_text, TARGET_SAMPLE_RATE, HEADER_AMPLITUDE)?;
     let header_sample_count = header_samples.len();
@@ -94,11 +151,19 @@ pub fn start_encoding_task_with_timestamp(
         let samples_written = tokio::task::spawn_blocking(move || {
             let mut blocking_writer = writer;
             let mut audio_rx = audio_rx;
+            let mut samples_written = 0usize;
+
+            if let Some(ref intro) = intro_samples {
+                for &sample in intro {
+                    blocking_writer.write_sample(sample)?;
+                }
+                samples_written += intro.len();
+            }
+
             for &sample in &header_samples {
                 blocking_writer.write_sample(sample)?;
             }
-
-            let mut samples_written = header_sample_count;
+            samples_written += header_sample_count;
             let amplitude = i16::MAX as f32;
             let mut trailing_buffer: VecDeque<i16> =
                 VecDeque::with_capacity(nnnn_tail_buffer_samples + 8192);
@@ -126,11 +191,8 @@ pub fn start_encoding_task_with_timestamp(
                 let zero_cross_lookback =
                     (TARGET_SAMPLE_RATE as usize * NNNN_ZERO_CROSS_LOOKBACK_MS) / 1000;
                 let trim_from = trim_from.saturating_sub(guard_samples);
-                let trim_from = snap_trim_to_zero_crossing(
-                    &trailing_samples,
-                    trim_from,
-                    zero_cross_lookback,
-                );
+                let trim_from =
+                    snap_trim_to_zero_crossing(&trailing_samples, trim_from, zero_cross_lookback);
                 trailing_samples.truncate(trim_from);
             }
             let min_silence_trim_samples =
@@ -167,6 +229,20 @@ pub fn start_encoding_task_with_timestamp(
             }
 
             samples_written += nnnn_sample_count;
+
+            if let Some(ref outro) = outro_samples {
+                let silence_before_outro = TARGET_SAMPLE_RATE as usize;
+                for _ in 0..silence_before_outro {
+                    blocking_writer.write_sample(0i16)?;
+                }
+                samples_written += silence_before_outro;
+
+                for &sample in outro {
+                    blocking_writer.write_sample(sample)?;
+                }
+                samples_written += outro.len();
+            }
+
             blocking_writer.finalize()?;
             Ok::<_, anyhow::Error>(samples_written)
         })
@@ -503,6 +579,125 @@ fn stream_label_from_source(source_stream: &str) -> String {
     };
 
     sanitize_filename_label(label)
+}
+
+fn decode_audio_file_to_i16(path: &Path) -> Result<Vec<i16>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .with_context(|| format!("Failed to probe audio file: {}", path.display()))?;
+
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("No default track in {}", path.display()))?;
+    let track_id = track.id;
+    let input_rate = track.codec_params.sample_rate.unwrap_or(TARGET_SAMPLE_RATE);
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .with_context(|| format!("Failed to create decoder for {}", path.display()))?;
+
+    let mut all_f32: Vec<f32> = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(_)) => break,
+            Err(e) => return Err(e.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(decoded) => {
+                let frames = decoded.frames();
+                if frames == 0 {
+                    continue;
+                }
+                let spec = *decoded.spec();
+                let channels = spec.channels.count().max(1);
+                let mut sample_buf = SampleBuffer::<f32>::new(frames as u64, spec);
+                sample_buf.copy_interleaved_ref(decoded);
+                if channels == 1 {
+                    all_f32.extend_from_slice(sample_buf.samples());
+                } else {
+                    for chunk in sample_buf.samples().chunks(channels) {
+                        let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                        all_f32.push(mono);
+                    }
+                }
+            }
+            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    let resampled_f32 = if input_rate != TARGET_SAMPLE_RATE {
+        resample_f32(&all_f32, input_rate)?
+    } else {
+        all_f32
+    };
+
+    let amplitude = i16::MAX as f32;
+    Ok(resampled_f32
+        .iter()
+        .map(|&s| (s.clamp(-1.0, 1.0) * amplitude) as i16)
+        .collect())
+}
+
+fn resample_f32(samples: &[f32], input_rate: u32) -> Result<Vec<f32>> {
+    let ratio = TARGET_SAMPLE_RATE as f64 / input_rate as f64;
+    let chunk_size = 1024usize;
+    let mut resampler = SincFixedIn::<f32>::new(
+        ratio,
+        2.0,
+        SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        },
+        chunk_size,
+        1,
+    )
+    .context("Failed to create resampler for audio file")?;
+
+    let mut output = Vec::with_capacity((samples.len() as f64 * ratio * 1.1) as usize);
+    let mut pos = 0;
+
+    while pos + chunk_size <= samples.len() {
+        let chunk = vec![samples[pos..pos + chunk_size].to_vec()];
+        let result = resampler.process(&chunk, None)?;
+        output.extend_from_slice(&result[0]);
+        pos += chunk_size;
+    }
+
+    if pos < samples.len() {
+        let remaining = samples.len() - pos;
+        let mut padded = samples[pos..].to_vec();
+        padded.resize(chunk_size, 0.0);
+        let chunk = vec![padded];
+        let result = resampler.process(&chunk, None)?;
+        let expected_out = (remaining as f64 * ratio).ceil() as usize;
+        let take = expected_out.min(result[0].len());
+        output.extend_from_slice(&result[0][..take]);
+    }
+
+    Ok(output)
 }
 
 fn sanitize_filename_label(label: &str) -> String {

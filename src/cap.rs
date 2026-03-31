@@ -34,8 +34,7 @@ const CAP_PARSE_ERROR_SKIP_TTL_SECS: i64 = 24 * 60 * 60;
 const CAP_AUDIO_MAX_BYTES: usize = 25 * 1024 * 1024;
 const CAP_RECORDING_SAMPLE_RATE: u32 = 48_000;
 const CAP_HEADER_AMPLITUDE: f64 = 0.42;
-const CAP_TTS_WINE_PATH: &str = "/usr/lib/wine/wine";
-const CAP_TTS_DUMPER_PATH: &str = "/app/Speechify/bin/spfy_dumpwav.exe";
+const CAP_TTS_DEFAULT_PIPER_MODEL: &str = "/app/piper/en_US-lessac-medium.onnx";
 const CAP_TTS_REPLACEMENT_DICT_PATH: &str = "/app/cap_tts_replacement_config.json";
 const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
@@ -1061,9 +1060,17 @@ fn sanitize_cap_description(description: &str) -> String {
         let escaped = regex::escape(&target);
         let pattern = format!(
             "{}{}{}",
-            if target.starts_with(|c: char| c.is_alphanumeric() || c == '_') { "\\b" } else { "" },
+            if target.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                "\\b"
+            } else {
+                ""
+            },
             escaped,
-            if target.ends_with(|c: char| c.is_alphanumeric() || c == '_') { "\\b" } else { "" },
+            if target.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                "\\b"
+            } else {
+                ""
+            },
         );
         let re = match regex::RegexBuilder::new(&pattern)
             .case_insensitive(true)
@@ -1310,18 +1317,60 @@ async fn synthesize_cap_tts_audio(
         }
     };
 
-    let status = Command::new(CAP_TTS_WINE_PATH)
-        .arg(CAP_TTS_DUMPER_PATH)
-        .arg(format!(
-            "{} {} {}",
-            alert_prefix,
-            description,
-            instructions.unwrap_or_default()
-        ))
-        .arg(&tts_path)
-        .status()
-        .await
-        .context("Failed to execute CAP TTS command")?;
+    let tts_text = format!(
+        "{} {} {}",
+        alert_prefix,
+        description,
+        instructions.unwrap_or_default()
+    );
+
+    let status = match config.tts_engine.as_str() {
+        "piper" => {
+            let model = config
+                .tts_model
+                .as_deref()
+                .unwrap_or(CAP_TTS_DEFAULT_PIPER_MODEL);
+            let mut child = Command::new("piper")
+                .arg("--model")
+                .arg(model)
+                .arg("--output_file")
+                .arg(&tts_path)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("Failed to spawn Piper TTS process")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(tts_text.as_bytes())
+                    .await
+                    .context("Failed to write text to Piper stdin")?;
+                drop(stdin);
+            }
+            child
+                .wait()
+                .await
+                .context("Failed to wait for Piper TTS process")?
+        }
+        "espeak-ng" => Command::new("espeak-ng")
+            .arg("-w")
+            .arg(&tts_path)
+            .arg(&tts_text)
+            .status()
+            .await
+            .context("Failed to execute espeak-ng TTS command")?,
+        "speechify" => Command::new("/usr/lib/wine/wine")
+            .arg("/app/Speechify/bin/spfy_dumpwav.exe")
+            .arg(&tts_text)
+            .arg(&tts_path)
+            .status()
+            .await
+            .context("Failed to execute Speechify TTS command")?,
+        other => {
+            return Err(anyhow!(
+                "Unknown TTS engine '{}'. Supported: piper, espeak-ng, speechify",
+                other
+            ));
+        }
+    };
 
     if !status.success() {
         return Err(anyhow!(
@@ -1514,13 +1563,11 @@ fn cap_header_source_marker(source_hint: &str) -> &'static str {
         || contains_ascii_ignore_case(source_hint, b"publicwea")
         || contains_ascii_ignore_case(source_hint, b"/wea/")
         || contains_ascii_ignore_case(source_hint, b"/wea#")
-        || source_hint
-            .rsplit_once('#')
-            .map_or(false, |(_, fragment)| {
-                fragment
-                    .get(..4)
-                    .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
-            })
+        || source_hint.rsplit_once('#').map_or(false, |(_, fragment)| {
+            fragment
+                .get(..4)
+                .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
+        })
     {
         CAP_HEADER_SOURCE_MARKER_WEA
     } else {
@@ -2249,7 +2296,9 @@ mod tests {
         let mut second = first.clone();
         second.identifier = "SECOND-ID".to_string();
         second.fips.reverse();
-        second.expires = second.expires.map(|value| value + ChronoDuration::minutes(30));
+        second.expires = second
+            .expires
+            .map(|value| value + ChronoDuration::minutes(30));
 
         assert_eq!(build_dedupe_key(&first), build_dedupe_key(&second));
     }
@@ -2265,15 +2314,19 @@ mod tests {
 
     #[test]
     fn active_alert_has_dedupe_key_matches_non_cap_sources_too() {
-        let dedupe_key = build_dedupe_key_from_raw_header("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-")
-            .expect("dedupe key");
+        let dedupe_key =
+            build_dedupe_key_from_raw_header("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-")
+                .expect("dedupe key");
         let eas_alert = ActiveAlert::new(
             sample_alert_data("TOR", &["031055"]),
             "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-".to_string(),
             Duration::from_secs(120),
         );
 
-        assert!(active_alert_has_dedupe_key(&[eas_alert], dedupe_key.as_str()));
+        assert!(active_alert_has_dedupe_key(
+            &[eas_alert],
+            dedupe_key.as_str()
+        ));
     }
 
     #[test]
