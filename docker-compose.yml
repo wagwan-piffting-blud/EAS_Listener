@@ -1,6 +1,6 @@
 services:
     eas_listener:
-        image: ghcr.io/wagwan-piffting-blud/eas-listener:latest # Use "latest" for the most recent stable release, or "lite" for a smaller image with Piper/Espeak TTS only (no Speechify Tom support, but much lighter on resources and faster to pull!)
+        image: ghcr.io/wagwan-piffting-blud/eas-listener:latest # Use "latest" for the most recent stable release, or "latest-lite" for a smaller image with Piper/Espeak TTS only (no Speechify Tom support, but much lighter on resources and faster to pull!)
         container_name: eas_listener
         restart: unless-stopped
         volumes:

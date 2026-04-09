@@ -913,7 +913,26 @@ fn parse_cap_alert(xml: &str, source_url: &str) -> Result<CapAlert> {
     let description_text = child_text(info_node, "description")
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty());
-    let description_raw = cmam_long_text
+
+    let is_nws_wea = originator_code == "WXR"
+        && cap_header_source_marker(source_url) == CAP_HEADER_SOURCE_MARKER_WEA;
+
+    let normalized_description = if is_nws_wea {
+        description_text
+            .as_deref()
+            .map(|raw| {
+                crate::nws_bulletin::normalize_nws_bulletin(
+                    raw,
+                    &crate::nws_bulletin::NormalizeOptions::default(),
+                )
+            })
+            .filter(|text| !text.is_empty())
+    } else {
+        None
+    };
+
+    let description_raw = normalized_description
+        .or(cmam_long_text)
         .or(description_text)
         .unwrap_or_else(|| "No CAP description provided.".to_string());
     let description = sanitize_cap_description(&description_raw);
@@ -1054,9 +1073,6 @@ fn sanitize_cap_description(description: &str) -> String {
     let mut replaced = cleaned.clone();
 
     for (target, replacement) in replacements {
-        // Case-insensitive whole-word replacement: add \b word boundaries at each end of the
-        // pattern that touches a word character, so "EM" won't match inside "EMERGENCY" but
-        // "w/ " still works as-is since "/" and " " are non-word characters.
         let escaped = regex::escape(&target);
         let pattern = format!(
             "{}{}{}",
@@ -1134,7 +1150,6 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     let bytes = slice.as_bytes();
     let mut idx = 0usize;
 
-    // Parse 1-4 leading digits
     while idx < bytes.len() && bytes[idx].is_ascii_digit() {
         idx += 1;
     }
@@ -1145,12 +1160,10 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     let digits = &slice[..idx];
     let mut cursor = idx;
 
-    // Skip optional whitespace between digits and AM/PM
     while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
 
-    // Require AM or PM
     if cursor + 2 > bytes.len() {
         return None;
     }
@@ -1163,20 +1176,18 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
     };
     cursor += 2;
 
-    // Reject if AM/PM is followed immediately by more letters (e.g. "230pmph")
     if cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
         return None;
     }
 
     let (hour, minute) = parse_compact_time(digits)?;
 
-    // Optionally consume whitespace + timezone
     let tz_probe = cursor;
     let mut tz_cursor = tz_probe;
     while tz_cursor < bytes.len() && bytes[tz_cursor].is_ascii_whitespace() {
         tz_cursor += 1;
     }
-    // Only look for timezone if there was at least one space after AM/PM
+
     if tz_cursor > tz_probe {
         let tz_start = tz_cursor;
         while tz_cursor < bytes.len() && bytes[tz_cursor].is_ascii_alphabetic() {
@@ -1185,7 +1196,6 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
         if tz_cursor > tz_start {
             let timezone = &slice[tz_start..tz_cursor];
             if let Some(tz_spoken) = spoken_timezone_name(timezone) {
-                // Make sure the timezone isn't part of a longer word
                 if tz_cursor >= bytes.len() || !bytes[tz_cursor].is_ascii_alphanumeric() {
                     let expanded = format!("{hour}:{minute:02} {am_pm} {tz_spoken}");
                     return Some((tz_cursor, expanded));
@@ -1194,7 +1204,6 @@ fn parse_spoken_time_at(slice: &str) -> Option<(usize, String)> {
         }
     }
 
-    // No timezone — just emit the colon-separated time
     let expanded = format!("{hour}:{minute:02} {am_pm}");
     Some((cursor, expanded))
 }
@@ -1317,11 +1326,15 @@ async fn synthesize_cap_tts_audio(
         }
     };
 
+    let deduped_instructions = instructions
+        .map(|instr| deduplicate_instructions(description, instr))
+        .filter(|s| !s.is_empty());
+
     let tts_text = format!(
         "{} {} {}",
         alert_prefix,
         description,
-        instructions.unwrap_or_default()
+        deduped_instructions.as_deref().unwrap_or_default()
     );
 
     let status = match config.tts_engine.as_str() {
@@ -1392,6 +1405,37 @@ async fn synthesize_cap_tts_audio(
     );
 
     Ok(Some(tts_path))
+}
+
+fn deduplicate_instructions(description: &str, instructions: &str) -> String {
+    let desc_sentences: Vec<&str> = description
+        .split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let kept: Vec<&str> = instructions
+        .split('.')
+        .map(str::trim)
+        .filter(|sentence| {
+            if sentence.is_empty() {
+                return false;
+            }
+            !desc_sentences
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(sentence))
+        })
+        .collect();
+
+    if kept.is_empty() {
+        return String::new();
+    }
+
+    let mut result = kept.join(". ");
+    if instructions.trim_end().ends_with('.') {
+        result.push('.');
+    }
+    result
 }
 
 fn cap_tts_synth_lock() -> &'static Mutex<()> {
@@ -2390,5 +2434,32 @@ mod tests {
         watched.clear();
         watched.insert("999999".to_string());
         assert!(!is_cap_relevant(&alert_fips, &watched));
+    }
+
+    #[test]
+    fn deduplicate_instructions_removes_repeated_sentences() {
+        let description = "National Weather Service: TORNADO WARNING in this area until 7:15 PM EDT. Take shelter now in a basement or an interior room on the lowest floor of a sturdy building. If you are outdoors, in a mobile home, or in a vehicle, move to the closest substantial shelter and protect yourself from flying debris. Check media.";
+        let instructions = "TAKE COVER NOW! Move to a basement or an interior room on the lowest floor of a sturdy building. Avoid windows. If you are outdoors, in a mobile home, or in a vehicle, move to the closest substantial shelter and protect yourself from flying debris.";
+        let result = deduplicate_instructions(description, instructions);
+        assert_eq!(
+            result,
+            "TAKE COVER NOW! Move to a basement or an interior room on the lowest floor of a sturdy building. Avoid windows."
+        );
+    }
+
+    #[test]
+    fn deduplicate_instructions_keeps_all_when_no_overlap() {
+        let description = "A tornado warning has been issued.";
+        let instructions = "Seek shelter immediately. Stay away from windows.";
+        let result = deduplicate_instructions(description, instructions);
+        assert_eq!(result, "Seek shelter immediately. Stay away from windows.");
+    }
+
+    #[test]
+    fn deduplicate_instructions_empty_when_fully_duplicated() {
+        let description = "Take cover now. Move to shelter.";
+        let instructions = "Take cover now. Move to shelter.";
+        let result = deduplicate_instructions(description, instructions);
+        assert_eq!(result, "");
     }
 }

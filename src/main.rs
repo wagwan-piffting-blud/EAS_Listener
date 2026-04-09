@@ -24,6 +24,7 @@ mod e2t_ng;
 mod filter;
 mod header;
 mod monitoring;
+mod nws_bulletin;
 mod recording;
 mod relay;
 mod state;

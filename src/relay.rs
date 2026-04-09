@@ -227,7 +227,7 @@ impl RelayState {
             stream_cmd.arg("-re");
             stream_cmd.arg("-i").arg(&combined_path_buf);
             stream_cmd.arg("-c:a").arg("copy");
-            stream_cmd.arg("-f").arg("wav");
+            stream_cmd.arg("-f").arg("ogg");
             stream_cmd
                 .arg("-metadata")
                 .arg(format!("title={}", "Emergency Alert"));
