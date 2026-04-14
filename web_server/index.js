@@ -402,7 +402,6 @@
             return;
         }
 
-        // Parse data uri to binary and play it as audio
         if (NEW_ALERT_SOUND_SRC.startsWith("data:audio")) {
             try {
                 const mime_type = NEW_ALERT_SOUND_SRC.substring(5, NEW_ALERT_SOUND_SRC.indexOf(";base64"));

@@ -99,7 +99,6 @@ pub struct DurationParts {
 pub struct ParsedEas {
     pub originator: String,
     pub event_code: String,
-    // Backward-compatible alias for callers that expect fips_codes naming.
     pub fips_codes: Vec<String>,
     pub locations: Vec<String>,
     pub duration: DurationParts,
@@ -815,7 +814,6 @@ fn process_das_fips_string(str_fips: &str, combine_same_state: bool) -> DasResul
 
             let mut clean_name = name.to_string();
             if locality_type == " Parish" {
-                // Preserve original behavior.
             } else if !city_prefix.is_empty() {
                 clean_name.push_str(" (city)");
                 only_parishes = false;

@@ -34,6 +34,7 @@ pub struct Config {
     pub shared_state_dir: PathBuf,
     pub alert_log_file: String,
     pub dedicated_alert_log_file: PathBuf,
+    pub alert_database_file: PathBuf,
     pub timezone: Tz,
     pub watched_fips: HashSet<String>,
     pub recording_dir: PathBuf,
@@ -169,6 +170,7 @@ impl Config {
             shared_state_dir: shared_dir.clone(),
             alert_log_file: "alerts.log".to_string(),
             dedicated_alert_log_file: shared_dir.join("dedicated-alerts.log"),
+            alert_database_file: shared_dir.join("alerts.db"),
             timezone: Tz::UTC,
             watched_fips: HashSet::new(),
             recording_dir: shared_dir.join("recordings"),
@@ -225,6 +227,20 @@ impl Config {
             })
             .unwrap_or_else(|| "dedicated-alerts.log".to_string());
         merged.dedicated_alert_log_file = merged.shared_state_dir.join(dedicated_log_name);
+
+        let alert_db_name = optional_string(&config_json, "ALERT_DATABASE_FILE")?
+            .and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .unwrap_or_else(|| "alerts.db".to_string());
+        merged.alert_database_file = if alert_db_name.starts_with('/')
+            || alert_db_name.chars().nth(1).map_or(false, |c| c == ':')
+        {
+            PathBuf::from(alert_db_name)
+        } else {
+            merged.shared_state_dir.join(alert_db_name)
+        };
 
         if let Some(value) = optional_string(&config_json, "RECORDING_DIR")? {
             let trimmed = value.trim();

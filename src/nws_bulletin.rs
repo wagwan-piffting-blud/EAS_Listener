@@ -23,13 +23,51 @@ static TZ_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 
 static LOWER_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "a", "an", "and", "as", "at", "between", "but", "by", "for", "from",
-        "if", "in", "into", "near", "nor", "of", "off", "on", "onto", "or",
-        "out", "over", "per", "the", "to", "up", "via", "with", "without",
-        "north", "south", "east", "west",
-        "northeast", "northwest", "southeast", "southwest",
-        "northern", "southern", "eastern", "western",
-        "northeastern", "northwestern", "southeastern", "southwestern",
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "between",
+        "but",
+        "by",
+        "for",
+        "from",
+        "if",
+        "in",
+        "into",
+        "near",
+        "nor",
+        "of",
+        "off",
+        "on",
+        "onto",
+        "or",
+        "out",
+        "over",
+        "per",
+        "the",
+        "to",
+        "up",
+        "via",
+        "with",
+        "without",
+        "north",
+        "south",
+        "east",
+        "west",
+        "northeast",
+        "northwest",
+        "southeast",
+        "southwest",
+        "northern",
+        "southern",
+        "eastern",
+        "western",
+        "northeastern",
+        "northwestern",
+        "southeastern",
+        "southwestern",
         "central",
     ]
     .into_iter()
@@ -37,17 +75,61 @@ static LOWER_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 });
 
 static US_STATES: &[&str] = &[
-    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
-    "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho",
-    "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana",
-    "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
-    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada",
-    "New Hampshire", "New Jersey", "New Mexico", "New York",
-    "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon",
-    "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota",
-    "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington",
-    "West Virginia", "Wisconsin", "Wyoming", "District of Columbia",
-    "Puerto Rico", "Guam", "American Samoa", "Virgin Islands",
+    "Alabama",
+    "Alaska",
+    "Arizona",
+    "Arkansas",
+    "California",
+    "Colorado",
+    "Connecticut",
+    "Delaware",
+    "Florida",
+    "Georgia",
+    "Hawaii",
+    "Idaho",
+    "Illinois",
+    "Indiana",
+    "Iowa",
+    "Kansas",
+    "Kentucky",
+    "Louisiana",
+    "Maine",
+    "Maryland",
+    "Massachusetts",
+    "Michigan",
+    "Minnesota",
+    "Mississippi",
+    "Missouri",
+    "Montana",
+    "Nebraska",
+    "Nevada",
+    "New Hampshire",
+    "New Jersey",
+    "New Mexico",
+    "New York",
+    "North Carolina",
+    "North Dakota",
+    "Ohio",
+    "Oklahoma",
+    "Oregon",
+    "Pennsylvania",
+    "Rhode Island",
+    "South Carolina",
+    "South Dakota",
+    "Tennessee",
+    "Texas",
+    "Utah",
+    "Vermont",
+    "Virginia",
+    "Washington",
+    "West Virginia",
+    "Wisconsin",
+    "Wyoming",
+    "District of Columbia",
+    "Puerto Rico",
+    "Guam",
+    "American Samoa",
+    "Virgin Islands",
     "Northern Mariana Islands",
 ];
 
@@ -64,9 +146,24 @@ static PROPER_ALWAYS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 
 static PLACE_ENDERS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "REFUGE", "PARK", "AIRPORT", "LAKE", "RESERVOIR", "CREEK", "RIVER",
-        "BAY", "HARBOR", "BEACH", "MOUNTAIN", "MOUNTAINS", "HILLS", "FOREST",
-        "MONUMENT", "ISLAND", "CANYON", "DAM",
+        "REFUGE",
+        "PARK",
+        "AIRPORT",
+        "LAKE",
+        "RESERVOIR",
+        "CREEK",
+        "RIVER",
+        "BAY",
+        "HARBOR",
+        "BEACH",
+        "MOUNTAIN",
+        "MOUNTAINS",
+        "HILLS",
+        "FOREST",
+        "MONUMENT",
+        "ISLAND",
+        "CANYON",
+        "DAM",
     ]
     .into_iter()
     .collect()
@@ -78,8 +175,7 @@ static RE_PRODUCT_LINE: Lazy<Regex> = Lazy::new(|| {
 });
 
 static RE_HEADER_TIME: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^\d{3,4}\s+[AP]M\s+[A-Z]{2,4}\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}$")
-        .unwrap()
+    Regex::new(r"(?i)^\d{3,4}\s+[AP]M\s+[A-Z]{2,4}\s+\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}$").unwrap()
 });
 
 static RE_AWIPS_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Z]{6}$").unwrap());
@@ -94,17 +190,17 @@ static RE_INLINE_TIMES: Lazy<Regex> = Lazy::new(|| {
         .map(|a| regex::escape(a))
         .collect::<Vec<_>>()
         .join("|");
-    Regex::new(&format!(
-        r"(?i)\b(\d{{1,4}}\s*[AaPp][Mm]\s*(?:{joined}))\b"
-    ))
-    .unwrap()
+    Regex::new(&format!(r"(?i)\b(\d{{1,4}}\s*[AaPp][Mm]\s*(?:{joined}))\b")).unwrap()
 });
 
 static RE_MULTI_WORD_ENTITY: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b").unwrap());
 
 static RE_SINGLE_ENTITY: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?:,\s*|\band\s+|\bor\s+|\binclude\s+|\bof\s+|\bover\s+|\bnear\s+)([A-Z][a-z]{2,})\b").unwrap()
+    Regex::new(
+        r"(?:,\s*|\band\s+|\bor\s+|\binclude\s+|\bof\s+|\bover\s+|\bnear\s+)([A-Z][a-z]{2,})\b",
+    )
+    .unwrap()
 });
 
 fn collapse_spaces(text: &str) -> String {
@@ -219,7 +315,10 @@ fn oxford_join(items: &[String]) -> String {
 }
 
 fn expand_time_string(text: &str) -> String {
-    let text = collapse_spaces(text).to_uppercase().trim_end_matches('.').to_string();
+    let text = collapse_spaces(text)
+        .to_uppercase()
+        .trim_end_matches('.')
+        .to_string();
     let caps = match RE_TIME_STRING.captures(&text) {
         Some(c) => c,
         None => return titleish(&text),
@@ -249,9 +348,7 @@ fn expand_time_string(text: &str) -> String {
 
 fn expand_inline_times(text: &str) -> String {
     RE_INLINE_TIMES
-        .replace_all(text, |caps: &regex::Captures| {
-            expand_time_string(&caps[0])
-        })
+        .replace_all(text, |caps: &regex::Captures| expand_time_string(&caps[0]))
         .into_owned()
 }
 
@@ -320,8 +417,10 @@ fn split_place_items(text: &str) -> Vec<String> {
         .map(|e| regex::escape(e))
         .collect::<Vec<_>>()
         .join("|");
-    let split_re =
-        Regex::new(&format!(r"(?i)^(.*\b(?:{enders_pat}))\s+AND\s+([A-Z0-9].+)$")).unwrap();
+    let split_re = Regex::new(&format!(
+        r"(?i)^(.*\b(?:{enders_pat}))\s+AND\s+([A-Z0-9].+)$"
+    ))
+    .unwrap();
 
     let mut out = Vec::new();
     for chunk in chunks {
@@ -403,10 +502,7 @@ fn strip_metadata(raw: &str) -> Vec<String> {
         .replace('\r', "\n")
         .trim_start_matches('\u{FEFF}')
         .to_string();
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|l| l.trim_end().to_string())
-        .collect();
+    let lines: Vec<String> = text.split('\n').map(|l| l.trim_end().to_string()).collect();
 
     let mut start = 0;
     for (i, line) in lines.iter().enumerate() {
@@ -513,10 +609,7 @@ fn parse_segments(lines: &[String]) -> (BulletinHeader, Vec<Segment>) {
             continue;
         }
 
-        if Regex::new(r"^[A-Z/ ]+\.\.\.$")
-            .unwrap()
-            .is_match(&stripped)
-        {
+        if Regex::new(r"^[A-Z/ ]+\.\.\.$").unwrap().is_match(&stripped) {
             if let Some(seg) = current.take() {
                 segments.push(seg);
             }
@@ -585,12 +678,14 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
     let re_warning_for = Regex::new(r"(?i)^([A-Za-z /()\-]+?)\s+FOR\.\.\.(.*)$").unwrap();
     let re_until = Regex::new(r"(?i)^UNTIL\s+(.+)$").unwrap();
     let re_at_ellipsis = Regex::new(r"(?i)^AT\s+(.+?)\.\.\.(.*)$").unwrap();
-    let re_at_time = Regex::new(r"(?i)^AT\s+(\d{1,4}\s*[AP]M\s*[A-Z]{2,4})\b[,.\s]\s*(.*)$").unwrap();
+    let re_at_time =
+        Regex::new(r"(?i)^AT\s+(\d{1,4}\s*[AP]M\s*[A-Z]{2,4})\b[,.\s]\s*(.*)$").unwrap();
     let re_locations = Regex::new(r"(?i)^LOCATIONS IMPACTED INCLUDE\.\.\.(.*)$").unwrap();
     let re_key_value = Regex::new(r"^([A-Z][A-Z /\-]{1,40})\.\.\.(.*)$").unwrap();
-    let re_place_near =
-        Regex::new(r"(?i)\b(?:OF|NEAR)\s+([A-Z][A-Z0-9 /\-]{1,60}?)(?:\.\.\.|,| AND | OR | MOVING |$)")
-            .unwrap();
+    let re_place_near = Regex::new(
+        r"(?i)\b(?:OF|NEAR)\s+([A-Z][A-Z0-9 /\-]{1,60}?)(?:\.\.\.|,| AND | OR | MOVING |$)",
+    )
+    .unwrap();
 
     for segment in &segments {
         let text = collapse_spaces(&segment.lines.join(" "));
@@ -639,9 +734,7 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
             }
 
             if let Some(caps) = re_until.captures(&text) {
-                until = Some(expand_time_string(
-                    &caps[1].replace("...", " "),
-                ));
+                until = Some(expand_time_string(&caps[1].replace("...", " ")));
                 continue;
             }
 
@@ -659,10 +752,7 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
                 let mut sentence = normalize_narrative(&narrative, &entities);
                 if !sentence.is_empty()
                     && !entities.iter().any(|p| {
-                        p.len() > 1
-                            && sentence
-                                .to_lowercase()
-                                .starts_with(&p.to_lowercase())
+                        p.len() > 1 && sentence.to_lowercase().starts_with(&p.to_lowercase())
                     })
                 {
                     let mut chars = sentence.chars();
@@ -741,7 +831,8 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
 
     match (&intro_city, &intro_action, &product, &warning_for) {
         (Some(city), Some(action), Some(prod), Some(wf)) => {
-            let mut first = format!("The National Weather Service in {city} has {action} {prod} for {wf}");
+            let mut first =
+                format!("The National Weather Service in {city} has {action} {prod} for {wf}");
             if let Some(u) = &until {
                 first.push_str(&format!(" until {u}"));
             }
@@ -749,8 +840,7 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
             output.insert(0, first);
         }
         (Some(city), Some(action), _, _) => {
-            let mut first =
-                format!("The National Weather Service in {city} has {action}");
+            let mut first = format!("The National Weather Service in {city} has {action}");
             if let Some(u) = &until {
                 first.push_str(&format!(" until {u}"));
             }
@@ -824,10 +914,7 @@ mod tests {
     #[test]
     fn oxford_join_variants() {
         assert_eq!(oxford_join(&[]), "");
-        assert_eq!(
-            oxford_join(&["Alpha".into()]),
-            "Alpha"
-        );
+        assert_eq!(oxford_join(&["Alpha".into()]), "Alpha");
         assert_eq!(
             oxford_join(&["Alpha".into(), "Beta".into()]),
             "Alpha and Beta"
@@ -866,7 +953,9 @@ THE NATIONAL WEATHER SERVICE IN OMAHA/VALLEY HAS ISSUED A
 &&
 $$";
         let result = normalize_nws_bulletin(raw, &NormalizeOptions::default());
-        assert!(result.starts_with("The National Weather Service in Omaha/Valley has issued a Tornado Warning"));
+        assert!(result.starts_with(
+            "The National Weather Service in Omaha/Valley has issued a Tornado Warning"
+        ));
         assert!(result.contains("until 4:15 PM"));
         assert!(result.contains("30 miles per hour"));
         assert!(result.contains("Fort Calhoun"));

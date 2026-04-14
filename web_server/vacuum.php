@@ -213,12 +213,9 @@ elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POS
     try {
         $recordingsDir = app_recording_dir();
         $oldDir = $recordingsDir . "/__old__";
-        $alerts_file_path = app_dedicated_alert_log_path();
         $active_headers_lookup = get_active_alert_headers_lookup();
         $recording_files = get_recording_files_sorted($recordingsDir);
-        $alerts_entries = parse_alert_log_entries($alerts_file_path);
         $keep_recordings_lookup = [];
-        $retained_alert_entries = [];
 
         if (!is_dir($oldDir)) {
             mkdir($oldDir, 0755, true);
@@ -230,28 +227,34 @@ elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POS
             }
         }
 
-        $active_last_indexes = [];
-        foreach($alerts_entries as $index => $entry) {
-            $logged_raw_header = extract_logged_raw_header($entry);
-            if($logged_raw_header === "" || !isset($active_headers_lookup[$logged_raw_header])) {
-                continue;
+        $db_path = app_alert_database_path();
+        if($db_path !== "" && is_readable($db_path)) {
+            $db = new SQLite3($db_path);
+            $db->busyTimeout(5000);
+
+            $active_headers = array_keys($active_headers_lookup);
+
+            if(!empty($active_headers)) {
+                $placeholders = implode(",", array_fill(0, count($active_headers), "?"));
+                $stmt = $db->prepare("DELETE FROM alerts WHERE raw_zczc NOT IN ({$placeholders})");
+                foreach($active_headers as $i => $header) {
+                    $stmt->bindValue($i + 1, $header, SQLITE3_TEXT);
+                }
+                $stmt->execute();
+            } else {
+                $db->exec("DELETE FROM alerts");
             }
 
-            $active_last_indexes[$logged_raw_header] = $index;
+            $result = $db->query("SELECT DISTINCT recording_name FROM alerts WHERE recording_name IS NOT NULL AND recording_name != ''");
+            while($row = $result->fetchArray(SQLITE3_ASSOC)) {
+                $keep_recordings_lookup[$row["recording_name"]] = true;
+            }
+
+            $db->close();
         }
 
-        $retained_indexes = array_values($active_last_indexes);
-        sort($retained_indexes, SORT_NUMERIC);
-
-        foreach($retained_indexes as $index) {
-            if(!isset($alerts_entries[$index])) {
-                continue;
-            }
-
-            $retained_alert_entries[] = $alerts_entries[$index];
-            if(isset($recording_files[$index])) {
-                $keep_recordings_lookup[basename($recording_files[$index])] = true;
-            }
+        foreach($active_headers_lookup as $header => $_) {
+            // Active alerts are handled by active_alerts.json, not the DB
         }
 
         foreach($recording_files as $file) {
@@ -263,17 +266,28 @@ elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POS
             rename($file, $oldDir . "/" . $baseName);
         }
 
-        if (file_exists($alerts_file_path)) {
+        $alerts_file_path = app_dedicated_alert_log_path();
+        if($alerts_file_path !== "" && file_exists($alerts_file_path)) {
+            $alerts_entries = parse_alert_log_entries($alerts_file_path);
+            $retained_alert_entries = [];
+
+            foreach($alerts_entries as $entry) {
+                $logged_raw_header = extract_logged_raw_header($entry);
+                if($logged_raw_header !== "" && isset($active_headers_lookup[$logged_raw_header])) {
+                    $retained_alert_entries[] = $entry;
+                }
+            }
+
             $backupPath = $alerts_file_path . ".bak";
             if (!file_exists($backupPath)) {
                 copy($alerts_file_path, $backupPath);
-            }
-            else {
+            } else {
                 file_put_contents($backupPath, file_get_contents($alerts_file_path), FILE_APPEND);
             }
+
+            file_put_contents($alerts_file_path, build_alert_log_payload($retained_alert_entries));
         }
 
-        file_put_contents($alerts_file_path, build_alert_log_payload($retained_alert_entries));
         ?><!DOCTYPE html>
 <html lang="en">
     <head>

@@ -172,3 +172,26 @@ if (!function_exists("app_dedicated_alert_log_path")) {
     }
 }
 
+if (!function_exists("app_alert_database_path")) {
+    function app_alert_database_path(): string {
+        $configured = trim(app_string("ALERT_DATABASE_FILE", "alerts.db"));
+        if ($configured === "") {
+            return "";
+        }
+
+        if (
+            str_starts_with($configured, "/")
+            || preg_match("/^[A-Za-z]:[\\\\\\/]/", $configured)
+        ) {
+            return $configured;
+        }
+
+        $shared = app_shared_state_dir();
+        if ($shared === "") {
+            return $configured;
+        }
+
+        return $shared . DIRECTORY_SEPARATOR . ltrim($configured, "/\\");
+    }
+}
+

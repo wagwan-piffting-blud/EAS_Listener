@@ -157,7 +157,7 @@ pub fn generate_attention_tone(sr: u32, amp: f64) -> Result<Vec<i16>, HeaderErro
         let t = i as f64 / sr as f64;
         let s1 = (2.0 * PI * 853.0 * t).sin();
         let s2 = (2.0 * PI * 960.0 * t).sin();
-        let s = (s1 + s2) * 0.5 * amp; // average the two tones and apply amplitude
+        let s = (s1 + s2) * 0.5 * amp;
         let v = (s * i16::MAX as f64).clamp(i16::MIN as f64, i16::MAX as f64);
         samples.push(v as i16);
     }

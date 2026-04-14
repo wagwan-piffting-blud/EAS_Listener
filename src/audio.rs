@@ -649,7 +649,7 @@ fn process_stream(
                                     window: WindowFunction::BlackmanHarris2,
                                 },
                                 CHUNK_SIZE,
-                                1, // mono
+                                1,
                             )
                             .expect("failed to create resampler"),
                         );
@@ -672,7 +672,7 @@ fn process_stream(
                                     window: WindowFunction::BlackmanHarris2,
                                 },
                                 CHUNK_SIZE,
-                                1, // mono
+                                1,
                             )
                             .expect("failed to create resampler"),
                         );

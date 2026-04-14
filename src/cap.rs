@@ -1,5 +1,6 @@
 use crate::alerts::update_alert_files;
 use crate::config::Config;
+use crate::db::DbHandle;
 use crate::filter::{self, FilterAction};
 use crate::header;
 use crate::monitoring::MonitoringHub;
@@ -74,9 +75,10 @@ fn spawn_cap_processor_task(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
+    db: DbHandle,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(err) = run_cap_processor(config, app_state, monitoring).await {
+        if let Err(err) = run_cap_processor(config, app_state, monitoring, db).await {
             warn!("CAP processor task exited with error: {}", err);
         }
     })
@@ -94,6 +96,7 @@ pub async fn run_cap_supervisor(
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
     mut reload_rx: broadcast::Receiver<Config>,
+    db: DbHandle,
 ) -> Result<()> {
     let mut current_config = initial_config;
     sync_cap_runtime_config_status(&app_state, &current_config).await;
@@ -102,6 +105,7 @@ pub async fn run_cap_supervisor(
             current_config.clone(),
             app_state.clone(),
             monitoring.clone(),
+            db.clone(),
         ))
     } else {
         info!("CAP processor disabled because PROCESS_CAP_ALERTS is false in your config.json file. No CAP alerts will be processed or forwarded to webhooks.");
@@ -129,6 +133,7 @@ pub async fn run_cap_supervisor(
                         current_config.clone(),
                         app_state.clone(),
                         monitoring.clone(),
+                        db.clone(),
                     ));
                 } else {
                     info!("CAP processor disabled by reloaded configuration.");
@@ -156,6 +161,7 @@ pub async fn run_cap_processor(
     config: Config,
     app_state: Arc<Mutex<AppState>>,
     monitoring: MonitoringHub,
+    db: DbHandle,
 ) -> Result<()> {
     if !config.process_cap_alerts {
         info!("CAP processor disabled by configuration.");
@@ -401,6 +407,7 @@ pub async fn run_cap_processor(
                     &client,
                     endpoint_url,
                     parsed.clone(),
+                    &db,
                 )
                 .await;
 
@@ -535,6 +542,7 @@ async fn process_cap_alert(
     client: &reqwest::Client,
     source_stream: &str,
     alert: CapAlert,
+    db: &DbHandle,
 ) {
     let event_code = normalize_event_code(&alert.event_code);
 
@@ -557,6 +565,58 @@ async fn process_cap_alert(
     if should_log_cap_entry {
         if let Err(err) = append_cap_log(config, &alert).await {
             warn!("Failed to append CAP log entry: {}", err);
+        }
+
+        let received_at_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at_iso = alert
+            .expires
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        let cap_duration = encode_expiration_from_cap(alert.sent, alert.expires);
+        let cap_raw_header = build_cap_raw_header(
+            &alert.originator_code,
+            &event_code,
+            &alert.fips,
+            alert.sent,
+            alert.expires,
+            &alert.source_url,
+        );
+        let cap_locations = if alert.areas.is_empty() {
+            "Unknown".to_string()
+        } else {
+            alert.areas.join(", ")
+        };
+        let cap_originator_name = alert
+            .sender_name
+            .as_deref()
+            .unwrap_or(alert.sender.as_str());
+        let cap_eas_text = build_eas_text(&alert, config.timezone.to_string().as_str());
+
+        match db
+            .insert_cap_alert(
+                &cap_raw_header,
+                &cap_eas_text,
+                &event_code,
+                &alert.event_text,
+                &alert.originator_code,
+                cap_originator_name,
+                &alert.fips,
+                &cap_locations,
+                Some(alert.simple_description.as_str()),
+                source_stream,
+                alert.urgency.as_deref(),
+                alert.severity.as_deref(),
+                alert.certainty.as_deref(),
+                alert.instructions.as_deref(),
+                &alert.identifier,
+                &alert.sender,
+                Some(cap_duration.as_str()),
+                &received_at_iso,
+                expires_at_iso.as_deref(),
+            )
+            .await
+        {
+            Ok(id) => info!("CAP alert saved to database (id={})", id),
+            Err(err) => warn!("Failed to save CAP alert to database: {}", err),
         }
     }
 
@@ -641,6 +701,9 @@ async fn process_cap_alert(
     let recording_file_name = cap_recording_path
         .as_ref()
         .and_then(|path| recording_file_name_from_path(path));
+    if let Some(ref name) = recording_file_name {
+        db.update_recording_name(&raw_header, name).await;
+    }
     update_cap_alert_recording_metadata(
         config,
         app_state,
@@ -2044,11 +2107,16 @@ async fn build_recording_with_same_header(
     write_wav_i16(&nnnn_path, CAP_RECORDING_SAMPLE_RATE, &nnnn_samples).await?;
 
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let source_marker = if raw_header.contains(CAP_HEADER_SOURCE_MARKER_WEA) {
+        CAP_HEADER_SOURCE_MARKER_WEA
+    } else {
+        CAP_HEADER_SOURCE_MARKER_CAP
+    };
     let output_name = format!(
         "EAS_Recording_{}_{}_{}.wav",
         timestamp,
         sanitize_filename_label(event_code),
-        "IPAWSCAP"
+        source_marker
     );
     let output_path = config.recording_dir.join(output_name);
 

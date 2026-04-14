@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::db::DbHandle;
 use crate::e2t_ng::ParsedEasSerialized;
 use crate::filter;
 use crate::monitoring::MonitoringHub;
@@ -278,6 +279,7 @@ pub async fn run_alert_manager(
     nnnn_rx: BroadcastReceiver<String>,
     monitoring: MonitoringHub,
     mut reload_rx: BroadcastReceiver<Config>,
+    db: DbHandle,
 ) -> Result<()> {
     match restore_active_alert_state(&config.shared_state_dir, &state).await {
         Ok(Some(alert_snapshot)) => {
@@ -380,8 +382,16 @@ pub async fn run_alert_manager(
 
         info!("Processing alert: {}", &raw_header);
 
-        let dsame_result =
-            get_eas_details_and_log(&config, &raw_header, &event, &locations, &originator).await;
+        let dsame_result = get_eas_details_and_log(
+            &config,
+            &raw_header,
+            &event,
+            &locations,
+            &originator,
+            &db,
+            &stream_id,
+        )
+        .await;
         let alert_data = match &dsame_result {
             Ok(data) => data.clone(),
             Err(_) => EasAlertData {
@@ -439,6 +449,7 @@ pub async fn run_alert_manager(
                 stream_id,
                 action,
                 nnnn_rx.resubscribe(),
+                db.clone(),
             );
 
             tokio::spawn(value);
@@ -498,6 +509,7 @@ async fn handle_recording_and_webhook(
     stream_id: String,
     action: filter::FilterAction,
     mut nnnn_rx: BroadcastReceiver<String>,
+    db: DbHandle,
 ) {
     let event_code = alert.data.event_code.clone();
     let mut recorded_state: Option<(PathBuf, String)> = None;
@@ -600,6 +612,9 @@ async fn handle_recording_and_webhook(
         let final_recording_file_name = recorded_state
             .as_ref()
             .and_then(|(recording_path, _)| recording_file_name_from_path(recording_path));
+        if let Some(ref name) = final_recording_file_name {
+            db.update_recording_name(&raw_header, name).await;
+        }
         update_alert_recording_metadata(
             &config,
             &state,
@@ -700,6 +715,8 @@ async fn get_eas_details_and_log(
     _event_text: &str,
     locations: &str,
     _originator: &str,
+    db: &DbHandle,
+    stream_id: &str,
 ) -> Result<EasAlertData> {
     let timezone = config.timezone.to_string();
 
@@ -723,6 +740,11 @@ async fn get_eas_details_and_log(
     };
 
     let originator = crate::webhook::determine_originator_name(&parsed_header.originator);
+    let originator_code = parsed_header.originator.clone();
+    let duration_hhmm = format!(
+        "{:02}{:02}",
+        parsed_header.duration_hours, parsed_header.duration_minutes
+    );
 
     let alert_data = EasAlertData {
         eas_text,
@@ -754,6 +776,28 @@ async fn get_eas_details_and_log(
             .open(&config.dedicated_alert_log_file)
             .await?;
         file.write_all(log_line.as_bytes()).await?;
+
+        let received_at_iso = received_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        match db
+            .insert_same_alert(
+                raw_header,
+                &alert_data.eas_text,
+                &alert_data.event_code,
+                &alert_data.event_text,
+                &originator_code,
+                &alert_data.originator,
+                &alert_data.fips,
+                &alert_data.locations,
+                Some(stream_id),
+                Some(duration_hhmm.as_str()),
+                &received_at_iso,
+                None,
+            )
+            .await
+        {
+            Ok(id) => info!("Alert saved to database (id={})", id),
+            Err(err) => warn!("Failed to save alert to database: {}", err),
+        }
     } else {
         info!(
             "Alert not in watched FIPS (zones: {}). Skipping log write.",

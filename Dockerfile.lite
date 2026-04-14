@@ -33,7 +33,7 @@ RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 \
     && mkdir -p /var/lib/apt/lists/partial \
     && apt-get update && apt-get install -y --no-install-recommends \
        wget libssl3 ca-certificates gnupg2 git bash nginx jq ffmpeg curl \
-       php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip \
+       php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip php-sqlite3 \
        icecast2 liquidsoap \
     && rm -rf /var/lib/apt/lists/* \
     && chsh -s /bin/bash \

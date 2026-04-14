@@ -162,7 +162,6 @@ pub async fn send_alert_webhook(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    // Fetch event title from `include/same-us.json` based on the event code in the alert data.
     let event_code = &data.event_code;
     let event_title = determine_event_title(&event_code);
     let originator_code = &data.originator;

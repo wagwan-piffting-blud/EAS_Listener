@@ -20,6 +20,7 @@ mod backend;
 mod cap;
 mod cleanup;
 mod config;
+mod db;
 mod e2t_ng;
 mod filter;
 mod header;
@@ -142,6 +143,10 @@ fn build_web_runtime_config_payload(
                 .to_string_lossy()
                 .to_string(),
         ),
+    );
+    map.insert(
+        "ALERT_DATABASE_FILE".to_string(),
+        serde_json::Value::String(config.alert_database_file.to_string_lossy().to_string()),
     );
     map.insert(
         "MONITORING_BIND_PORT".to_string(),
@@ -313,6 +318,13 @@ async fn main() -> Result<()> {
     webhook::apply_runtime_config(&config);
     sync_web_runtime_config(&config);
 
+    let db = db::DbHandle::open(&config.alert_database_file)?;
+    if let Err(err) =
+        db.migrate_legacy_log(&config.dedicated_alert_log_file, &config.recording_dir)
+    {
+        warn!("Legacy alert log migration failed: {}", err);
+    }
+
     info!("Starting EAS Listener...");
 
     let app_state = Arc::new(Mutex::new(AppState::new(config.filters.clone())));
@@ -339,6 +351,7 @@ async fn main() -> Result<()> {
         nnnn_tx.subscribe(),
         monitoring.clone(),
         reload_tx.subscribe(),
+        db.clone(),
     ));
     let state_cleanup_handle = tokio::spawn(alerts::run_state_cleanup(
         config.clone(),
@@ -359,6 +372,7 @@ async fn main() -> Result<()> {
         app_state.clone(),
         monitoring.clone(),
         reload_tx.subscribe(),
+        db.clone(),
     ));
 
     tokio::select! {

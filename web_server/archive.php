@@ -422,7 +422,6 @@ function serve_recording_file(string $file): void {
         $range_end = $matches[2] !== '' ? (int) $matches[2] : null;
 
         if($range_start === null && $range_end !== null) {
-            // suffix range: bytes=-N
             $range_start = $filesize - $range_end;
             $range_end = $end;
         }
@@ -549,113 +548,216 @@ if(!empty($_GET['fetch_alerts']) && $_SESSION['authed'] === true) {
     date_default_timezone_set(app_string("TZ", "UTC"));
     header("Content-Type: application/json");
 
-    $alerts_file_path = app_dedicated_alert_log_path();
+    $db_path = app_alert_database_path();
     $max_alerts = $_GET['max_alerts'] ?? 50;
-    $alert_lines = [];
     $alertdata = [];
-    $included_alert_count = 0;
     $filter_by_watched_fips = ($_GET['filter_alerts'] ?? null) === 'watched_fips';
-    $watched_fips_lookup = [];
     $active_raw_headers_lookup = get_active_raw_headers_lookup();
 
-    if($filter_by_watched_fips) {
-        $watched_fips_lookup = get_watched_fips_lookup();
+    if($db_path !== "" && is_readable($db_path)) {
+        $db = new SQLite3($db_path, SQLITE3_OPEN_READONLY);
+        $db->busyTimeout(3000);
 
-        if(empty($watched_fips_lookup)) {
-            $filter_by_watched_fips = false;
+        $sql = "SELECT * FROM alerts ORDER BY id ASC";
+        if($max_alerts !== "all") {
+            $limit = (int) $max_alerts;
+            $sql = "SELECT * FROM (SELECT * FROM alerts ORDER BY id DESC LIMIT {$limit}) sub ORDER BY id ASC";
         }
-    }
 
-    if(is_readable($alerts_file_path)) {
-        $handle = fopen($alerts_file_path, "r");
+        $result = $db->query($sql);
 
-        if($handle !== false) {
-            while(($line = fgets($handle)) !== false) {
-                $alert_line = trim($line);
+        $watched_fips_lookup = [];
+        if($filter_by_watched_fips) {
+            $watched_fips_lookup = get_watched_fips_lookup();
+            if(empty($watched_fips_lookup)) {
+                $filter_by_watched_fips = false;
+            }
+        }
 
-                if($alert_line === '') {
-                    continue;
+        while($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $raw_zczc = $row["raw_zczc"] ?? "";
+            if($raw_zczc !== "" && isset($active_raw_headers_lookup[$raw_zczc])) {
+                continue;
+            }
+
+            if($filter_by_watched_fips) {
+                $fips_arr = @json_decode($row["fips"] ?? "[]", true);
+                if(!is_array($fips_arr)) {
+                    $fips_arr = [];
                 }
 
-                $logged_raw_header = extract_logged_raw_header($alert_line);
-                if($logged_raw_header !== "" && isset($active_raw_headers_lookup[$logged_raw_header])) {
-                    continue;
-                }
-
-                if($filter_by_watched_fips) {
-                    if(
-                        !preg_match('/^ZCZC-[A-Z0-9]{3}-[A-Z0-9]{3}-([0-9]{6}(?:-[0-9]{6})*)\+/', $alert_line, $zczc_matches)
-                        || !match_watched_fips($zczc_matches[1] ?? '', $watched_fips_lookup)
-                    ) {
-                        continue;
+                $fips_match = false;
+                foreach($fips_arr as $fip) {
+                    if(isset($watched_fips_lookup[trim($fip)])) {
+                        $fips_match = true;
+                        break;
                     }
                 }
 
-                $alert_lines[] = [
-                    "raw" => $alert_line,
-                    "recording_id" => $included_alert_count,
-                ];
-                $included_alert_count += 1;
-
-                if($max_alerts == "all") {
-                    continue;
-                }
-
-                elseif(count($alert_lines) > $max_alerts) {
-                    array_shift($alert_lines);
-                }
-
-                else {
+                if(!$fips_match) {
                     continue;
                 }
             }
 
-            fclose($handle);
+            $received_at = $row["received_at"] ? strtotime($row["received_at"]) : null;
+            $expires_at = $row["expires_at"] ? strtotime($row["expires_at"]) : null;
+            $duration = $row["duration_hhmm"] ?? null;
+
+            if($expires_at === null && $received_at !== null && $duration !== null && strlen($duration) === 4 && ctype_digit($duration)) {
+                $expires_at = $received_at + hhmmToSeconds($duration);
+            }
+
+            $severity = $row["severity"] ?? null;
+            if($severity === null) {
+                $event_text_lower = strtolower($row["event_text"] ?? "");
+                if(str_contains($event_text_lower, "emergency")) {
+                    $severity = "emergency";
+                } elseif(str_contains($event_text_lower, "warning")) {
+                    $severity = "warning";
+                } elseif(str_contains($event_text_lower, "watch")) {
+                    $severity = "watch";
+                } elseif(str_contains($event_text_lower, "advisory")) {
+                    $severity = "advisory";
+                } elseif(str_contains($event_text_lower, "test") || str_contains($event_text_lower, "demo")) {
+                    $severity = "test";
+                } elseif(str_contains($event_text_lower, "statement")) {
+                    $severity = "statement";
+                } else {
+                    $severity = "warning";
+                }
+            } else {
+                $severity = strtolower($severity);
+            }
+
+            $audio_recording = null;
+            $recording_name = $row["recording_name"] ?? null;
+            if($recording_name !== null && $recording_name !== "") {
+                $audio_recording = "archive.php?recording_name=" . urlencode($recording_name);
+            }
+
+            $alert_processed = [
+                "received_at" => $received_at,
+                "expired_at" => $expires_at,
+                "data" => [
+                    "event_code" => $row["event_code"] ?? null,
+                    "event_text" => $row["event_text"] ?? null,
+                    "originator" => $row["originator_name"] ?? null,
+                    "locations" => $row["locations"] ?? null,
+                    "alert_severity" => $severity,
+                    "length" => $duration,
+                    "raw_zczc" => $raw_zczc,
+                    "eas_text" => $row["eas_text"] ?? null,
+                    "audio_recording" => $audio_recording,
+                    "description" => $row["description"] ?? null,
+                    "source_type" => $row["source_type"] ?? null,
+                ]
+            ];
+
+            $alertdata[] = $alert_processed;
         }
-    }
 
-    foreach($alert_lines as $entry) {
-        $alert = $entry["raw"];
-        $recording_id = $entry["recording_id"];
+        $db->close();
+    } else {
+        $alerts_file_path = app_dedicated_alert_log_path();
+        $alert_lines = [];
+        $included_alert_count = 0;
 
-        $received_at = preg_match('/\(Received @ (.*?)\)$/', $alert, $matches) ? strtotime($matches[1]) : null;
-        $length = preg_match('/\+(\d{4})-/', $alert, $matches) ? $matches[1] : null;
-        $length_as_secs = hhmmToSeconds($length);
-        $expired_at = $received_at + $length_as_secs;
-        $event_text = preg_match('/has issued(?: an?| the)? (.*?) for/i', $alert, $matches) ? trim($matches[1]) : null;
-
-        $alert_severity_raw = preg_match('/has issued (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
-        $alert_severity_words_array = preg_split('/(?=[A-Z])/', $alert_severity_raw, -1, PREG_SPLIT_NO_EMPTY);
-
-        if($alert_severity_words_array[3]) {
-            $alert_severity = strtolower($alert_severity_words_array[3]);
+        if($filter_by_watched_fips) {
+            $watched_fips_lookup = get_watched_fips_lookup();
+            if(empty($watched_fips_lookup)) {
+                $filter_by_watched_fips = false;
+            }
         }
 
-        else if($alert_severity_words_array[2]) {
-            $alert_severity = strtolower($alert_severity_words_array[2]);
+        if(is_readable($alerts_file_path)) {
+            $handle = fopen($alerts_file_path, "r");
+
+            if($handle !== false) {
+                while(($line = fgets($handle)) !== false) {
+                    $alert_line = trim($line);
+
+                    if($alert_line === '') {
+                        continue;
+                    }
+
+                    $logged_raw_header = extract_logged_raw_header($alert_line);
+                    if($logged_raw_header !== "" && isset($active_raw_headers_lookup[$logged_raw_header])) {
+                        continue;
+                    }
+
+                    if($filter_by_watched_fips) {
+                        if(
+                            !preg_match('/^ZCZC-[A-Z0-9]{3}-[A-Z0-9]{3}-([0-9]{6}(?:-[0-9]{6})*)\+/', $alert_line, $zczc_matches)
+                            || !match_watched_fips($zczc_matches[1] ?? '', $watched_fips_lookup)
+                        ) {
+                            continue;
+                        }
+                    }
+
+                    $alert_lines[] = [
+                        "raw" => $alert_line,
+                        "recording_id" => $included_alert_count,
+                    ];
+                    $included_alert_count += 1;
+
+                    if($max_alerts == "all") {
+                        continue;
+                    }
+
+                    elseif(count($alert_lines) > $max_alerts) {
+                        array_shift($alert_lines);
+                    }
+
+                    else {
+                        continue;
+                    }
+                }
+
+                fclose($handle);
+            }
         }
 
-        else {
-            $alert_severity = strtolower($alert_severity_words_array[1]);
+        foreach($alert_lines as $entry) {
+            $alert = $entry["raw"];
+            $recording_id = $entry["recording_id"];
+
+            $received_at = preg_match('/\(Received @ (.*?)\)$/', $alert, $matches) ? strtotime($matches[1]) : null;
+            $length = preg_match('/\+(\d{4})-/', $alert, $matches) ? $matches[1] : null;
+            $length_as_secs = hhmmToSeconds($length);
+            $expired_at = $received_at + $length_as_secs;
+            $event_text = preg_match('/has issued(?: an?| the)? (.*?) for/i', $alert, $matches) ? trim($matches[1]) : null;
+
+            $alert_severity_raw = preg_match('/has issued (.*?) for/', $alert, $matches) ? explode(" for ", $matches[1])[0] : null;
+            $alert_severity_words_array = preg_split('/(?=[A-Z])/', $alert_severity_raw, -1, PREG_SPLIT_NO_EMPTY);
+
+            if(isset($alert_severity_words_array[3])) {
+                $alert_severity = strtolower($alert_severity_words_array[3]);
+            } elseif(isset($alert_severity_words_array[2])) {
+                $alert_severity = strtolower($alert_severity_words_array[2]);
+            } elseif(isset($alert_severity_words_array[1])) {
+                $alert_severity = strtolower($alert_severity_words_array[1]);
+            } else {
+                $alert_severity = "warning";
+            }
+
+            $alert_processed = [
+                "received_at" => $received_at,
+                "expired_at" => $expired_at,
+                "data" => [
+                    "event_code" => preg_match('/ZCZC-[A-Z]{3}-([A-Z]{3})-/', $alert, $matches) ? $matches[1] : null,
+                    "event_text" => $event_text,
+                    "originator" => preg_match('/Message from (.*?)[.;]/', $alert, $matches) ? $matches[1] : null,
+                    "locations" => preg_match('/for (.*?); beginning/', $alert, $matches) ? $matches[1] : null,
+                    "alert_severity" => $alert_severity,
+                    "length" => $length,
+                    "raw_zczc" => preg_match('/^(ZCZC-[A-Z]{3}-[A-Z]{3}-((?:\d{6}(?:-?)){1,31})\+\d{4}-\d{7}-[A-Za-z0-9\/ ]{1,8}?-)/', $alert, $matches) ? $matches[1] : null,
+                    "eas_text" => preg_match('/-: (.*\.) \(/', $alert, $matches) ? $matches[1] : null,
+                    "audio_recording" => "archive.php?recording_id=" . $recording_id,
+                ]
+            ];
+
+            $alertdata[] = $alert_processed;
         }
-
-        $alert_processed = [
-            "received_at" => $received_at,
-            "expired_at" => $expired_at,
-            "data" => [
-                "event_code" => preg_match('/ZCZC-[A-Z]{3}-([A-Z]{3})-/', $alert, $matches) ? $matches[1] : null,
-                "event_text" => $event_text,
-                "originator" => preg_match('/Message from (.*?)[.;]/', $alert, $matches) ? $matches[1] : null,
-                "locations" => preg_match('/for (.*?); beginning/', $alert, $matches) ? $matches[1] : null,
-                "alert_severity" => $alert_severity,
-                "length" => $length,
-                "raw_zczc" => preg_match('/^(ZCZC-[A-Z]{3}-[A-Z]{3}-((?:\d{6}(?:-?)){1,31})\+\d{4}-\d{7}-[A-Za-z0-9\/ ]{1,8}?-)/', $alert, $matches) ? $matches[1] : null,
-                "eas_text" => preg_match('/-: (.*\.) \(/', $alert, $matches) ? $matches[1] : null,
-                "audio_recording" => "archive.php?recording_id=" . $recording_id,
-            ]
-        ];
-
-        $alertdata[] = $alert_processed;
     }
 
     echo json_encode($alertdata);
