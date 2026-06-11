@@ -9,10 +9,10 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tokio::process::Command;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug, Deserialize)]
 struct SameUsLookup {
@@ -246,6 +246,12 @@ pub async fn send_alert_webhook(
             None
         };
 
+        let prepared_attachment: Option<(Vec<u8>, String)> =
+            match (attachment_path.as_ref(), attachment_bytes) {
+                (Some(path), Some(bytes)) => Some(prepare_discord_attachment(path, bytes).await),
+                _ => None,
+            };
+
         for discord_url in discord_urls {
             let payload_value = json!({ "embeds": [discord_embed_body.clone()] });
             let validation_errors = validate_discord_payload(&payload_value);
@@ -262,16 +268,9 @@ pub async fn send_alert_webhook(
             let mut form = multipart::Form::new().text("payload_json", payload_json.clone());
             let mut attachment_included = false;
 
-            if let (Some(path), Some(bytes)) = (attachment_path.as_ref(), attachment_bytes.as_ref())
-            {
-                let file_name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| "recording.bin".to_string());
-
+            if let Some((bytes, file_name)) = prepared_attachment.as_ref() {
                 match multipart::Part::bytes(bytes.clone())
-                    .file_name(file_name)
+                    .file_name(file_name.clone())
                     .mime_str("application/octet-stream")
                 {
                     Ok(part) => {
@@ -280,9 +279,8 @@ pub async fn send_alert_webhook(
                     }
                     Err(err) => {
                         warn!(
-                            "Failed to prepare Discord attachment part for '{}': {}",
-                            path.display(),
-                            err
+                            "Failed to prepare Discord attachment part '{}': {}",
+                            file_name, err
                         );
                     }
                 }
@@ -382,6 +380,99 @@ pub async fn send_alert_webhook(
     }
 
     warn!("Unable to deliver notification via AppRise after trying all formats");
+}
+
+const DISCORD_ATTACHMENT_COMPRESS_THRESHOLD: usize = 9 * 1024 * 1024;
+
+async fn prepare_discord_attachment(path: &Path, original_bytes: Vec<u8>) -> (Vec<u8>, String) {
+    let original_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "recording.bin".to_string());
+
+    if original_bytes.len() <= DISCORD_ATTACHMENT_COMPRESS_THRESHOLD {
+        return (original_bytes, original_name);
+    }
+
+    let compressed_temp = match tempfile::Builder::new()
+        .prefix("discord_recording_")
+        .suffix(".mp3")
+        .tempfile()
+    {
+        Ok(file) => file,
+        Err(err) => {
+            warn!(
+                "Failed to allocate temp file to compress '{}' for Discord; sending original: {}",
+                path.display(),
+                err
+            );
+            return (original_bytes, original_name);
+        }
+    };
+
+    let compressed_path = compressed_temp.into_temp_path();
+    let compressed_path_buf = compressed_path.to_path_buf();
+
+    let mut ffmpeg = Command::new("ffmpeg");
+    ffmpeg
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-y")
+        .arg("-i")
+        .arg(path)
+        .arg("-vn")
+        .arg("-c:a")
+        .arg("libmp3lame")
+        .arg("-b:a")
+        .arg("320k")
+        .arg(&compressed_path_buf);
+
+    match ffmpeg.status().await {
+        Ok(status) if status.success() => match tokio::fs::read(&compressed_path_buf).await {
+            Ok(compressed_bytes) => {
+                let mp3_name = Path::new(&original_name)
+                    .with_extension("mp3")
+                    .to_string_lossy()
+                    .into_owned();
+                info!(
+                    "Recording '{}' is {} bytes (over the {} byte Discord limit); attaching {} byte 320 kbps MP3 '{}' instead",
+                    path.display(),
+                    original_bytes.len(),
+                    DISCORD_ATTACHMENT_COMPRESS_THRESHOLD,
+                    compressed_bytes.len(),
+                    mp3_name
+                );
+                (compressed_bytes, mp3_name)
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to read compressed Discord attachment for '{}'; sending original: {}",
+                    path.display(),
+                    err
+                );
+                (original_bytes, original_name)
+            }
+        },
+        Ok(status) => {
+            warn!(
+                "ffmpeg failed to compress '{}' for Discord (status {:?}); sending original",
+                path.display(),
+                status.code()
+            );
+            (original_bytes, original_name)
+        }
+        Err(err) => {
+            warn!(
+                "Failed to invoke ffmpeg to compress '{}' for Discord; sending original: {}",
+                path.display(),
+                err
+            );
+            (original_bytes, original_name)
+        }
+    }
 }
 
 async fn log_discord_webhook_error_response(
