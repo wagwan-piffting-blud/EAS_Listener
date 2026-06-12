@@ -29,11 +29,12 @@ impl RecordingFormat {
         }
     }
 
-    /// ffmpeg audio-codec args used to transcode a finished WAV to this format.
     pub fn ffmpeg_codec_args(self) -> &'static [&'static str] {
         match self {
-            RecordingFormat::Mp3 => &["-c:a", "libmp3lame", "-b:a", "128k"],
-            RecordingFormat::OggOpus => &["-c:a", "libopus", "-b:a", "160k", "-vbr", "off"],
+            RecordingFormat::Mp3 => &["-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3"],
+            RecordingFormat::OggOpus => &[
+                "-c:a", "libopus", "-b:a", "160k", "-vbr", "off", "-f", "ogg",
+            ],
         }
     }
 

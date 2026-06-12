@@ -2185,9 +2185,7 @@ async fn build_recording_with_same_header(
     if storage_saver {
         fs::rename(&ffmpeg_output_path, &output_path)
             .await
-            .with_context(|| {
-                format!("Failed to finalize CAP recording at {:?}", output_path)
-            })?;
+            .with_context(|| format!("Failed to finalize CAP recording at {:?}", output_path))?;
     }
 
     Ok(output_path)
