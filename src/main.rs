@@ -319,8 +319,7 @@ async fn main() -> Result<()> {
     sync_web_runtime_config(&config);
 
     let db = db::DbHandle::open(&config.alert_database_file)?;
-    if let Err(err) =
-        db.migrate_legacy_log(&config.dedicated_alert_log_file, &config.recording_dir)
+    if let Err(err) = db.migrate_legacy_log(&config.dedicated_alert_log_file, &config.recording_dir)
     {
         warn!("Legacy alert log migration failed: {}", err);
     }

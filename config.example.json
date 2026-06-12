@@ -5,6 +5,8 @@
     ],
     "SHARED_STATE_DIR": "/data",
     "SHOULD_LOG_ALL_ALERTS": false,
+    "STORAGE_SAVER_MODE": false,
+    "STORAGE_SAVER_MODE_EXT": "mp3",
     "ALERT_SOUND_ENABLED": true,
     "TZ": "America/Chicago",
     "PROCESS_CAP_ALERTS": true,

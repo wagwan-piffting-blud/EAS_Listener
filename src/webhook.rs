@@ -427,7 +427,7 @@ async fn prepare_discord_attachment(path: &Path, original_bytes: Vec<u8>) -> (Ve
         .arg("-c:a")
         .arg("libmp3lame")
         .arg("-b:a")
-        .arg("320k")
+        .arg("128k")
         .arg(&compressed_path_buf);
 
     match ffmpeg.status().await {
@@ -438,7 +438,7 @@ async fn prepare_discord_attachment(path: &Path, original_bytes: Vec<u8>) -> (Ve
                     .to_string_lossy()
                     .into_owned();
                 info!(
-                    "Recording '{}' is {} bytes (over the {} byte Discord limit); attaching {} byte 320 kbps MP3 '{}' instead",
+                    "Recording '{}' is {} bytes (over the {} byte Discord limit); attaching {} byte 128 kbps MP3 '{}' instead",
                     path.display(),
                     original_bytes.len(),
                     DISCORD_ATTACHMENT_COMPRESS_THRESHOLD,

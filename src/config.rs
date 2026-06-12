@@ -14,6 +14,38 @@ pub struct CapEndpoint {
     pub url: String,
 }
 
+/// Output format used by STORAGE_SAVER_MODE when transcoding finished recordings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingFormat {
+    Mp3,
+    OggOpus,
+}
+
+impl RecordingFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            RecordingFormat::Mp3 => "mp3",
+            RecordingFormat::OggOpus => "ogg",
+        }
+    }
+
+    /// ffmpeg audio-codec args used to transcode a finished WAV to this format.
+    pub fn ffmpeg_codec_args(self) -> &'static [&'static str] {
+        match self {
+            RecordingFormat::Mp3 => &["-c:a", "libmp3lame", "-b:a", "128k"],
+            RecordingFormat::OggOpus => &["-c:a", "libopus", "-b:a", "160k", "-vbr", "off"],
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mp3" => Some(RecordingFormat::Mp3),
+            "ogg" | "opus" | "ogg-opus" | "oggopus" => Some(RecordingFormat::OggOpus),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Config {
@@ -38,6 +70,8 @@ pub struct Config {
     pub timezone: Tz,
     pub watched_fips: HashSet<String>,
     pub recording_dir: PathBuf,
+    pub storage_saver_mode: bool,
+    pub storage_saver_ext: RecordingFormat,
     pub monitoring_bind_addr: SocketAddr,
     pub monitoring_max_log_entries: usize,
     pub monitoring_activity_window_secs: u64,
@@ -174,6 +208,8 @@ impl Config {
             timezone: Tz::UTC,
             watched_fips: HashSet::new(),
             recording_dir: shared_dir.join("recordings"),
+            storage_saver_mode: false,
+            storage_saver_ext: RecordingFormat::Mp3,
             monitoring_bind_addr,
             monitoring_max_log_entries: 500,
             monitoring_activity_window_secs: 45,
@@ -271,6 +307,16 @@ impl Config {
         }
         if let Some(value) = optional_bool(&config_json, "USE_PRE_POST_ROLL_FOR_RECORDINGS")? {
             merged.use_pre_post_roll_for_recordings = value;
+        }
+        if let Some(value) = optional_bool(&config_json, "STORAGE_SAVER_MODE")? {
+            merged.storage_saver_mode = value;
+        }
+        if let Some(value) = optional_string(&config_json, "STORAGE_SAVER_MODE_EXT")? {
+            merged.storage_saver_ext = RecordingFormat::parse(&value).ok_or_else(|| {
+                anyhow!(
+                    "STORAGE_SAVER_MODE_EXT must be either \"mp3\" or \"ogg\" in your config.json file"
+                )
+            })?;
         }
         if let Some(value) = optional_bool(&config_json, "PROCESS_CAP_ALERTS")? {
             merged.process_cap_alerts = value;
@@ -628,5 +674,39 @@ mod tests {
                 Config::from_config_json(file.path().to_str().expect("path str")).expect("config");
             assert_eq!(cfg.local_deeplink_host, "env-host.test");
         });
+    }
+
+    #[test]
+    fn storage_saver_mode_ext_parses_and_validates() {
+        assert_eq!(
+            Config::safe_internal_defaults().storage_saver_ext,
+            RecordingFormat::Mp3
+        );
+
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(
+            br#"{
+                "STORAGE_SAVER_MODE": true,
+                "STORAGE_SAVER_MODE_EXT": "OGG",
+                "ICECAST_STREAM_URL_ARRAY": ["http://example.local/stream1.mp3"]
+            }"#,
+        )
+        .expect("write");
+        let cfg =
+            Config::from_config_json(file.path().to_str().expect("path str")).expect("config");
+        assert!(cfg.storage_saver_mode);
+        assert_eq!(cfg.storage_saver_ext, RecordingFormat::OggOpus);
+
+        let mut bad = NamedTempFile::new().expect("temp file");
+        bad.write_all(
+            br#"{
+                "STORAGE_SAVER_MODE_EXT": "flac",
+                "ICECAST_STREAM_URL_ARRAY": ["http://example.local/stream1.mp3"]
+            }"#,
+        )
+        .expect("write");
+        let err = Config::from_config_json(bad.path().to_str().expect("path str"))
+            .expect_err("expected invalid format error");
+        assert!(err.to_string().contains("STORAGE_SAVER_MODE_EXT"));
     }
 }

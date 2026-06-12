@@ -56,9 +56,13 @@ function extract_logged_raw_header(string $alert_line): string {
 }
 
 function get_recording_files_sorted(string $recordings_dir): array {
-    $pattern = rtrim($recordings_dir, "/\\") . DIRECTORY_SEPARATOR . "EAS_Recording_*.wav";
-    $files = glob($pattern);
-    if($files === false || empty($files)) {
+    $base = rtrim($recordings_dir, "/\\") . DIRECTORY_SEPARATOR . "EAS_Recording_*.";
+    $files = array_merge(
+        glob($base . "wav") ?: [],
+        glob($base . "mp3") ?: [],
+        glob($base . "ogg") ?: []
+    );
+    if(empty($files)) {
         return [];
     }
 
@@ -152,6 +156,60 @@ function is_finalized_wav_recording(string $file): bool {
         && $data_size <= $expected_data_size_max;
 }
 
+function is_finalized_mp3_recording(string $file): bool {
+    $filesize = @filesize($file);
+    if($filesize === false || $filesize < 4) {
+        return false;
+    }
+
+    $handle = @fopen($file, "rb");
+    if($handle === false) {
+        return false;
+    }
+
+    $head = @fread($handle, 3);
+    fclose($handle);
+    if($head === false || strlen($head) < 3) {
+        return false;
+    }
+
+    if(substr($head, 0, 3) === "ID3") {
+        return true;
+    }
+
+    return ord($head[0]) === 0xFF && (ord($head[1]) & 0xE0) === 0xE0;
+}
+
+function is_finalized_ogg_recording(string $file): bool {
+    // Ogg (Opus) storage-saver recordings are atomically renamed into place once
+    // transcoded, so a present *.ogg is complete. Sanity-check the "OggS" magic.
+    $filesize = @filesize($file);
+    if($filesize === false || $filesize < 4) {
+        return false;
+    }
+
+    $handle = @fopen($file, "rb");
+    if($handle === false) {
+        return false;
+    }
+
+    $head = @fread($handle, 4);
+    fclose($handle);
+
+    return $head !== false && substr($head, 0, 4) === "OggS";
+}
+
+function is_finalized_recording(string $file): bool {
+    switch(strtolower((string) pathinfo($file, PATHINFO_EXTENSION))) {
+        case "mp3":
+            return is_finalized_mp3_recording($file);
+        case "ogg":
+            return is_finalized_ogg_recording($file);
+        default:
+            return is_finalized_wav_recording($file);
+    }
+}
+
 function parse_alert_log_entries(string $alerts_file_path): array {
     if(!is_readable($alerts_file_path)) {
         return [];
@@ -222,7 +280,7 @@ elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POS
         }
 
         foreach($recording_files as $file) {
-            if(!is_finalized_wav_recording($file)) {
+            if(!is_finalized_recording($file)) {
                 $keep_recordings_lookup[basename($file)] = true;
             }
         }

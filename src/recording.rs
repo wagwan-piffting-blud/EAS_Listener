@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::header;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use hound::{WavSpec, WavWriter};
 use rubato::{
@@ -70,12 +70,26 @@ pub fn start_encoding_task_with_timestamp(
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
     let event_code = event_code_from_header(header_text);
     let stream_label = stream_label_from_source(source_stream);
+    let storage_saver = config.storage_saver_mode;
+    let saver_format = config.storage_saver_ext;
+    let codec_args = saver_format.ffmpeg_codec_args();
+    let final_extension = if storage_saver {
+        saver_format.extension()
+    } else {
+        "wav"
+    };
     let output_path = next_available_recording_path(
         &config.recording_dir,
         event_code.as_str(),
         &timestamp,
         stream_label.as_str(),
+        final_extension,
     );
+    let wav_path = if storage_saver {
+        output_path.with_extension("wav")
+    } else {
+        output_path.clone()
+    };
     let output_path_clone = output_path.clone();
 
     let intro_samples: Option<Vec<i16>> = if config.use_pre_post_roll_for_recordings
@@ -146,7 +160,7 @@ pub fn start_encoding_task_with_timestamp(
             sample_format: hound::SampleFormat::Int,
         };
 
-        let writer = WavWriter::create(&output_path, spec)?;
+        let writer = WavWriter::create(&wav_path, spec)?;
 
         let samples_written = tokio::task::spawn_blocking(move || {
             let mut blocking_writer = writer;
@@ -249,8 +263,24 @@ pub fn start_encoding_task_with_timestamp(
         .await??;
 
         if samples_written == 0 {
-            let _ = tokio::fs::remove_file(&output_path).await;
-            info!("Deleted empty recording file: {:?}", output_path);
+            let _ = tokio::fs::remove_file(&wav_path).await;
+            info!("Deleted empty recording file: {:?}", wav_path);
+            return Ok(());
+        }
+
+        if storage_saver {
+            match transcode_wav(&wav_path, &output_path, codec_args).await {
+                Ok(()) => {
+                    let _ = tokio::fs::remove_file(&wav_path).await;
+                    info!("Finished writing recording to: {:?}", output_path);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to transcode recording to MP3 ({}); keeping WAV at {:?}",
+                        err, wav_path
+                    );
+                }
+            }
         } else {
             info!("Finished writing recording to: {:?}", output_path);
         }
@@ -531,14 +561,15 @@ fn next_available_recording_path(
     event_code: &str,
     timestamp: &str,
     stream_label: &str,
+    extension: &str,
 ) -> PathBuf {
     let base = format!("EAS_Recording_{timestamp}_{event_code}_{stream_label}");
     let mut index = 0usize;
     loop {
         let filename = if index == 0 {
-            format!("{base}.wav")
+            format!("{base}.{extension}")
         } else {
-            format!("{base}_{index}.wav")
+            format!("{base}_{index}.{extension}")
         };
         let candidate = recording_dir.join(filename);
         if !candidate.exists() {
@@ -546,6 +577,52 @@ fn next_available_recording_path(
         }
         index += 1;
     }
+}
+
+/// Transcode a finished WAV recording to the STORAGE_SAVER_MODE format.
+///
+/// `codec_args` are the ffmpeg `-c:a`/`-b:a` flags for the target format and
+/// `out_path` carries its final extension (e.g. `.mp3`/`.ogg`). ffmpeg writes to
+/// a `<out>.partial` temp that is atomically renamed into place, so a present
+/// recording file is always complete — the web frontend and vacuum both treat
+/// existence as "finalized".
+async fn transcode_wav(wav_path: &Path, out_path: &Path, codec_args: &[&str]) -> Result<()> {
+    let mut partial = out_path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial_path = PathBuf::from(partial);
+
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-y")
+        .arg("-i")
+        .arg(wav_path)
+        .arg("-vn")
+        .args(codec_args)
+        .arg(&partial_path);
+
+    let status = command
+        .status()
+        .await
+        .context("Failed to invoke ffmpeg for storage-saver transcode")?;
+
+    if !status.success() {
+        let _ = tokio::fs::remove_file(&partial_path).await;
+        return Err(anyhow!(
+            "ffmpeg exited with status {:?} while transcoding {:?}",
+            status.code(),
+            wav_path
+        ));
+    }
+
+    tokio::fs::rename(&partial_path, out_path)
+        .await
+        .with_context(|| format!("Failed to finalize recording at {:?}", out_path))?;
+
+    Ok(())
 }
 
 fn event_code_from_header(header_text: &str) -> String {

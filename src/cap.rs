@@ -2112,13 +2112,28 @@ async fn build_recording_with_same_header(
     } else {
         CAP_HEADER_SOURCE_MARKER_CAP
     };
+    let storage_saver = config.storage_saver_mode;
+    let saver_format = config.storage_saver_ext;
+    let extension = if storage_saver {
+        saver_format.extension()
+    } else {
+        "wav"
+    };
     let output_name = format!(
-        "EAS_Recording_{}_{}_{}.wav",
+        "EAS_Recording_{}_{}_{}.{}",
         timestamp,
         sanitize_filename_label(event_code),
-        source_marker
+        source_marker,
+        extension
     );
     let output_path = config.recording_dir.join(output_name);
+    let ffmpeg_output_path = if storage_saver {
+        let mut partial = output_path.as_os_str().to_owned();
+        partial.push(".partial");
+        PathBuf::from(partial)
+    } else {
+        output_path.clone()
+    };
 
     let mut ffmpeg = Command::new("ffmpeg");
     ffmpeg
@@ -2142,10 +2157,14 @@ async fn build_recording_with_same_header(
         .arg("-filter_complex")
         .arg("[0:a][1:a][2:a][3:a][4:a][5:a]concat=n=6:v=0:a=1[outa]")
         .arg("-map")
-        .arg("[outa]")
-        .arg("-c:a")
-        .arg("pcm_s16le")
-        .arg(&output_path);
+        .arg("[outa]");
+
+    if storage_saver {
+        ffmpeg.args(saver_format.ffmpeg_codec_args());
+    } else {
+        ffmpeg.arg("-c:a").arg("pcm_s16le");
+    }
+    ffmpeg.arg(&ffmpeg_output_path);
 
     let status = ffmpeg.status().await?;
     let _ = fs::remove_file(&header_path).await;
@@ -2154,10 +2173,21 @@ async fn build_recording_with_same_header(
     let _ = fs::remove_file(&attn_tone_path).await;
 
     if !status.success() {
+        if storage_saver {
+            let _ = fs::remove_file(&ffmpeg_output_path).await;
+        }
         return Err(anyhow!(
             "ffmpeg failed to build CAP recording with SAME header (status {:?})",
             status.code()
         ));
+    }
+
+    if storage_saver {
+        fs::rename(&ffmpeg_output_path, &output_path)
+            .await
+            .with_context(|| {
+                format!("Failed to finalize CAP recording at {:?}", output_path)
+            })?;
     }
 
     Ok(output_path)

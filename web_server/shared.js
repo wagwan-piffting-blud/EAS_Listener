@@ -28,7 +28,7 @@
         if (options.preload) attrs.push(`preload="${options.preload}"`);
         if (options.dataAlertAudio) attrs.push('data-alert-audio="true"');
 
-        return `<audio ${attrs.join(" ")}><source src="${src}" type="audio/wav">Your browser does not support the audio element.</audio>`;
+        return `<audio ${attrs.join(" ")}><source src="${src}">Your browser does not support the audio element.</audio>`;
     }
 
     function downloadAudio(src) {

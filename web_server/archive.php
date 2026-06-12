@@ -119,11 +119,14 @@ function get_recording_manifest_path(string $recording_dir): string {
 }
 
 function scan_recording_files(string $recording_dir): array {
-    $pattern = $recording_dir . DIRECTORY_SEPARATOR . "EAS_Recording_*.wav";
-    $files = glob($pattern);
-    if($files === false) {
-        $files = [];
-    }
+    // Two globs (rather than GLOB_BRACE) so this works on PHP builds where
+    // GLOB_BRACE is unavailable (e.g. musl/Alpine).
+    $base = $recording_dir . DIRECTORY_SEPARATOR . "EAS_Recording_*.";
+    $files = array_merge(
+        glob($base . "wav") ?: [],
+        glob($base . "mp3") ?: [],
+        glob($base . "ogg") ?: []
+    );
 
     $entries = [];
     foreach($files as $file) {
@@ -375,6 +378,60 @@ function is_finalized_wav_recording(string $file): bool {
         && $data_size <= $expected_data_size_max;
 }
 
+function is_finalized_mp3_recording(string $file): bool {
+    $filesize = @filesize($file);
+    if($filesize === false || $filesize < 4) {
+        return false;
+    }
+
+    $handle = @fopen($file, "rb");
+    if($handle === false) {
+        return false;
+    }
+
+    $head = @fread($handle, 3);
+    fclose($handle);
+    if($head === false || strlen($head) < 3) {
+        return false;
+    }
+
+    if(substr($head, 0, 3) === "ID3") {
+        return true;
+    }
+
+    return ord($head[0]) === 0xFF && (ord($head[1]) & 0xE0) === 0xE0;
+}
+
+function is_finalized_ogg_recording(string $file): bool {
+    // Ogg (Opus) storage-saver recordings are atomically renamed into place once
+    // transcoded, so a present *.ogg is complete. Sanity-check the "OggS" magic.
+    $filesize = @filesize($file);
+    if($filesize === false || $filesize < 4) {
+        return false;
+    }
+
+    $handle = @fopen($file, "rb");
+    if($handle === false) {
+        return false;
+    }
+
+    $head = @fread($handle, 4);
+    fclose($handle);
+
+    return $head !== false && substr($head, 0, 4) === "OggS";
+}
+
+function is_finalized_recording(string $file): bool {
+    switch(strtolower((string) pathinfo($file, PATHINFO_EXTENSION))) {
+        case "mp3":
+            return is_finalized_mp3_recording($file);
+        case "ogg":
+            return is_finalized_ogg_recording($file);
+        default:
+            return is_finalized_wav_recording($file);
+    }
+}
+
 function hhmmToSeconds(string $hhmmString): int {
     if (strlen($hhmmString) !== 4 || !ctype_digit($hhmmString)) {
         throw new InvalidArgumentException("Input must be a 4-digit numeric string representing HHMM.");
@@ -403,7 +460,7 @@ function serve_recording_file(string $file): void {
         exit();
     }
 
-    if(!is_finalized_wav_recording($file)) {
+    if(!is_finalized_recording($file)) {
         http_response_code(425);
         if(!$is_head_request) {
             echo "Recording is still in progress.";
@@ -448,7 +505,17 @@ function serve_recording_file(string $file): void {
         http_response_code(200);
     }
 
-    header("Content-Type: audio/wav");
+    switch(strtolower((string) pathinfo($file, PATHINFO_EXTENSION))) {
+        case "mp3":
+            $content_type = "audio/mpeg";
+            break;
+        case "ogg":
+            $content_type = "audio/ogg";
+            break;
+        default:
+            $content_type = "audio/wav";
+    }
+    header("Content-Type: " . $content_type);
     header('Content-Disposition: inline; filename="' . basename($file) . '"');
     header('Content-Transfer-Encoding: binary');
     header("Accept-Ranges: bytes");
