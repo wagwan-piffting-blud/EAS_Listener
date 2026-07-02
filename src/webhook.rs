@@ -334,7 +334,15 @@ pub async fn send_alert_webhook(
                 }
             }
         }
+    }
 
+    let non_discord_urls: Vec<&str> = apprise_urls_from_config_array
+        .iter()
+        .map(|u| u.trim())
+        .filter(|u| u.contains("://") && !u.starts_with("discord://"))
+        .collect();
+
+    if non_discord_urls.is_empty() {
         return;
     }
 
@@ -346,7 +354,6 @@ pub async fn send_alert_webhook(
 
     for (format, body) in attempts.iter() {
         let mut command = Command::new("apprise");
-        command.arg("--config").arg(&config_path);
         command.arg("--title").arg(&apprise_title);
         command.arg("--body").arg(body);
         command.arg("--input-format").arg(format);
@@ -355,27 +362,8 @@ pub async fn send_alert_webhook(
             command.arg("--attach").arg(path);
         }
 
-        match command.output().await {
-            Ok(output) if output.status.success() => {
-                return;
-            }
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(
-                    "AppRise CLI failed with format {} (exit code {:?}): stdout='{}' stderr='{}'",
-                    format,
-                    output.status.code(),
-                    stdout.trim(),
-                    stderr.trim()
-                );
-            }
-            Err(err) => {
-                warn!(
-                    "Failed to invoke AppRise CLI with format {}: {}",
-                    format, err
-                );
-            }
+        for target in &non_discord_urls {
+            command.arg(target);
         }
     }
 
