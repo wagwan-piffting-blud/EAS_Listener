@@ -932,6 +932,10 @@ fn process_stream(
                                 )
                                 .await;
 
+                                // Feed the tone recording to the built-in Icecast
+                                // alert stream (no-op unless enabled).
+                                crate::icecast::enqueue_alert_audio(output_path.clone());
+
                                 {
                                     let active_snapshot = {
                                         let mut app_state_guard =

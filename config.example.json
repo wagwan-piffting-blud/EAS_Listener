@@ -25,6 +25,11 @@
         }
     ],
     "WATCHED_FIPS": "031055,031153",
+    "ICECAST_ALERT_STREAM_ENABLED": false,
+    "ICECAST_ALERT_MOUNT": "/stream.ogg",
+    "ICECAST_ALERT_PORT": 8000,
+    "ICECAST_ALERT_SOURCE_PASSWORD": "hackme",
+    "ICECAST_ALERT_PUBLIC_URL": "",
     "APPRISE_CONFIG_PATH": "/app/apprise.yml",
     "EAS_RELAY_NAME": "EASLISTN",
     "DASHBOARD_USERNAME": "your_username_here",
@@ -33,7 +38,7 @@
     "FILTERS": [
         {
             "name": "Spammy Event Filter",
-            "event_codes": ["RWT", "RMT", "DMO"],
+            "event_codes": ["RWT", "RMT"],
             "action": "ignore"
         },
         {

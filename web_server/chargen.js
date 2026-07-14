@@ -43,6 +43,10 @@
     const defaultText = (root.dataset.defaultText || "EAS DETAILS CHANNEL").trim() || "EAS DETAILS CHANNEL";
     const token = (root.dataset.token || "").trim();
     const apiBase = (root.dataset.apiBase || window.location.host).trim();
+    // When set, character-generator mode plays the continuous live Icecast alert
+    // mount instead of fetching and playing individual alert recordings.
+    const streamUrl = (root.dataset.streamUrl || "").trim();
+    const liveMode = streamUrl !== "";
 
     const state = {
         activeAlertKey: "",
@@ -553,7 +557,8 @@
         if (!latest) {
             state.activeAlertKey = "";
             setTickerText(defaultText);
-            clearAudio();
+            // In live mode the audio is a continuous mount; never tear it down.
+            if (!liveMode) clearAudio();
             return;
         }
 
@@ -567,11 +572,58 @@
 
         state.activeAlertKey = key;
         setTickerText(text);
-        clearAudio();
-        if (!state.playedAlertKeys.has(key)) {
-            state.audioPendingAlertKey = key;
-            playLatestAlertAudio();
+        if (!liveMode) {
+            clearAudio();
+            if (!state.playedAlertKeys.has(key)) {
+                state.audioPendingAlertKey = key;
+                playLatestAlertAudio();
+            }
         }
+    }
+
+    // Continuously play the live Icecast alert mount. Handles browser autoplay
+    // restrictions (falls back to starting on the first user gesture) and
+    // reconnects if the mount briefly drops.
+    function setupLiveAudio() {
+        let recovering = false;
+
+        const start = () => {
+            if (state.currentAudioSrc !== streamUrl) {
+                audio.src = streamUrl;
+                audio.load();
+                state.currentAudioSrc = streamUrl;
+            }
+            const played = audio.play();
+            if (played && typeof played.catch === "function") {
+                played.catch(() => armGesture());
+            }
+        };
+
+        const armGesture = () => {
+            const onGesture = () => {
+                document.removeEventListener("pointerdown", onGesture);
+                document.removeEventListener("keydown", onGesture);
+                audio.play().catch(() => {});
+            };
+            document.addEventListener("pointerdown", onGesture, { once: true });
+            document.addEventListener("keydown", onGesture, { once: true });
+        };
+
+        const scheduleRecover = () => {
+            if (recovering) return;
+            recovering = true;
+            setTimeout(() => {
+                recovering = false;
+                state.currentAudioSrc = "";
+                start();
+            }, 3000);
+        };
+
+        audio.loop = false;
+        audio.addEventListener("error", scheduleRecover);
+        audio.addEventListener("ended", scheduleRecover);
+        audio.addEventListener("stalled", scheduleRecover);
+        start();
     }
 
     function handleWsMessage(event) {
@@ -671,6 +723,7 @@
     applyStyleSettings(DEFAULT_STYLE);
     bindControls();
     setTickerText(defaultText);
+    if (liveMode) setupLiveAudio();
     fetchStatus().finally(connectWebSocket);
     setInterval(fetchStatus, 60000);
 })();

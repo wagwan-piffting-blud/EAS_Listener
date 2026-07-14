@@ -365,6 +365,32 @@ pub async fn send_alert_webhook(
         for target in &non_discord_urls {
             command.arg(target);
         }
+
+        match command.output().await {
+            Ok(output) if output.status.success() => {
+                info!(
+                    "Delivered notification via AppRise using '{}' format to {} target(s)",
+                    format,
+                    non_discord_urls.len()
+                );
+                return;
+            }
+            Ok(output) => {
+                warn!(
+                    "AppRise '{}' format attempt failed (exit {:?}): stderr={} stdout={}",
+                    format,
+                    output.status.code(),
+                    truncate_for_log(String::from_utf8_lossy(&output.stderr).trim(), 800),
+                    truncate_for_log(String::from_utf8_lossy(&output.stdout).trim(), 800)
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to invoke 'apprise' for '{}' format (is it installed and on PATH?): {}",
+                    format, err
+                );
+            }
+        }
     }
 
     warn!("Unable to deliver notification via AppRise after trying all formats");

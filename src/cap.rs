@@ -1433,13 +1433,27 @@ async fn synthesize_cap_tts_audio(
             .status()
             .await
             .context("Failed to execute espeak-ng TTS command")?,
-        "speechify" => Command::new("/usr/lib/wine/wine")
-            .arg("/app/Speechify/bin/spfy_dumpwav.exe")
-            .arg(&tts_text)
-            .arg(&tts_path)
-            .status()
-            .await
-            .context("Failed to execute Speechify TTS command")?,
+        "speechify" => {
+            // spfy_synth is chatty on both stdout and stderr; capture both so its
+            // diagnostics stay out of our logs, and only surface stderr on failure.
+            let output = Command::new("spfy_synth")
+                .arg("/app/voices/tom/tom.vin")
+                .arg("/app/voices/tom/tom8.vdb")
+                .arg("/app/voices/tom/tom.vcf")
+                .arg(&tts_text)
+                .arg(&tts_path)
+                .output()
+                .await
+                .context("Failed to execute Speechify TTS command")?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "Speechify (spfy_synth) failed with status {:?}: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            output.status
+        }
         other => {
             return Err(anyhow!(
                 "Unknown TTS engine '{}'. Supported: piper, espeak-ng, speechify",

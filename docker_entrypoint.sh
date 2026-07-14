@@ -33,14 +33,24 @@ sed -i "s/session.gc_maxlifetime = .*/session.gc_maxlifetime = 259200/" /etc/php
 
 chmod -R 777 /app /data /var/www/html
 
-if [ "${START_ICECAST:-false}" = "true" ]; then
+if [ "${START_ICECAST:-false}" = "true" ] || [ "${ICECAST_ALERT_STREAM_ENABLED:-false}" = "true" ]; then
     ICECAST_CONFIG="${ICECAST_CONFIG_PATH:-/etc/icecast2/icecast.xml}"
     if [ ! -f "$ICECAST_CONFIG" ]; then
         echo "Icecast config not found at $ICECAST_CONFIG" >&2
         exit 1
     fi
 
-    echo "Starting Icecast..."
+    # Render a runtime copy of the config with the desired listen port so we
+    # never mutate the bundled (or user-mounted) icecast.xml. This keeps the
+    # Icecast server port in sync with ICECAST_ALERT_PORT, which the Rust alert
+    # source connects to and the dashboard derives its stream URL from.
+    ICECAST_LISTEN_PORT="${ICECAST_ALERT_PORT:-8000}"
+    ICECAST_RUNTIME_CONFIG="/app/icecast.runtime.xml"
+    sed '0,/<port>[0-9]*<\/port>/s//<port>'"$ICECAST_LISTEN_PORT"'<\/port>/' "$ICECAST_CONFIG" > "$ICECAST_RUNTIME_CONFIG"
+    chmod 644 "$ICECAST_RUNTIME_CONFIG"
+    ICECAST_CONFIG="$ICECAST_RUNTIME_CONFIG"
+
+    echo "Starting Icecast on port ${ICECAST_LISTEN_PORT}..."
     if ! su -s /bin/bash -c "icecast2 -c \"$ICECAST_CONFIG\" -b" icecast2; then
         echo "Failed to start Icecast with $ICECAST_CONFIG" >&2
         exit 1
@@ -51,32 +61,6 @@ if [ "${PROCESS_CAP_ALERTS:-true}" = "false" ]; then
     export PROCESS_CAP_ALERTS=false
 else
     export PROCESS_CAP_ALERTS=true
-
-    export WINEDLLOVERRIDES="winemenubuilder.exe=d"
-    export WINEDEBUG=-all
-
-    tmux new-session -d -s speechify_server 'xvfb-run -a --server-args="-screen 0 1024x768x24 -nolisten tcp" /usr/lib/wine/wine /app/Speechify/bin/Speechify.exe >> /data/speechify_server.log 2>&1'
-
-    echo "Waiting for Speechify server to start..."
-
-    SERVER_LOG_FILE="/data/speechify_server.log"
-    SERVER_READY_MESSAGE="Server started, waiting for connections"
-    SERVER_STARTUP_TIMEOUT_SECONDS=120
-    SERVER_STARTUP_DEADLINE=$((SECONDS + SERVER_STARTUP_TIMEOUT_SECONDS))
-
-    until [ "$SECONDS" -ge "$SERVER_STARTUP_DEADLINE" ]; do
-        if [ -f "$SERVER_LOG_FILE" ] && grep -Fq "$SERVER_READY_MESSAGE" "$SERVER_LOG_FILE"; then
-            echo "Speechify server is ready."
-            break
-        fi
-        sleep 1
-    done
-
-    if ! [ -f "$SERVER_LOG_FILE" ] || ! grep -Fq "$SERVER_READY_MESSAGE" "$SERVER_LOG_FILE"; then
-        echo "Timed out waiting for Speechify server startup message in $SERVER_LOG_FILE" >&2
-        [ -f "$SERVER_LOG_FILE" ] && tail -n 50 "$SERVER_LOG_FILE" >&2
-        exit 1
-    fi
 fi
 
 php-fpm8.4 -R

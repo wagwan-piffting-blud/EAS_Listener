@@ -24,7 +24,25 @@ if(!isset($_SESSION['authed'])) {
     exit();
 }
 
-else { ?><!DOCTYPE html>
+else {
+    // Resolve the browser-facing URL of the built-in continuous alert stream.
+    // An explicit ICECAST_ALERT_PUBLIC_URL wins (needed behind reverse proxies /
+    // HTTPS); otherwise derive it from the request host, port, and mount when the
+    // stream is enabled. Empty means "no live stream" and chargen falls back to
+    // per-alert recording playback.
+    $icecastStreamUrl = trim(app_string("ICECAST_ALERT_PUBLIC_URL", ""));
+    if ($icecastStreamUrl === "" && app_bool("ICECAST_ALERT_STREAM_ENABLED", false)) {
+        $httpHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
+        $hostNoPort = substr($httpHost, 0, strpos($httpHost, ":") ?: strlen($httpHost));
+        $icecastPort = app_string("ICECAST_ALERT_PORT", "8000");
+        $icecastMount = app_string("ICECAST_ALERT_MOUNT", "/stream.ogg");
+        if ($icecastMount === "" || $icecastMount[0] !== "/") {
+            $icecastMount = "/" . $icecastMount;
+        }
+        $icecastScheme = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $icecastStreamUrl = $icecastScheme . "://" . $hostNoPort . ":" . $icecastPort . $icecastMount;
+    }
+    ?><!DOCTYPE html>
 <html lang="en">
     <head>
         <meta charset="utf-8" />
@@ -38,6 +56,7 @@ else { ?><!DOCTYPE html>
             data-api-base="<?php print_r(app_monitoring_api_base((string) ($_SERVER['HTTP_HOST'] ?? 'localhost'))); ?>"
             data-token="<?php print_r(app_auth_token()); ?>"
             data-default-text="EAS DETAILS CHANNEL"
+            data-stream-url="<?php echo htmlspecialchars($icecastStreamUrl, ENT_QUOTES); ?>"
         >
             <div id="cgControls" aria-label="Character generator options">
                 <div id="flex">

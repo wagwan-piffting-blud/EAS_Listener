@@ -10,10 +10,10 @@ services:
             # - ./leadout.mp3:/app/leadout.mp3       # Include if you have lead-out audio and want to use it when relaying
             - ./config.json:/app/config.json
             # - ./cap_tts_replacement_config.json:/app/cap_tts_replacement_config.json # Include if you have a TTS replacement config for CAP alerts and want to use it
-            # - ./icecast.xml:/etc/icecast2/icecast.xml # Include if you want to use the built-in Icecast server for a 24/7 stream of the audio being relayed
+            # - ./icecast.xml:/etc/icecast2/icecast.xml # OPTIONAL: a working icecast.xml is now bundled in the image. Only mount this to OVERRIDE it (e.g. to change the source-password from the default "hackme")
         env_file:
             - .env
         ports:
             - "${WEB_SERVER_PORT}:80"
             - "${MONITORING_BIND_PORT}:${MONITORING_BIND_PORT}"
-            # - "8000:8000" # Include if you want to use the built-in Icecast server for a 24/7 stream of the audio being relayed
+            # - "${ICECAST_ALERT_PORT:-8000}:${ICECAST_ALERT_PORT:-8000}" # Uncomment to expose the built-in Icecast server for the 24/7 continuous alert stream. Change the port via ICECAST_ALERT_PORT (set it the SAME in both .env and config.json). Setting ICECAST_ALERT_STREAM_ENABLED=true in config.json auto-starts Icecast (no separate START_ICECAST needed)

@@ -53,6 +53,17 @@ pub struct Config {
     pub apprise_config_path: String,
     pub should_relay_icecast: bool,
     pub icecast_relay: String,
+    // Built-in Icecast continuous alert stream (separate from the external
+    // SHOULD_RELAY_ICECAST relay above). When enabled, a persistent source keeps
+    // a mountpoint on the container's bundled Icecast up 24/7 and streams every
+    // alert recording live, queued as they arrive.
+    pub icecast_alert_stream_enabled: bool,
+    pub icecast_alert_host: String,
+    pub icecast_alert_port: u16,
+    pub icecast_alert_mount: String,
+    pub icecast_alert_source_user: String,
+    pub icecast_alert_source_password: String,
+    pub icecast_alert_public_url: String,
     pub dasdec_url: String,
     pub should_relay_dasdec: bool,
     pub use_icecast_intro_outro: bool,
@@ -191,6 +202,13 @@ impl Config {
             apprise_config_path: "/app/apprise.yml".to_string(),
             should_relay_icecast: false,
             icecast_relay: String::new(),
+            icecast_alert_stream_enabled: false,
+            icecast_alert_host: "127.0.0.1".to_string(),
+            icecast_alert_port: 8000,
+            icecast_alert_mount: "/stream.ogg".to_string(),
+            icecast_alert_source_user: "source".to_string(),
+            icecast_alert_source_password: "hackme".to_string(),
+            icecast_alert_public_url: String::new(),
             dasdec_url: String::new(),
             should_relay_dasdec: false,
             use_icecast_intro_outro: false,
@@ -329,6 +347,42 @@ impl Config {
         if let Some(value) = optional_string(&config_json, "ICECAST_RELAY")? {
             merged.icecast_relay = value;
         }
+
+        if let Some(value) = optional_bool(&config_json, "ICECAST_ALERT_STREAM_ENABLED")? {
+            merged.icecast_alert_stream_enabled = value;
+        }
+        if let Some(value) = optional_string(&config_json, "ICECAST_ALERT_HOST")? {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                merged.icecast_alert_host = trimmed.to_string();
+            }
+        }
+        if let Some(value) = optional_u16(&config_json, "ICECAST_ALERT_PORT")? {
+            merged.icecast_alert_port = value;
+        }
+        if let Some(value) = optional_string(&config_json, "ICECAST_ALERT_MOUNT")? {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                merged.icecast_alert_mount = if trimmed.starts_with('/') {
+                    trimmed.to_string()
+                } else {
+                    format!("/{trimmed}")
+                };
+            }
+        }
+        if let Some(value) = optional_string(&config_json, "ICECAST_ALERT_SOURCE_USER")? {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                merged.icecast_alert_source_user = trimmed.to_string();
+            }
+        }
+        if let Some(value) = optional_string(&config_json, "ICECAST_ALERT_SOURCE_PASSWORD")? {
+            merged.icecast_alert_source_password = value;
+        }
+        if let Some(value) = optional_string(&config_json, "ICECAST_ALERT_PUBLIC_URL")? {
+            merged.icecast_alert_public_url = value.trim().to_string();
+        }
+
         if let Some(value) = optional_string(&config_json, "DASDEC_URL")? {
             merged.dasdec_url = value;
         }
@@ -478,6 +532,19 @@ impl Config {
             return Err(anyhow!(
                 "ICECAST_RELAY must be set if SHOULD_RELAY and SHOULD_RELAY_ICECAST are true"
             ));
+        }
+
+        if merged.icecast_alert_stream_enabled {
+            if merged.icecast_alert_source_password.trim().is_empty() {
+                return Err(anyhow!(
+                    "ICECAST_ALERT_SOURCE_PASSWORD must be set if ICECAST_ALERT_STREAM_ENABLED is true"
+                ));
+            }
+            if merged.icecast_alert_port == 0 {
+                return Err(anyhow!(
+                    "ICECAST_ALERT_PORT must be a valid port if ICECAST_ALERT_STREAM_ENABLED is true"
+                ));
+            }
         }
 
         if merged.should_relay

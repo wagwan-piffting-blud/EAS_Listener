@@ -31,14 +31,24 @@ sed -i "s/session.gc_maxlifetime = .*/session.gc_maxlifetime = 259200/" /etc/php
 
 chmod -R 777 /app /data /var/www/html
 
-if [ "${START_ICECAST:-false}" = "true" ]; then
+if [ "${START_ICECAST:-false}" = "true" ] || [ "${ICECAST_ALERT_STREAM_ENABLED:-false}" = "true" ]; then
     ICECAST_CONFIG="${ICECAST_CONFIG_PATH:-/etc/icecast2/icecast.xml}"
     if [ ! -f "$ICECAST_CONFIG" ]; then
         echo "Icecast config not found at $ICECAST_CONFIG" >&2
         exit 1
     fi
 
-    echo "Starting Icecast..."
+    # Render a runtime copy of the config with the desired listen port so we
+    # never mutate the bundled (or user-mounted) icecast.xml. This keeps the
+    # Icecast server port in sync with ICECAST_ALERT_PORT, which the Rust alert
+    # source connects to and the dashboard derives its stream URL from.
+    ICECAST_LISTEN_PORT="${ICECAST_ALERT_PORT:-8000}"
+    ICECAST_RUNTIME_CONFIG="/app/icecast.runtime.xml"
+    sed '0,/<port>[0-9]*<\/port>/s//<port>'"$ICECAST_LISTEN_PORT"'<\/port>/' "$ICECAST_CONFIG" > "$ICECAST_RUNTIME_CONFIG"
+    chmod 644 "$ICECAST_RUNTIME_CONFIG"
+    ICECAST_CONFIG="$ICECAST_RUNTIME_CONFIG"
+
+    echo "Starting Icecast on port ${ICECAST_LISTEN_PORT}..."
     if ! su -s /bin/bash -c "icecast2 -c \"$ICECAST_CONFIG\" -b" icecast2; then
         echo "Failed to start Icecast with $ICECAST_CONFIG" >&2
         exit 1

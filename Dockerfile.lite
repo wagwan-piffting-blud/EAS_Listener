@@ -28,11 +28,14 @@ ENV TTS_ENGINE=piper
 
 ARG PIPER_VERSION=2023.11.14-2
 ARG PIPER_VOICE=en_US-lessac-medium
+# Port the bundled Icecast server listens on / is exposed for the 24/7 alert
+# stream. Keep in sync with ICECAST_ALERT_PORT in config.json and .env.
+ARG ICECAST_ALERT_PORT=8000
 
 RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 \
     && mkdir -p /var/lib/apt/lists/partial \
     && apt-get update && apt-get install -y --no-install-recommends \
-       wget libssl3 ca-certificates gnupg2 git bash nginx jq ffmpeg curl \
+       wget libssl3 ca-certificates gnupg2 git bash nginx jq ffmpeg curl apprise \
        php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip php-sqlite3 \
        icecast2 liquidsoap \
     && rm -rf /var/lib/apt/lists/* \
@@ -63,6 +66,7 @@ RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:ic
 COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint_lite.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
+COPY ./icecast.xml /etc/icecast2/icecast.xml
 COPY ./web_server/ /var/www/html
 COPY ./Cargo.toml /app/Cargo.toml
 
@@ -74,6 +78,6 @@ HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl 
 
 EXPOSE 80
 EXPOSE ${MONITORING_BIND_PORT}
-EXPOSE 8000
+EXPOSE ${ICECAST_ALERT_PORT}
 
 ENTRYPOINT ["/docker_entrypoint.sh"]

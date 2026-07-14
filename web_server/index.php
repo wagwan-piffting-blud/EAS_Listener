@@ -126,6 +126,7 @@ if (!isset($_SESSION['authed'])) {
             <div id="header-right">
                 <span id="wsStatus" class="ws-status">Connecting...</span>
                 <div id="logout-container">
+                    <button id="testAlertButton" class="custom-button button">Send Test Alert</button>
                     <button id="reloadButton" class="custom-button button">Reload Config/Backend</button>
                     <a class="custom-button button" href="logout.php">Logout</a>
                 </div>
@@ -280,6 +281,12 @@ if (!isset($_SESSION['authed'])) {
             document.getElementById("reloadButton").addEventListener("click", () => {
                 if (confirm("Are you sure you want to reload the configuration and Rust backend? This will temporarily interrupt monitoring while the backend restarts.")) {
                     window.location.href = "reload.php";
+                }
+            });
+
+            document.getElementById("testAlertButton").addEventListener("click", () => {
+                if (confirm("Send a synthetic Required Weekly Test (RWT) through the FULL alert pipeline? This decodes, logs, records, sends notifications (Apprise/Discord), and runs any configured relays exactly as a real alert would. It will appear on the dashboard and in the archive.")) {
+                    window.location.href = "test_alert.php";
                 }
             });
 
