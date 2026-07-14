@@ -9,3 +9,5 @@
 - Complete Icecast 2 stream integration. This was pending for the longest time, but never finished. Currently, this means that the listener can now output its own stream of alerts only, 24/7. There is a normal alert queue for frequent alert periods. The Icecast RELAY portion is 100% unmodified and works just the same.
 
 - Add "Send Test Alert" button to the EAS_Listener GUI. This allows users to easily test the whole alert system pipeline without having to wait for an actual alert to occur. The test alert will simulate a real alert and will be sent through the same channels as a real alert, allowing users to verify that their setup is working correctly. Helpful if you recently changed something and don't know if your changes will work. The test alert will also be logged in the alert history for reference. Major thanks to GitHub user [@averlice](https://github.com/averlice) for the idea.
+
+- Remove errant "icecast.xml" file from the Dockerfile. This file is not tracked locally and was causing build issues. Icecast should supply its own file.

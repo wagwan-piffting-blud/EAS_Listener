@@ -40,7 +40,6 @@ RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:ic
 COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
-COPY ./icecast.xml /etc/icecast2/icecast.xml
 COPY ./web_server/ /var/www/html
 COPY ./Cargo.toml /app/Cargo.toml
 
