@@ -579,13 +579,6 @@ fn next_available_recording_path(
     }
 }
 
-/// Transcode a finished WAV recording to the STORAGE_SAVER_MODE format.
-///
-/// `codec_args` are the ffmpeg `-c:a`/`-b:a` flags for the target format and
-/// `out_path` carries its final extension (e.g. `.mp3`/`.ogg`). ffmpeg writes to
-/// a `<out>.partial` temp that is atomically renamed into place, so a present
-/// recording file is always complete — the web frontend and vacuum both treat
-/// existence as "finalized".
 async fn transcode_wav(wav_path: &Path, out_path: &Path, codec_args: &[&str]) -> Result<()> {
     let mut partial = out_path.as_os_str().to_owned();
     partial.push(".partial");

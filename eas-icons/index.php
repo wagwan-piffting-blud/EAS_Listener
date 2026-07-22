@@ -1,13 +1,5 @@
 <?php
 
-/* Remove entries as they are added as individual SVG files to /icons/
-    "DBA": "a Dam Watch",
-    "DBW": "a Dam Break Warning",
-    "EQW": "a Earthquake Warning",
-    "IFW": "an Industrial Fire Warning",
-    "NUW": "a Nuclear Plant Warning",
-*/
-
 function get_curl_same_codes($url) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);

@@ -119,8 +119,6 @@ function get_recording_manifest_path(string $recording_dir): string {
 }
 
 function scan_recording_files(string $recording_dir): array {
-    // Two globs (rather than GLOB_BRACE) so this works on PHP builds where
-    // GLOB_BRACE is unavailable (e.g. musl/Alpine).
     $base = $recording_dir . DIRECTORY_SEPARATOR . "EAS_Recording_*.";
     $files = array_merge(
         glob($base . "wav") ?: [],
@@ -403,8 +401,6 @@ function is_finalized_mp3_recording(string $file): bool {
 }
 
 function is_finalized_ogg_recording(string $file): bool {
-    // Ogg (Opus) storage-saver recordings are atomically renamed into place once
-    // transcoded, so a present *.ogg is complete. Sanity-check the "OggS" magic.
     $filesize = @filesize($file);
     if($filesize === false || $filesize < 4) {
         return false;

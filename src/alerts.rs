@@ -626,9 +626,6 @@ async fn handle_recording_and_webhook(
         .await;
     }
 
-    // Stream the finished recording live on the built-in Icecast mount. No-op
-    // unless ICECAST_ALERT_STREAM_ENABLED; intentionally independent of the
-    // relay/forward filter actions so the 24/7 stream carries every alert.
     if let Some((ref recording_path, _)) = recorded_state {
         crate::icecast::enqueue_alert_audio(recording_path.clone());
     }

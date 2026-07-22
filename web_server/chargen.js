@@ -43,8 +43,6 @@
     const defaultText = (root.dataset.defaultText || "EAS DETAILS CHANNEL").trim() || "EAS DETAILS CHANNEL";
     const token = (root.dataset.token || "").trim();
     const apiBase = (root.dataset.apiBase || window.location.host).trim();
-    // When set, character-generator mode plays the continuous live Icecast alert
-    // mount instead of fetching and playing individual alert recordings.
     const streamUrl = (root.dataset.streamUrl || "").trim();
     const liveMode = streamUrl !== "";
 
@@ -294,7 +292,7 @@
         try {
             window.localStorage.setItem(key, JSON.stringify(value));
         } catch (_error) {
-            // ignore storage failures
+            /* ignore */
         }
     }
 
@@ -557,7 +555,6 @@
         if (!latest) {
             state.activeAlertKey = "";
             setTickerText(defaultText);
-            // In live mode the audio is a continuous mount; never tear it down.
             if (!liveMode) clearAudio();
             return;
         }
@@ -581,9 +578,6 @@
         }
     }
 
-    // Continuously play the live Icecast alert mount. Handles browser autoplay
-    // restrictions (falls back to starting on the first user gesture) and
-    // reconnects if the mount briefly drops.
     function setupLiveAudio() {
         let recovering = false;
 
@@ -697,7 +691,7 @@
             try {
                 state.ws.close();
             } catch (_error) {
-                // ignore
+                /* ignore */
             }
         });
     }

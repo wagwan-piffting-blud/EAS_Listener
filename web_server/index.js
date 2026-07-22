@@ -1041,9 +1041,7 @@
             || previousRecordingFileName !== renderData.recordingFileName;
 
         if (audioControlsEl && shouldReplaceAudioControls) {
-            if (previousAudioSrc && nextAudioSrc && previousAudioSrc === nextAudioSrc) {
-                // Preserve active audio element when src is unchanged.
-            } else {
+            if (previousAudioSrc && nextAudioSrc && previousAudioSrc === nextAudioSrc) { /* ignore */ } else {
                 audioControlsEl.innerHTML = renderData.recordingAudioMarkup;
                 bindAudioUnavailableFallback(card);
             }

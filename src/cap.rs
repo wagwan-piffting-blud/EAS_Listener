@@ -1434,8 +1434,6 @@ async fn synthesize_cap_tts_audio(
             .await
             .context("Failed to execute espeak-ng TTS command")?,
         "speechify" => {
-            // spfy_synth is chatty on both stdout and stderr; capture both so its
-            // diagnostics stay out of our logs, and only surface stderr on failure.
             let output = Command::new("spfy_synth")
                 .arg("/app/voices/tom/tom.vin")
                 .arg("/app/voices/tom/tom8.vdb")

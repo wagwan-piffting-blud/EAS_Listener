@@ -181,8 +181,6 @@ function is_finalized_mp3_recording(string $file): bool {
 }
 
 function is_finalized_ogg_recording(string $file): bool {
-    // Ogg (Opus) storage-saver recordings are atomically renamed into place once
-    // transcoded, so a present *.ogg is complete. Sanity-check the "OggS" magic.
     $filesize = @filesize($file);
     if($filesize === false || $filesize < 4) {
         return false;
@@ -311,9 +309,7 @@ elseif(isset($_SESSION['authed']) && $_SESSION['authed'] === true && isset($_POS
             $db->close();
         }
 
-        foreach($active_headers_lookup as $header => $_) {
-            // Active alerts are handled by active_alerts.json, not the DB
-        }
+        foreach($active_headers_lookup as $header => $_) { /* ignore */ }
 
         foreach($recording_files as $file) {
             $baseName = basename($file);

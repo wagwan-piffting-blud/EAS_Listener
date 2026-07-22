@@ -9,7 +9,114 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
-const TARGET_CHANNEL_LAYOUT: &str = "mono";
+
+fn channel_layout_name(channels: u16) -> &'static str {
+    match channels {
+        1 => "mono",
+        _ => "stereo",
+    }
+}
+
+struct MatchedFormat {
+    encoder: &'static str,
+    container: &'static str,
+    content_type: &'static str,
+    sample_rate: u32,
+    channels: u16,
+    bitrate: Option<u32>,
+}
+
+fn icecast_source_to_listener_url(source: &str) -> Option<String> {
+    let source = source.trim();
+    let (scheme, rest) = match source.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => (String::from("http"), source),
+    };
+    let listener_scheme = if scheme.contains("ssl") || scheme == "https" {
+        "https"
+    } else {
+        "http"
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, String::new()),
+    };
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    if host_port.is_empty() {
+        return None;
+    }
+    Some(format!("{listener_scheme}://{host_port}{path}"))
+}
+
+async fn probe_icecast_format(source_url: &str) -> Option<MatchedFormat> {
+    let listener_url = icecast_source_to_listener_url(source_url)?;
+
+    let probe = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-hide_banner")
+        .arg("-rw_timeout")
+        .arg("8000000") 
+        .arg("-select_streams")
+        .arg("a:0")
+        .arg("-show_entries")
+        .arg("stream=codec_name,sample_rate,channels,bit_rate:format=bit_rate")
+        .arg("-of")
+        .arg("json")
+        .arg(&listener_url)
+        .kill_on_drop(true)
+        .output();
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), probe)
+        .await
+        .ok()? 
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = json.get("streams")?.as_array()?.first()?;
+
+    let codec = stream.get("codec_name")?.as_str()?;
+    let sample_rate = stream
+        .get("sample_rate")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u32>().ok())?;
+    let channels = stream
+        .get("channels")
+        .and_then(|v| v.as_u64())
+        .map(|c| c as u16)?;
+    let bitrate = stream
+        .get("bit_rate")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u32>().ok())
+        .or_else(|| {
+            json.get("format")
+                .and_then(|f| f.get("bit_rate"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+
+    let (encoder, container, content_type) = match codec {
+        "mp3" => ("libmp3lame", "mp3", "audio/mpeg"),
+        "vorbis" => ("libvorbis", "ogg", "audio/ogg"),
+        "opus" => ("libopus", "ogg", "audio/ogg"),
+        "aac" => ("aac", "adts", "audio/aac"),
+        "flac" => ("flac", "ogg", "audio/ogg"),
+        _ => return None,
+    };
+
+    Some(MatchedFormat {
+        encoder,
+        container,
+        content_type,
+        sample_rate,
+        channels,
+        bitrate: if encoder == "flac" { None } else { bitrate },
+    })
+}
 
 pub struct RelayState {
     pub config: Config,
@@ -117,6 +224,21 @@ impl RelayState {
             return Err(anyhow!("No segments available to relay"));
         }
 
+        let matched_format = if config.should_relay
+            && config.should_relay_icecast
+            && !config.icecast_relay.trim().is_empty()
+        {
+            probe_icecast_format(&config.icecast_relay).await
+        } else {
+            None
+        };
+
+        let (norm_sample_rate, norm_channels) = match &matched_format {
+            Some(fmt) => (fmt.sample_rate, fmt.channels),
+            None => (TARGET_SAMPLE_RATE, 1),
+        };
+        let norm_layout = channel_layout_name(norm_channels);
+
         let combined_temp = Builder::new()
             .prefix("relay_combined_")
             .suffix(".ogg")
@@ -146,7 +268,7 @@ impl RelayState {
                         .arg("-i")
                         .arg(format!(
                             "anullsrc=channel_layout={}:sample_rate={}",
-                            TARGET_CHANNEL_LAYOUT, TARGET_SAMPLE_RATE
+                            norm_layout, norm_sample_rate
                         ));
                 }
             }
@@ -163,9 +285,9 @@ impl RelayState {
             filter_parts.push(format!(
                 "[{}:a]aresample=sample_rate={},aformat=sample_rates={}:channel_layouts={},asetpts=N/SR/TB[s{}]",
                 idx,
-                TARGET_SAMPLE_RATE,
-                TARGET_SAMPLE_RATE,
-                TARGET_CHANNEL_LAYOUT,
+                norm_sample_rate,
+                norm_sample_rate,
+                norm_layout,
                 idx
             ));
             remapped_labels.push(format!("[s{}]", idx));
@@ -183,8 +305,8 @@ impl RelayState {
 
         prepare.arg("-filter_complex").arg(filter_parts.join(";"));
         prepare.arg("-map").arg(output_label);
-        prepare.arg("-ar").arg(TARGET_SAMPLE_RATE.to_string());
-        prepare.arg("-ac").arg("1");
+        prepare.arg("-ar").arg(norm_sample_rate.to_string());
+        prepare.arg("-ac").arg(norm_channels.to_string());
         prepare.arg("-c:a").arg("libvorbis");
         prepare.arg("-b:a").arg("128k");
         prepare.arg(&combined_path_buf);
@@ -220,53 +342,83 @@ impl RelayState {
                 return Err(anyhow!("ICECAST_RELAY is not set. Cannot start relay."));
             }
 
-            let mut stream_cmd = Command::new("ffmpeg");
-            stream_cmd.arg("-nostdin");
-            stream_cmd.arg("-hide_banner");
-            stream_cmd.arg("-loglevel").arg("info");
-            stream_cmd.arg("-re");
-            stream_cmd.arg("-i").arg(&combined_path_buf);
-            stream_cmd.arg("-c:a").arg("copy");
-            stream_cmd.arg("-f").arg("ogg");
-            stream_cmd
-                .arg("-metadata")
-                .arg(format!("title={}", "Emergency Alert"));
-            stream_cmd
-                .arg("-metadata")
-                .arg(format!("artist={}", "EAS Listener"));
-            stream_cmd.arg(&config.icecast_relay);
+            match &matched_format {
+                Some(fmt) => {
+                    info!(
+                        "Icecast mount serving {}/{} ({}), {} Hz, {} ch{}; matching relay format.",
+                        fmt.encoder,
+                        fmt.container,
+                        fmt.content_type,
+                        fmt.sample_rate,
+                        fmt.channels,
+                        fmt.bitrate
+                            .map(|b| format!(", {} bps", b))
+                            .unwrap_or_default()
+                    );
 
-            let mut stream_child = stream_cmd
-                .spawn()
-                .context("Failed to execute ffmpeg relay stream command")?;
-            let relay_target = config.icecast_relay.clone();
+                    let mut stream_cmd = Command::new("ffmpeg");
+                    stream_cmd.arg("-nostdin");
+                    stream_cmd.arg("-hide_banner");
+                    stream_cmd.arg("-loglevel").arg("info");
+                    stream_cmd.arg("-re");
+                    stream_cmd.arg("-i").arg(&combined_path_buf);
+                    stream_cmd.arg("-c:a").arg(fmt.encoder);
+                    stream_cmd.arg("-ar").arg(fmt.sample_rate.to_string());
+                    stream_cmd.arg("-ac").arg(fmt.channels.to_string());
+                    if let Some(bitrate) = fmt.bitrate {
+                        stream_cmd.arg("-b:a").arg(bitrate.to_string());
+                    }
+                    stream_cmd.arg("-f").arg(fmt.container);
+                    stream_cmd.arg("-content_type").arg(fmt.content_type);
+                    stream_cmd
+                        .arg("-metadata")
+                        .arg(format!("title={}", "Emergency Alert"));
+                    stream_cmd
+                        .arg("-metadata")
+                        .arg(format!("artist={}", "EAS Listener"));
+                    stream_cmd.arg(&config.icecast_relay);
 
-            tokio::spawn(async move {
-                match stream_child.wait().await {
-                    Ok(status) if status.success() => {
-                        info!("Icecast relay finished successfully.");
-                    }
-                    Ok(status) => {
-                        warn!(
-                            "ffmpeg relay stream process to '{}' exited with status {:?}",
-                            relay_target,
-                            status.code()
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Failed while waiting for ffmpeg relay stream to '{}': {}",
-                            relay_target, err
-                        );
-                    }
+                    let mut stream_child = stream_cmd
+                        .spawn()
+                        .context("Failed to execute ffmpeg relay stream command")?;
+                    let relay_target = config.icecast_relay.clone();
+
+                    tokio::spawn(async move {
+                        match stream_child.wait().await {
+                            Ok(status) if status.success() => {
+                                info!("Icecast relay finished successfully.");
+                            }
+                            Ok(status) => {
+                                warn!(
+                                    "ffmpeg relay stream process to '{}' exited with status {:?}",
+                                    relay_target,
+                                    status.code()
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "Failed while waiting for ffmpeg relay stream to '{}': {}",
+                                    relay_target, err
+                                );
+                            }
+                        }
+
+                        if let Err(err) = combined_path.close() {
+                            warn!("Failed to clean up temporary relay bundle: {}", err);
+                        }
+                    });
+
+                    info!("Icecast relay running in background; continuing with DASDEC relay.");
                 }
-
-                if let Err(err) = combined_path.close() {
-                    warn!("Failed to clean up temporary relay bundle: {}", err);
+                None => {
+                    warn!(
+                        "Could not determine the current output format of Icecast mount '{}'; \
+                         aborting Icecast relay to avoid a format mismatch. (DASDEC relay, if \
+                         enabled, still proceeds.)",
+                        config.icecast_relay
+                    );
                 }
-            });
-
-            info!("Icecast relay running in background; continuing with DASDEC relay.");
+            }
         }
 
         if should_relay_dasdec && !dasdec_url.trim().is_empty() {
@@ -422,5 +574,45 @@ impl RelayState {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icecast_source_to_listener_url;
+
+    #[test]
+    fn derives_listener_url_stripping_credentials() {
+        assert_eq!(
+            icecast_source_to_listener_url(
+                "icecast://source:hackme@stream.example.com:8000/eas.mp3"
+            )
+            .as_deref(),
+            Some("http://stream.example.com:8000/eas.mp3")
+        );
+    }
+
+    #[test]
+    fn derives_listener_url_without_userinfo_or_path() {
+        assert_eq!(
+            icecast_source_to_listener_url("icecast://host:8000").as_deref(),
+            Some("http://host:8000")
+        );
+    }
+
+    #[test]
+    fn maps_ssl_scheme_to_https() {
+        assert_eq!(
+            icecast_source_to_listener_url("icecast+ssl://u:p@host:8443/mount").as_deref(),
+            Some("https://host:8443/mount")
+        );
+    }
+
+    #[test]
+    fn passes_through_plain_http_listener_url() {
+        assert_eq!(
+            icecast_source_to_listener_url("http://host:8000/mount").as_deref(),
+            Some("http://host:8000/mount")
+        );
     }
 }

@@ -14,7 +14,6 @@ pub struct CapEndpoint {
     pub url: String,
 }
 
-/// Output format used by STORAGE_SAVER_MODE when transcoding finished recordings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingFormat {
     Mp3,
@@ -53,10 +52,6 @@ pub struct Config {
     pub apprise_config_path: String,
     pub should_relay_icecast: bool,
     pub icecast_relay: String,
-    // Built-in Icecast continuous alert stream (separate from the external
-    // SHOULD_RELAY_ICECAST relay above). When enabled, a persistent source keeps
-    // a mountpoint on the container's bundled Icecast up 24/7 and streams every
-    // alert recording live, queued as they arrive.
     pub icecast_alert_stream_enabled: bool,
     pub icecast_alert_host: String,
     pub icecast_alert_port: u16,

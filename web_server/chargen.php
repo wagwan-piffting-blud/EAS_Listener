@@ -25,11 +25,6 @@ if(!isset($_SESSION['authed'])) {
 }
 
 else {
-    // Resolve the browser-facing URL of the built-in continuous alert stream.
-    // An explicit ICECAST_ALERT_PUBLIC_URL wins (needed behind reverse proxies /
-    // HTTPS); otherwise derive it from the request host, port, and mount when the
-    // stream is enabled. Empty means "no live stream" and chargen falls back to
-    // per-alert recording playback.
     $icecastStreamUrl = trim(app_string("ICECAST_ALERT_PUBLIC_URL", ""));
     if ($icecastStreamUrl === "" && app_bool("ICECAST_ALERT_STREAM_ENABLED", false)) {
         $httpHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');

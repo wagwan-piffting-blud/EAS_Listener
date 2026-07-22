@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_RUNTIME_DIR=/run/user/1000
 ENV TTS_ENGINE=speechify
 
-ARG VERSION=2026.07.01
+ARG VERSION=2026.07.21
 ARG ASSET_NAME="spfy-linux-x86-${VERSION}.tar.gz"
 ARG ASSET_SHA256="d1d5e6459aeb61d2aed16a134cdd12e9e93fb77f161103b2819df7aa7385e678"
 # Port the bundled Icecast server listens on / is exposed for the 24/7 alert
@@ -45,14 +45,14 @@ COPY ./Cargo.toml /app/Cargo.toml
 
 WORKDIR /app
 
-RUN curl -fL --retry 5 --retry-delay 2 -o "/tmp/${ASSET_NAME}" "https://github.com/wagwan-piffting-blud/Speechify_EAS_Listener/releases/download/${VERSION}/${ASSET_NAME}" \
+RUN curl -fL --retry 5 --retry-delay 2 -o "/tmp/${ASSET_NAME}" "https://github.com/wagwan-piffting-blud/Speechify/releases/download/${VERSION}/${ASSET_NAME}" \
     && echo "${ASSET_SHA256}  /tmp/${ASSET_NAME}" | sha256sum -c - \
     && tar -xzf "/tmp/${ASSET_NAME}" -C /usr/local/bin --strip-components=2 "spfy-linux-x86-${VERSION}/bin/spfy_synth" \
     && rm -f "/tmp/${ASSET_NAME}" \
     && chmod +x /usr/local/bin/spfy_synth /docker_entrypoint.sh \
     && chmod -R 777 /data /var/www/html
 
-RUN git clone --no-checkout --depth 1 --filter=blob:none https://github.com/wagwan-piffting-blud/Speechify_EAS_Listener.git /tmp/voices \
+RUN git clone --no-checkout --depth 1 --filter=blob:none https://github.com/wagwan-piffting-blud/Speechify.git /tmp/voices \
     && git -C /tmp/voices sparse-checkout set --no-cone en-US/tom \
     && git -C /tmp/voices checkout \
     && mkdir -p /app/voices/tom \

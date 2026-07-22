@@ -1,4 +1,10 @@
-# v0.30.0: Released 2026-07-13
+v0.31.0: Released 2026-07-22
+
+- Some small changes across the board, linting, comment removal, etc.
+
+---
+
+v0.30.0: Released 2026-07-13
 
 - Happy version 30! I am introducing a new CHANGES.md file to keep track of all the changes made in EAS_Listener. This will help maintain a clear history of updates and improvements made to EAS_Listener. EAS Tools uses the same kind of CHANGES.md file to keep track of changes made in EAS Tools. The CHANGES.md file will be updated with each new version, and it will include a summary of the changes made, along with the version number and date of the release.
 

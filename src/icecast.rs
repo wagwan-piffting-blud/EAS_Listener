@@ -32,37 +32,16 @@ use tracing::{info, warn};
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u32 = 1;
-/// Milliseconds of audio written per pacing tick.
 const CHUNK_MS: u64 = 100;
-/// Samples per pacing tick (per channel).
 const CHUNK_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * CHUNK_MS as usize;
-/// Bytes per pacing tick (s16le, mono).
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 2;
-/// Gap between consecutive queued alerts (1 second, in bytes). Filled with the
-/// same comfort noise as idle periods rather than digital silence.
 const INTER_ALERT_GAP_BYTES: usize = (SAMPLE_RATE as usize) * 2;
-/// How long to wait between source (re)connection attempts.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
-
-/// Peak amplitude (s16) of the idle "comfort noise" floor — about -62 dBFS RMS,
-/// a barely-perceptible broadband hiss. Pure digital silence makes the Vorbis
-/// encoder emit almost no data, so the client's burst/prebuffer represents a
-/// huge *duration* of audio and playback ends up minutes behind the live edge
-/// (then stalls and mangles the timeline when a real alert finally arrives). A
-/// steady low noise floor keeps a normal bitrate so the stream stays live and
-/// smooth. Lower this for an even fainter floor (e.g. 16 ~= -68 dBFS); raise it
-/// if players still buffer during quiet periods.
 const COMFORT_NOISE_PEAK: i16 = 32;
-/// Seed for the comfort-noise PRNG (any non-zero constant; deterministic is fine).
 const NOISE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 static ALERT_STREAM_TX: OnceCell<mpsc::UnboundedSender<PathBuf>> = OnceCell::new();
 
-/// Queue an alert recording for live streaming on the built-in Icecast mount.
-///
-/// Cheap and non-blocking. A no-op if the stream task has not initialized yet
-/// (e.g. very early startup). When the stream is disabled the supervisor still
-/// drains and discards these, so callers never need to know the feature state.
 pub fn enqueue_alert_audio(path: PathBuf) {
     if let Some(tx) = ALERT_STREAM_TX.get() {
         if let Err(err) = tx.send(path) {
@@ -71,7 +50,6 @@ pub fn enqueue_alert_audio(path: PathBuf) {
     }
 }
 
-/// Decode any audio file to raw 48 kHz mono s16le PCM bytes via ffmpeg.
 async fn decode_to_pcm(path: &Path) -> Result<Vec<u8>> {
     let output = Command::new("ffmpeg")
         .arg("-nostdin")
@@ -102,14 +80,12 @@ async fn decode_to_pcm(path: &Path) -> Result<Vec<u8>> {
     }
 
     let mut bytes = output.stdout;
-    // Keep only whole samples so downstream chunking stays sample-aligned.
     if bytes.len() % 2 == 1 {
         bytes.pop();
     }
     Ok(bytes)
 }
 
-/// Fast, non-cryptographic PRNG (xorshift64*) used to generate comfort noise.
 #[inline]
 fn next_rand(state: &mut u64) -> u64 {
     let mut x = *state;
@@ -120,7 +96,6 @@ fn next_rand(state: &mut u64) -> u64 {
     x.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
-/// Fill a byte slice (interpreted as s16le mono) with low-level white noise.
 fn write_comfort_noise(dst: &mut [u8], state: &mut u64) {
     let span = COMFORT_NOISE_PEAK as u64 * 2 + 1;
     for pair in dst.chunks_exact_mut(2) {
@@ -129,14 +104,12 @@ fn write_comfort_noise(dst: &mut [u8], state: &mut u64) {
     }
 }
 
-/// Allocate one pacing-tick chunk filled with comfort noise.
 fn comfort_noise_chunk(state: &mut u64) -> Vec<u8> {
     let mut out = vec![0u8; CHUNK_BYTES];
     write_comfort_noise(&mut out, state);
     out
 }
 
-/// Spawn the persistent ffmpeg source client that publishes to the mount.
 fn spawn_encoder(config: &Config) -> Result<(Child, ChildStdin)> {
     let url = format!(
         "icecast://{}:{}@{}:{}{}",
@@ -194,12 +167,6 @@ fn spawn_encoder(config: &Config) -> Result<(Child, ChildStdin)> {
     Ok((child, stdin))
 }
 
-/// Supervise the persistent Icecast alert stream for the process lifetime.
-///
-/// Owns the alert queue receiver, keeps the source connected (reconnecting with
-/// backoff), and paces PCM to the encoder: silence when idle, decoded alert
-/// audio when queued. Reacts to configuration reloads (enable/disable, mount,
-/// credentials) without needing a restart.
 pub async fn run_alert_stream(
     mut config: Config,
     mut reload_rx: BroadcastReceiver<Config>,
@@ -218,15 +185,12 @@ pub async fn run_alert_stream(
     let mut last_spawn_attempt: Option<Instant> = None;
     let mut spawn_failures: u64 = 0;
 
-    // Raw s16le bytes of the alert currently being streamed, and read cursor.
     let mut current: Option<Vec<u8>> = None;
     let mut pos = 0usize;
-    // Remaining silence (bytes) to emit after an alert before pulling the next.
     let mut gap_remaining = 0usize;
     let mut logged_disabled = false;
 
     loop {
-        // Drain any pending configuration reloads.
         loop {
             match reload_rx.try_recv() {
                 Ok(new_config) => {
@@ -240,7 +204,7 @@ pub async fn run_alert_stream(
                             != config.icecast_alert_source_password;
                     config = new_config;
                     if restart_needed {
-                        encoder = None; // kill_on_drop terminates the old source
+                        encoder = None;
                         last_spawn_attempt = None;
                         spawn_failures = 0;
                     }
@@ -263,8 +227,6 @@ pub async fn run_alert_stream(
             pos = 0;
             gap_remaining = 0;
 
-            // Idle until configuration changes, discarding any queued alerts so
-            // that senders never block on the unbounded queue.
             tokio::select! {
                 reload = reload_rx.recv() => {
                     match reload {
@@ -287,7 +249,6 @@ pub async fn run_alert_stream(
         }
         logged_disabled = false;
 
-        // Reap a source process that has exited.
         if let Some((child, _)) = encoder.as_mut() {
             if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
                 warn!("Icecast source process exited; will reconnect.");
@@ -295,7 +256,6 @@ pub async fn run_alert_stream(
             }
         }
 
-        // (Re)connect the source with backoff.
         if encoder.is_none() {
             let ready = last_spawn_attempt
                 .map(|attempted| attempted.elapsed() >= RECONNECT_BACKOFF)
@@ -315,8 +275,6 @@ pub async fn run_alert_stream(
                     }
                     Err(err) => {
                         spawn_failures += 1;
-                        // Log the first failure and then only occasionally to
-                        // avoid flooding when Icecast is simply not running.
                         if spawn_failures == 1 || spawn_failures.is_multiple_of(12) {
                             warn!(
                                 "Failed to start Icecast alert source (attempt {}): {}. Retrying every {}s. Is the built-in Icecast running (START_ICECAST=true)?",
@@ -332,8 +290,6 @@ pub async fn run_alert_stream(
 
         interval.tick().await;
 
-        // No source yet: idle this tick. Queued alerts and the in-flight alert
-        // are preserved so nothing is lost across a reconnect.
         let Some((_, stdin)) = encoder.as_mut() else {
             continue;
         };
@@ -347,8 +303,6 @@ pub async fn run_alert_stream(
                 pos = 0;
                 gap_remaining = INTER_ALERT_GAP_BYTES;
             }
-            // Pad a short final chunk with comfort noise (not silence) so the
-            // bitrate never dips at an alert's tail.
             if out.len() < CHUNK_BYTES {
                 let start = out.len();
                 out.resize(CHUNK_BYTES, 0);
@@ -403,7 +357,6 @@ mod tests {
         }
         assert!(any_nonzero, "comfort noise must not be pure silence");
 
-        // The PRNG advances, so a subsequent chunk differs (no static loop seam).
         let next = comfort_noise_chunk(&mut state);
         assert_ne!(chunk, next);
     }

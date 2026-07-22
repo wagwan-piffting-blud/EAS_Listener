@@ -40,14 +40,7 @@ const RELOAD_SIGNAL_PATH: &str = "/app/reload_signal";
 const TEST_ALERT_SIGNAL_PATH: &str = "/app/test_alert_signal";
 const WEB_RUNTIME_CONFIG_PATH: &str = "/app/web_config.json";
 const WEB_RUNTIME_CONFIG_FALLBACK_PATH: &str = "web_server/web_config.json";
-
-// Synthetic stream label used for dashboard-triggered test alerts. It never
-// matches a real Icecast source, so it cannot collide with (or prematurely end)
-// a genuine alert's recording.
 const TEST_ALERT_STREAM_ID: &str = "Manual Test Alert";
-// Seconds of synthetic recording to capture before we inject an end-of-message
-// so the recording finalizes and the webhook fires promptly instead of waiting
-// out the full recording timeout.
 const TEST_ALERT_RECORDING_SECS: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,9 +209,6 @@ fn build_web_runtime_config_payload(
         );
     }
 
-    // Consumer-facing metadata for the built-in continuous alert stream so the
-    // dashboard/character-generator can play the live mount. The source password
-    // is deliberately NOT exposed here.
     map.insert(
         "ICECAST_ALERT_STREAM_ENABLED".to_string(),
         serde_json::Value::Bool(config.icecast_alert_stream_enabled),
@@ -495,31 +485,19 @@ async fn run_reload_handler(
     }
 }
 
-// Builds a well-formed SAME/EAS header for a Required Weekly Test (RWT). The
-// issuance timestamp (JJJHHMM) is always UTC/Zulu per the SAME spec, and the
-// national FIPS code (000000) keeps the alert relevant regardless of the
-// configured WATCHED_FIPS so the test always surfaces on the dashboard.
 fn build_test_alert_header() -> String {
     use chrono::{Datelike, Timelike};
 
     let now = chrono::Utc::now();
     let issuance = format!("{:03}{:02}{:02}", now.ordinal(), now.hour(), now.minute());
 
-    // ZCZC-ORG-EEE-PSSCCC+TTTT-JJJHHMM-LLLLLLLL-
-    // EAS originator, RWT event, national FIPS, 15-minute purge, 8-char station.
     format!("ZCZC-EAS-RWT-000000+0015-{issuance}-EASLSTNR-")
 }
 
-// Watches for a dashboard-triggered test alert signal and injects a synthetic
-// RWT into the exact same channel the audio decoder feeds, so the entire alert
-// pipeline (dedup, filtering, decode/logging, DB, dashboard broadcast,
-// recording, webhook, and relay) is exercised end to end.
 async fn run_test_alert_handler(
     tx: mpsc::Sender<(String, String, String, String, Duration, String)>,
     nnnn_tx: broadcast::Sender<String>,
 ) -> Result<()> {
-    // Clear any stale signal left over from a previous run so we don't fire a
-    // spurious test alert on startup.
     if let Err(err) = tokio::fs::remove_file(TEST_ALERT_SIGNAL_PATH).await {
         if err.kind() != ErrorKind::NotFound {
             warn!("Failed to clear stale test alert signal file: {}", err);
@@ -564,12 +542,12 @@ async fn run_test_alert_handler(
         info!("Manual test alert triggered from dashboard: {}", raw_header);
 
         let alert = (
-            "RWT".to_string(),                // event code
-            String::new(),                    // locations (derived from FIPS on decode)
-            "EAS".to_string(),                // originator
-            raw_header,                       // raw SAME header
-            Duration::from_secs(15 * 60),     // purge time (matches +0015)
-            TEST_ALERT_STREAM_ID.to_string(), // synthetic source stream
+            "RWT".to_string(),
+            String::new(),
+            "EAS".to_string(),
+            raw_header,
+            Duration::from_secs(15 * 60),
+            TEST_ALERT_STREAM_ID.to_string(),
         );
 
         if let Err(err) = tx.send(alert).await {
@@ -577,10 +555,6 @@ async fn run_test_alert_handler(
             continue;
         }
 
-        // A synthetic alert has no live audio source, so nothing will ever emit
-        // a natural NNNN (end-of-message). Broadcast one ourselves after a short
-        // capture window so the recording finalizes and the webhook fires
-        // promptly. The unique stream id ensures only the test recording stops.
         let nnnn_tx = nnnn_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(TEST_ALERT_RECORDING_SECS)).await;
@@ -601,15 +575,11 @@ mod tests {
         assert!(header.starts_with("ZCZC-EAS-RWT-000000+0015-"));
         assert!(header.ends_with("-EASLSTNR-"));
 
-        // Must decode cleanly so the full pipeline treats it exactly like a real
-        // alert instead of falling into the "EAS decode failed" branch.
         let parsed_json =
             crate::e2t_ng::parse_header_json(&header).expect("test alert header should parse");
         assert!(parsed_json.contains("RWT"));
         assert!(parsed_json.contains("000000"));
 
-        // Recording relies on regenerating the header's SAME tones; ensure the
-        // synthesizer also accepts it.
         crate::header::generate_same_header_samples(&header, 44_100, 0.5)
             .expect("test alert header should generate SAME samples");
     }
