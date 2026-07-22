@@ -25,9 +25,13 @@ jobs:
           # DEPRECATED: built from the same Dockerfile with VARIANT=lite purely so
           # existing `:latest-lite` pulls keep resolving. Delete this matrix entry
           # (and stop publishing the tag) after v0.32.0.
+          #
+          # amd64 only, deliberately: no ARM `-lite` image was ever published, so
+          # no ARM user of this tag can exist. Building ARM legs for a deprecated
+          # tag would triple its cost to serve nobody. ARM users get `:latest`.
           - variant: lite
             tag_suffix: "-lite"
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64
     steps:
       - uses: actions/checkout@v4
 

@@ -1,11 +1,39 @@
 # Stage 1: Builder
-FROM rust:1-slim AS builder
+#
+# Pinned to BUILDPLATFORM and cross-compiled, NOT emulated. Without the
+# --platform pin, buildx rebuilds this stage once per target platform and runs
+# rustc under QEMU for the ARM legs, where compiling 300+ crates is roughly an
+# order of magnitude slower -- it turns a 3-4 minute build into a 30+ minute one.
+# Cross-compiling keeps every leg running at native x86-64 speed.
+FROM --platform=$BUILDPLATFORM rust:1-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y pkg-config ffmpeg libssl-dev build-essential libc6 && rm -rf /var/lib/apt/lists/*
+# TARGETARCH/BUILDARCH are injected automatically by buildx.
+ARG TARGETARCH
+ARG BUILDARCH
+
+# Cross toolchain plus the *target's* OpenSSL headers. openssl-sys (pulled in by
+# reqwest -> native-tls) links against libssl, and rusqlite's `bundled` feature
+# compiles sqlite3.c, so both a cross gcc and target-arch dev headers are needed.
+# Debian serves every architecture from the same mirrors, so plain multiarch works.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) DEB_ARCH=amd64; CROSS_PKG="" ;; \
+        arm64) DEB_ARCH=arm64; CROSS_PKG="gcc-aarch64-linux-gnu" ;; \
+        arm)   DEB_ARCH=armhf; CROSS_PKG="gcc-arm-linux-gnueabihf" ;; \
+        *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    if [ "${DEB_ARCH}" != "$(dpkg --print-architecture)" ]; then \
+        dpkg --add-architecture "${DEB_ARCH}"; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        pkg-config build-essential ffmpeg ${CROSS_PKG} \
+        "libssl-dev:${DEB_ARCH}" "libc6-dev:${DEB_ARCH}"; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 
@@ -15,20 +43,31 @@ COPY src ./src
 COPY include ./include
 COPY tests ./tests
 
-# TARGETARCH/BUILDARCH are injected automatically by buildx. The test suite only
-# runs on the native leg of the matrix: under QEMU emulation (arm64 on an amd64
-# runner) it would roughly double an already slow build for no extra signal,
-# since the exact same tests already ran natively on amd64.
-ARG TARGETARCH
-ARG BUILDARCH
-
-RUN touch -c src/main.rs \
-    && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
-           cargo test --release --locked; \
-       else \
-           echo "Skipping cargo test (emulated build: build=${BUILDARCH} target=${TARGETARCH})"; \
-       fi \
-    && cargo build --release --locked
+# The test suite only runs on the native leg. A cross-built binary cannot execute
+# on the builder, and the same tests already run natively on the amd64 leg.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-gnu; \
+               export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
+               export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc; \
+               export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig ;; \
+        arm)   RUST_TARGET=armv7-unknown-linux-gnueabihf; \
+               export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc; \
+               export CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc; \
+               export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig ;; \
+    esac; \
+    export PKG_CONFIG_ALLOW_CROSS=1; \
+    export PKG_CONFIG_SYSROOT_DIR=/; \
+    rustup target add "${RUST_TARGET}"; \
+    touch -c src/main.rs; \
+    if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
+        cargo test --release --locked; \
+    else \
+        echo "Skipping cargo test (cross build: build=${BUILDARCH} target=${TARGETARCH})"; \
+    fi; \
+    cargo build --release --locked --target "${RUST_TARGET}"; \
+    cp "target/${RUST_TARGET}/release/eas_listener" /usr/local/bin/eas_listener
 
 # ----------------------------------------------------------------------------------------- #
 
@@ -156,7 +195,7 @@ RUN set -eu; \
 
 RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:icecast2 /etc/icecast2 /var/log/icecast2
 
-COPY --from=builder /usr/src/app/target/release/eas_listener /usr/local/bin/eas_listener
+COPY --from=builder /usr/local/bin/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
 COPY ./nginx.conf /etc/nginx/sites-available/default
 COPY ./web_server/ /var/www/html
