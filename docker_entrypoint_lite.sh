@@ -38,10 +38,6 @@ if [ "${START_ICECAST:-false}" = "true" ] || [ "${ICECAST_ALERT_STREAM_ENABLED:-
         exit 1
     fi
 
-    # Render a runtime copy of the config with the desired listen port so we
-    # never mutate the bundled (or user-mounted) icecast.xml. This keeps the
-    # Icecast server port in sync with ICECAST_ALERT_PORT, which the Rust alert
-    # source connects to and the dashboard derives its stream URL from.
     ICECAST_LISTEN_PORT="${ICECAST_ALERT_PORT:-8000}"
     ICECAST_RUNTIME_CONFIG="/app/icecast.runtime.xml"
     sed '0,/<port>[0-9]*<\/port>/s//<port>'"$ICECAST_LISTEN_PORT"'<\/port>/' "$ICECAST_CONFIG" > "$ICECAST_RUNTIME_CONFIG"

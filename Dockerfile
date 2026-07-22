@@ -28,12 +28,10 @@ ENV TTS_ENGINE=speechify
 
 ARG VERSION=2026.07.21
 ARG ASSET_NAME="spfy-linux-x86-${VERSION}.tar.gz"
-ARG ASSET_SHA256="d1d5e6459aeb61d2aed16a134cdd12e9e93fb77f161103b2819df7aa7385e678"
-# Port the bundled Icecast server listens on / is exposed for the 24/7 alert
-# stream. Keep in sync with ICECAST_ALERT_PORT in config.json and .env.
+ARG ASSET_SHA256="e9c2fe8557f4d80f56f4740babbf914c1b492bb5c209eff9f1a1d99ded1f1ad1"
 ARG ICECAST_ALERT_PORT=8000
 
-RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && mkdir -p /var/lib/apt/lists/partial && dpkg --add-architecture i386 && apt-get update && apt-get install -y --no-install-recommends wget libssl3 libc6:i386 ca-certificates gnupg2 git bash nginx jq ffmpeg curl bash apprise p7zip-full tmux php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip php-sqlite3 icecast2 liquidsoap && rm -rf /var/lib/apt/lists/* && chsh -s /bin/bash && mkdir -p /data /var/www/html /app
+RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 && mkdir -p /var/lib/apt/lists/partial && dpkg --add-architecture i386 && apt-get update && apt-get install -y --no-install-recommends libssl3 libc6:i386 ca-certificates git bash nginx jq ffmpeg curl apprise php-fpm php-cli php-sqlite3 icecast2 && rm -rf /var/lib/apt/lists/* && chsh -s /bin/bash && mkdir -p /data /var/www/html /app
 
 RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:icecast2 /etc/icecast2 /var/log/icecast2
 

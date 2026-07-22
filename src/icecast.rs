@@ -1,22 +1,3 @@
-//! Continuous Icecast alert stream.
-//!
-//! This module is entirely separate from the external Icecast relay in
-//! [`crate::relay`] (which streams a single finished recording, once, to a
-//! user-supplied *external* Icecast server via `SHOULD_RELAY_ICECAST`).
-//!
-//! Here we keep a single, persistent source client connected to the container's
-//! *bundled* Icecast so a mountpoint stays up 24/7. When no alert is playing we
-//! feed a faint comfort-noise floor (not digital silence — see
-//! [`COMFORT_NOISE_PEAK`]) so the encoder keeps a steady bitrate and players stay
-//! at the live edge; when alerts arrive they are queued and streamed
-//! back-to-back with a short gap between them.
-//!
-//! The engine is a long-lived `ffmpeg` process reading raw 48 kHz mono s16le PCM
-//! from stdin and publishing Ogg/Vorbis to the mount. A pacing loop writes one
-//! ~100 ms chunk per wall-clock tick, so the input (and therefore the output)
-//! stays real-time. Alert recordings are decoded to matching PCM with a
-//! short-lived `ffmpeg` invocation and streamed from memory.
-
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use once_cell::sync::OnceCell;

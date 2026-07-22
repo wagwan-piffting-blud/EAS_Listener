@@ -35,9 +35,7 @@ ARG ICECAST_ALERT_PORT=8000
 RUN mkdir -p /run/user/1000 && chown 1000:1000 /run/user/1000 \
     && mkdir -p /var/lib/apt/lists/partial \
     && apt-get update && apt-get install -y --no-install-recommends \
-       wget libssl3 ca-certificates gnupg2 git bash nginx jq ffmpeg curl apprise \
-       php-fpm php-cli php-mysql php-curl php-gd php-mbstring php-xml php-zip php-sqlite3 \
-       icecast2 liquidsoap \
+    wget libssl3 ca-certificates bash nginx jq ffmpeg curl apprise php-fpm php-cli php-sqlite3 icecast2 espeak-ng \
     && rm -rf /var/lib/apt/lists/* \
     && chsh -s /bin/bash \
     && mkdir -p /data /var/www/html /app /app/piper

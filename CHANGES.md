@@ -1,6 +1,6 @@
 v0.31.0: Released 2026-07-22
 
-- Some small changes across the board, linting, comment removal, etc.
+- Some small changes across the board, linting, comment removal, etc. to reduce the size of the codebase and improve readability.
 
 ---
 
