@@ -8,6 +8,46 @@
 
 ---
 
+## The `-lite` image is deprecated
+
+**`ghcr.io/wagwan-piffting-blud/eas-listener:latest-lite` will stop being published after v0.32.0.** There is now a single unified image that covers both use cases.
+
+Historically `latest` shipped Speechify Tom and `latest-lite` shipped Piper, because Speechify dragged in a large dependency tree. After pruning a pile of packages that were installed but never invoked (Liquidsoap, p7zip, tmux, gnupg2, wget, and six unused PHP extensions), the two images ended up roughly the same size — the Piper voice model alone is larger than the entire Speechify payload. Keeping two near-identical Dockerfiles in sync stopped being worth it.
+
+**To migrate, change one line in your `docker-compose.yml`:**
+
+```yaml
+image: ghcr.io/wagwan-piffting-blud/eas-listener:latest
+```
+
+Then, if you want to keep using Piper, set the engine explicitly in your `config.json` (or `.env`):
+
+```json
+"TTS_ENGINE": "piper"
+```
+
+If you do not set `TTS_ENGINE`, the container picks one at startup based on what the image actually contains: Speechify Tom where it is available, Piper everywhere else. Nothing silently breaks — if you ask for an engine the image does not have, the entrypoint logs a warning, falls back to Piper, and the dashboard shows a banner explaining what happened.
+
+Running the deprecated `-lite` tag also raises a banner on the dashboard and a warning in the container logs until you migrate.
+
+---
+
+## Supported architectures
+
+| Platform | Speechify Tom | Piper | espeak-ng | Typical hardware |
+| --- | --- | --- | --- | --- |
+| `linux/amd64` | ✅ | ✅ | ✅ | x86-64 servers, NAS, mini PCs |
+| `linux/arm64` | ✅ | ✅ | ✅ | Raspberry Pi 4/5 (64-bit OS), Apple silicon |
+| `linux/arm/v7` | ✅ | ✅ | ✅ | Raspberry Pi 2/3, 32-bit Pi OS |
+
+ARM support is new as of v0.32.0 — `latest` is now a multi-arch manifest, so ARM hosts pull the right image automatically with no config change.
+
+**Every engine is available on every platform.** Speechify release 2026.07.22 ships native `x86_64`, `arm64`, and `armv7` Linux builds, and all of them — plus the legacy 32-bit `x86` build — synthesize *byte-identical* audio. A Raspberry Pi 2 and an x86-64 server produce the same WAV, sample for sample, so there is no voice drift between deployments.
+
+amd64 now uses the native `x86_64` build rather than the legacy 32-bit one, so the image no longer enables i386 multiarch at all.
+
+---
+
 ## Features
 
 - Real-time EAS/SAME message decoding from multiple audio sources (primarily Icecast/Shoutcast streams)

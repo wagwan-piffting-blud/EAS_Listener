@@ -132,6 +132,7 @@ if (!isset($_SESSION['authed'])) {
                 </div>
             </div>
         </header>
+        <?php include __DIR__ . "/notices.php"; ?>
         <main>
             <section id="streamSection">
                 <h2>

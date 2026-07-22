@@ -361,6 +361,62 @@ a {
     color: var(--muted);
 }
 
+/* Runtime notices (deprecated image, TTS engine fallback). Rendered by
+   notices.php between the sticky header and main, using main's horizontal
+   padding so the bar lines up with the sections below it. */
+.notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: clamp(1rem, 4vw, 3rem) clamp(1rem, 4vw, 3rem) 0;
+    padding: 0.85rem 1.1rem;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
+.notice + .notice {
+    margin-top: 0.75rem;
+}
+
+.notice-badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.notice-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.notice-deprecation {
+    border-color: rgba(255, 107, 107, 0.5);
+    background: rgba(255, 107, 107, 0.12);
+}
+
+.notice-deprecation .notice-badge {
+    background: var(--error);
+    color: #1b0d0d;
+}
+
+.notice-warning {
+    border-color: rgba(255, 179, 71, 0.5);
+    background: rgba(255, 179, 71, 0.12);
+}
+
+.notice-warning .notice-badge {
+    background: var(--warn);
+    color: #2a1c05;
+}
+
 .stream-grid {
     display: grid;
     gap: 0.9rem;

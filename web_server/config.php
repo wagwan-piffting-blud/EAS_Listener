@@ -137,6 +137,60 @@ if (!function_exists("app_monitoring_api_base")) {
     }
 }
 
+if (!function_exists("app_image_info")) {
+    /**
+     * Runtime image metadata written by docker_entrypoint.sh on every boot
+     * (variant, arch, resolved TTS engine, any deprecation notice). Read from a
+     * dedicated file rather than $APP_CONFIG because that loader stops at the
+     * first readable source, which may be a user-supplied config.json.
+     */
+    function app_image_info(): array {
+        static $cached = null;
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $cached = [];
+        $infoPath = __DIR__ . "/image_info.json";
+        if (is_readable($infoPath)) {
+            $rawPayload = @file_get_contents($infoPath);
+            if ($rawPayload !== false && trim($rawPayload) !== "") {
+                $decoded = json_decode($rawPayload, true);
+                if (is_array($decoded)) {
+                    $cached = $decoded;
+                }
+            }
+        }
+
+        return $cached;
+    }
+}
+
+if (!function_exists("app_image_info_string")) {
+    function app_image_info_string(string $key): string {
+        $value = app_image_info()[$key] ?? "";
+        return is_string($value) ? trim($value) : "";
+    }
+}
+
+if (!function_exists("app_image_variant")) {
+    function app_image_variant(): string {
+        return app_image_info_string("variant");
+    }
+}
+
+if (!function_exists("app_deprecation_notice")) {
+    function app_deprecation_notice(): string {
+        return app_image_info_string("deprecation_notice");
+    }
+}
+
+if (!function_exists("app_tts_engine_fallback_reason")) {
+    function app_tts_engine_fallback_reason(): string {
+        return app_image_info_string("tts_engine_fallback_reason");
+    }
+}
+
 if (!function_exists("app_shared_state_dir")) {
     function app_shared_state_dir(): string {
         return rtrim(app_string("SHARED_STATE_DIR", ""), "/\\");

@@ -1,6 +1,6 @@
 services:
     eas_listener:
-        image: ghcr.io/wagwan-piffting-blud/eas-listener:latest # Use "latest" for the most recent stable release, or "latest-lite" for a smaller image with Piper/Espeak TTS only (no Speechify Tom support, but much lighter on resources and faster to pull!)
+        image: ghcr.io/wagwan-piffting-blud/eas-listener:latest # Multi-arch (amd64 + arm64) and ships every TTS engine: Speechify Tom (amd64 only), Piper, and espeak-ng. Pick one with TTS_ENGINE in config.json; leave it unset to auto-select. The "latest-lite" tag is DEPRECATED and will stop being published after v0.32.0 -- see the README for the one-line migration.
         container_name: eas_listener
         restart: unless-stopped
         volumes:

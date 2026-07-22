@@ -1,3 +1,14 @@
 .git
 .gitignore
+.github/
 target/
+
+# Local runtime state. `data/` in particular holds recorded alert WAVs, which
+# would otherwise be shipped to the builder as build context on every leg of the
+# multi-arch matrix.
+data/
+docker-compose.yml
+docker-compose-local.yml
+dashboard.png
+web_server/image_info.json
+web_server/web_config.json

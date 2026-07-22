@@ -14,19 +14,42 @@ jobs:
       packages: write
       contents: read
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - dockerfile: Dockerfile
+          # Unified image. On amd64 it carries Speechify Tom + Piper + espeak-ng;
+          # on arm64 it carries Piper + espeak-ng (spfy is 32-bit x86 only).
+          - variant: full
             tag_suffix: ""
-          - dockerfile: Dockerfile.lite
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # DEPRECATED: built from the same Dockerfile with VARIANT=lite purely so
+          # existing `:latest-lite` pulls keep resolving. Delete this matrix entry
+          # (and stop publishing the tag) after v0.32.0.
+          - variant: lite
             tag_suffix: "-lite"
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build . --file ${{ matrix.dockerfile }} --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}"
+
+      # Required to build the arm64/armv7 legs on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to registry
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Push image
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: meta
         run: |
           IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
           IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
@@ -35,5 +58,20 @@ jobs:
           [ "$VERSION" == "main" ] && VERSION=latest
           echo IMAGE_ID=$IMAGE_ID
           echo VERSION=${VERSION}${{ matrix.tag_suffix }}
-          docker tag $IMAGE_NAME $IMAGE_ID:${VERSION}${{ matrix.tag_suffix }}
-          docker push $IMAGE_ID:${VERSION}${{ matrix.tag_suffix }}
+          echo "tag=${IMAGE_ID}:${VERSION}${{ matrix.tag_suffix }}" >> "$GITHUB_OUTPUT"
+
+      # Multi-platform images cannot be loaded into the local daemon, so pull
+      # requests build-and-verify only; pushes to main publish the manifest list.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platforms }}
+          build-args: |
+            VARIANT=${{ matrix.variant }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tag }}
+          labels: runnumber=${{ github.run_id }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
