@@ -13,6 +13,7 @@
     const LOCATION_COUNTY_PATTERN = /\bCounty\b(?=,|$)/gi;
     const CAP_HEADER_SOURCE_MARKER = "IPAWSCAP";
     const WEA_HEADER_SOURCE_MARKER = "IPAWSWEA";
+    const CAPCP_HEADER_SOURCE_MARKER = "NAADSCAP";
     const STATE_AND_TERRITORY_NAMES = Object.freeze({
         AL: "Alabama",
         AK: "Alaska",
@@ -210,6 +211,9 @@
         if (rawHeader.includes(WEA_HEADER_SOURCE_MARKER)) {
             return "WEA";
         }
+        if (rawHeader.includes(CAPCP_HEADER_SOURCE_MARKER)) {
+            return "CAP-CP";
+        }
         if (rawHeader.includes(CAP_HEADER_SOURCE_MARKER)) {
             return "CAP";
         }
@@ -218,7 +222,7 @@
 
     function isCapAlert(alert) {
         const source = sourceForAlert(alert);
-        return source === "CAP" || source === "WEA";
+        return source === "CAP" || source === "WEA" || source === "CAP-CP";
     }
 
     function locationCodesForAlert(alert) {
@@ -259,7 +263,7 @@
         if (recordingState !== "ready") return "";
         const fileName = recordingFileNameForAlert(alert);
         if (!fileName) return "";
-        return `archive.php?recording_name=${encodeURIComponent(fileName)}`;
+        return window.apiRecordingUrl({ name: fileName });
     }
 
     function recordingStateLabel(recordingState) {
@@ -630,16 +634,11 @@
 
     async function fetchAudioUrl() {
         try {
-            const response = await fetch(`/archive.php?latest_id=true`, {
-                headers: {
-                    Authorization: `Bearer ${window.TOKEN}`,
-                },
-            });
+            const response = await window.apiFetch("/api/alerts/latest-recording-id");
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
-            const text = await response.text();
-            const id = parseInt(text.trim(), 10);
+            const id = parseInt(await response.json(), 10);
             if (isNaN(id) || id < 0) return null;
             return id;
         } catch (err) {
@@ -649,14 +648,9 @@
     }
 
     async function isAudioAvailable(src) {
-        const headers = {
-            Authorization: `Bearer ${window.TOKEN}`,
-        };
-
         try {
-            const response = await fetch(`/${src}`, {
+            const response = await fetch(src, {
                 method: "HEAD",
-                headers,
                 cache: "no-store",
             });
 
@@ -846,7 +840,7 @@
                     limitedTargets,
                     AUDIO_PROBE_CONCURRENCY,
                     async ({ key, recordingId }) => {
-                        const src = `archive.php?recording_id=${recordingId}`;
+                        const src = window.apiRecordingUrl({ id: recordingId });
                         const available = await isAudioAvailable(src);
                         if (available) {
                             markRecordingIdProbeSuccess(recordingId);
@@ -1166,6 +1160,16 @@
 
         if (section) section.style.display = "";
 
+        const ipaws = Boolean(cap.ipaws_enabled);
+        const capcp = Boolean(cap.capcp_enabled);
+        const feeds = [ipaws ? "IPAWS" : "", capcp ? "CAP-CP (NAAD)" : ""].filter(Boolean).join(", ");
+        const naadEndpoints = Array.isArray(cap.capcp_endpoints) ? cap.capcp_endpoints : [];
+        const naadRows = naadEndpoints.length
+            ? naadEndpoints
+                .map((endpoint) => `<div class="cap-endpoint-row"><strong>${escapeHtml(String(endpoint))}</strong></div>`)
+                .join("")
+            : '<div class="cap-endpoint-row">None configured</div>';
+
         const endpointCount = Number(cap.endpoint_count) || 0;
         const endpoints = Array.isArray(cap.endpoints) ? cap.endpoints : [];
         const endpointRows = endpoints.length
@@ -1207,7 +1211,8 @@
         const lastAlertSource = cap.last_alert_source
             ? escapeHtml(cap.last_alert_source)
             : "—";
-        const pollError = cap.last_poll_error ? escapeHtml(cap.last_poll_error) : "";
+        // Polling is IPAWS's alone; NAAD is a stream, so a stale poll error means nothing without it.
+        const pollError = ipaws && cap.last_poll_error ? escapeHtml(cap.last_poll_error) : "";
 
         const card = document.createElement("article");
         card.className = `cap-card ${pollError ? "degraded" : "healthy"}`;
@@ -1217,22 +1222,29 @@
                 <div class="cap-subtitle">CAP monitor is active and publishing status updates.</div>
             </div>
             <div class="cap-meta">
-                <span><strong>Status:</strong> ${cap.enabled ? "Enabled" : "Disabled"}</span>
-                <span><strong>Endpoints:</strong> ${endpointCount}</span>
+                <span><strong>Feeds:</strong> ${feeds}</span>
+                ${ipaws ? `
+                <span><strong>IPAWS endpoints:</strong> ${endpointCount}</span>
                 <span><strong>Poll attempts:</strong> ${cap.polls_attempted || 0}</span>
                 <span><strong>Poll failures:</strong> ${cap.polls_failed || 0}</span>
+                <span><strong>Last poll:</strong> ${lastPoll}</span>
+                <span><strong>Last successful poll:</strong> ${lastGoodPoll}</span>` : ""}
                 <span><strong>Processed CAP alerts:</strong> ${cap.alerts_processed || 0}</span>
                 <span><strong>Active CAP alerts:</strong> ${cap.active_alerts || 0}</span>
-                <span><strong>Last poll:</strong> ${lastPoll}</span>
-                <span><strong>Last successful poll:</strong> ${lastGoodPoll}</span>
                 <span><strong>Last CAP alert:</strong> ${lastAlertCode} at ${lastAlertAt}</span>
                 <span><strong>Last CAP source:</strong> ${lastAlertSource}</span>
             </div>
             ${pollError ? `<div class="cap-error"><strong>Last poll error:</strong><pre>${pollError}</pre></div>` : ""}
+            ${ipaws ? `
             <div class="cap-endpoints">
-                <div class="cap-endpoints-title">Configured endpoints</div>
+                <div class="cap-endpoints-title">IPAWS endpoints</div>
                 ${endpointRows}
-            </div>
+            </div>` : ""}
+            ${capcp ? `
+            <div class="cap-endpoints">
+                <div class="cap-endpoints-title">NAAD streams</div>
+                ${naadRows}
+            </div>` : ""}
         `;
         container.appendChild(card);
     }
@@ -1241,10 +1253,8 @@
         try {
             const protocol = window.location.protocol === "https:" ? "https" : "http";
             const response = await fetch(`${protocol}://${window.API_BASE}${path}`, {
-                headers: {
-                    Accept: "application/json",
-                    Authorization: `Bearer ${window.TOKEN}`,
-                },
+                headers: { Accept: "application/json" },
+                credentials: "same-origin",
             });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
@@ -1333,7 +1343,7 @@
 
     function connectWebSocket() {
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const url = `${protocol}://${window.API_BASE}/ws?auth=${encodeURIComponent(window.TOKEN)}`;
+        const url = `${protocol}://${window.API_BASE}/ws`;
         setWsStatus("Connecting...", "");
 
         try {

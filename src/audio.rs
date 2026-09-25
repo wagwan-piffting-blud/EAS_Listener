@@ -3,6 +3,7 @@ use crate::monitoring::MonitoringHub;
 use crate::recording::{self, RecordingState};
 use crate::relay::RelayState;
 use crate::state::{ActiveAlert, AppState, EasAlertData};
+use crate::tone::{NwrToneDetector, ToneSustain};
 use crate::webhook::send_alert_webhook;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -35,8 +36,9 @@ use tracing::{error, info, warn};
 
 const TARGET_SAMPLE_RATE: u32 = 48000;
 const CHUNK_SIZE: usize = 2048;
-const NWR_TONE_FREQ_HZ: f32 = 1050.0;
+const NWR_TONE_FREQ_HZ: f64 = 1050.0;
 const NWR_TONE_MIN_DURATION: Duration = Duration::from_secs(5);
+const NWR_TONE_MAX_GAP: Duration = Duration::from_millis(500);
 const NWR_TONE_RECORDING_DURATION: Duration = Duration::from_secs(120);
 const SAME_TONE_SUPPRESSION_DURATION: Duration = Duration::from_secs(300);
 
@@ -66,64 +68,6 @@ struct ChannelReader {
 struct StreamWorkerHandle {
     stop_signal: Arc<AtomicBool>,
     task: JoinHandle<()>,
-}
-
-struct GoertzelToneDetector {
-    coeff: f32,
-    ratio_threshold: f32,
-    min_avg_power: f32,
-    consecutive_hits_required: u8,
-    consecutive_hits: u8,
-}
-
-impl GoertzelToneDetector {
-    fn new(
-        sample_rate_hz: f32,
-        target_freq_hz: f32,
-        ratio_threshold: f32,
-        min_avg_power: f32,
-        consecutive_hits_required: u8,
-    ) -> Self {
-        let omega = 2.0 * std::f32::consts::PI * target_freq_hz / sample_rate_hz;
-        Self {
-            coeff: 2.0 * omega.cos(),
-            ratio_threshold,
-            min_avg_power,
-            consecutive_hits_required,
-            consecutive_hits: 0,
-        }
-    }
-
-    fn detect(&mut self, samples: &[f32]) -> bool {
-        if samples.is_empty() {
-            self.consecutive_hits = 0;
-            return false;
-        }
-
-        let mut q1 = 0.0f32;
-        let mut q2 = 0.0f32;
-        let mut total_energy = 0.0f32;
-
-        for &sample in samples {
-            let q0 = sample + self.coeff * q1 - q2;
-            q2 = q1;
-            q1 = q0;
-            total_energy += sample * sample;
-        }
-
-        let tone_energy = (q1 * q1 + q2 * q2 - self.coeff * q1 * q2).max(0.0);
-        let avg_power = total_energy / samples.len() as f32;
-        let tone_ratio = tone_energy / total_energy.max(1e-12);
-        let tone_hit = avg_power >= self.min_avg_power && tone_ratio >= self.ratio_threshold;
-
-        if tone_hit {
-            self.consecutive_hits = self.consecutive_hits.saturating_add(1);
-        } else {
-            self.consecutive_hits = 0;
-        }
-
-        self.consecutive_hits >= self.consecutive_hits_required
-    }
 }
 
 impl Read for ChannelReader {
@@ -300,6 +244,10 @@ pub async fn run_audio_processor(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the stream plumbing is passed down spawn_stream_worker -> run_stream_task -> process_stream unchanged"
+)]
 fn spawn_stream_worker(
     config: Arc<RwLock<Config>>,
     stream_url: String,
@@ -335,6 +283,10 @@ fn spawn_stream_worker(
     StreamWorkerHandle { stop_signal, task }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "see spawn_stream_worker: same argument list, one hop further down"
+)]
 async fn run_stream_task(
     config: Arc<RwLock<Config>>,
     stream_url: String,
@@ -540,6 +492,10 @@ async fn run_stream_task(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "see spawn_stream_worker: same argument list, borrowed rather than owned"
+)]
 fn process_stream(
     mss: MediaSourceStream,
     content_type: Option<String>,
@@ -581,14 +537,24 @@ fn process_stream(
     let mut resampler: Option<SincFixedIn<f32>> = None;
     let mut current_input_rate: Option<u32> = None;
     let mut audio_buffer: Vec<f32> = Vec::new();
-    let mut tone_detector =
-        GoertzelToneDetector::new(TARGET_SAMPLE_RATE as f32, NWR_TONE_FREQ_HZ, 60.0, 5e-5, 8);
+    let mut tone_detector = NwrToneDetector::new(f64::from(TARGET_SAMPLE_RATE), NWR_TONE_FREQ_HZ);
+    let mut tone_sustain =
+        ToneSustain::new(TARGET_SAMPLE_RATE, NWR_TONE_MIN_DURATION, NWR_TONE_MAX_GAP);
     let mut tone_rearm_until: Option<std::time::Instant> = None;
+    if config
+        .read()
+        .expect("audio config lock poisoned")
+        .stream_is_nwr(stream_label)
+    {
+        info!(stream = %stream_label, "Watching for the 1050 Hz NOAA Weather Radio tone");
+    } else {
+        info!(
+            stream = %stream_label,
+            "Not marked as NOAA Weather Radio, so the 1050 Hz tone is ignored on this stream"
+        );
+    }
     let mut same_tone_suppression_until: Option<std::time::Instant> = None;
     let mut current_same_header: Option<String> = None;
-    let min_tone_samples_required =
-        (TARGET_SAMPLE_RATE as f64 * NWR_TONE_MIN_DURATION.as_secs_f64()) as usize;
-    let mut sustained_tone_samples: usize = 0;
     const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 8;
     let mut consecutive_decode_errors: u32 = 0;
 
@@ -702,7 +668,13 @@ fn process_stream(
                     let chunk_to_process = audio_buffer[..CHUNK_SIZE].to_vec();
                     let resampled = rs.process(&[chunk_to_process], None)?;
                     let samples_f32 = resampled[0].clone();
-                    let tone_present = tone_detector.detect(&samples_f32);
+                    // Read per chunk rather than once: a stream keeps running across a reload, so
+                    // this is what makes a stream marked or unmarked take effect without one.
+                    let nwr_stream = config
+                        .read()
+                        .expect("audio config lock poisoned")
+                        .stream_is_nwr(stream_label);
+                    let tone_present = nwr_stream && tone_detector.process(&samples_f32);
 
                     if let Some(audio_tx) = {
                         let recorder = recording_state.blocking_lock();
@@ -710,13 +682,12 @@ fn process_stream(
                             .get(stream_label)
                             .map(|state| state.audio_tx.clone())
                     } {
-                        if let Err(e) = audio_tx.try_send(samples_f32.clone()) {
-                            if let TrySendError::Closed(_) = e {
-                                warn!(
-                                    stream = %stream_label,
-                                    "Recording task channel closed unexpectedly."
-                                );
-                            }
+                        if let Err(TrySendError::Closed(_)) = audio_tx.try_send(samples_f32.clone())
+                        {
+                            warn!(
+                                stream = %stream_label,
+                                "Recording task channel closed unexpectedly."
+                            );
                         }
                     }
 
@@ -769,18 +740,16 @@ fn process_stream(
                         Some(ready_at) => now >= ready_at,
                         None => true,
                     };
-                    if same_suppression_active || !tone_rearm_ready {
-                        sustained_tone_samples = 0;
-                    } else if tone_present {
-                        sustained_tone_samples =
-                            sustained_tone_samples.saturating_add(samples_f32.len());
+                    if same_suppression_active || !tone_rearm_ready || !nwr_stream {
+                        tone_sustain.reset();
                     } else {
-                        sustained_tone_samples = 0;
+                        tone_sustain.update(tone_present, samples_f32.len());
                     }
 
-                    if !same_suppression_active
+                    if nwr_stream
+                        && !same_suppression_active
                         && tone_rearm_ready
-                        && sustained_tone_samples >= min_tone_samples_required
+                        && tone_sustain.is_satisfied()
                     {
                         let tone_recording = {
                             let mut recorder = recording_state.blocking_lock();
@@ -820,7 +789,7 @@ fn process_stream(
                         };
 
                         if let Some((handle, output_path)) = tone_recording {
-                            sustained_tone_samples = 0;
+                            tone_sustain.reset();
                             tone_rearm_until = Some(now + NWR_TONE_RECORDING_DURATION);
                             info!(
                                 stream = %stream_label,
@@ -928,12 +897,12 @@ fn process_stream(
                                     &stream_for_timeout,
                                     &tone_alert,
                                     &tone_details,
-                                    &raw_header,
+                                    Some(&raw_header),
                                     Some(output_path.clone()),
                                 )
                                 .await;
 
-                                crate::icecast::enqueue_alert_audio(output_path.clone());
+                                crate::alert_stream::enqueue_alert_audio(output_path.clone());
 
                                 {
                                     let active_snapshot = {

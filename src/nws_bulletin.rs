@@ -203,6 +203,20 @@ static RE_SINGLE_ENTITY: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
+static RE_BULLETIN_START: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(BULLETIN\s*-|URGENT\s*-|WATCH COUNTY NOTIFICATION)").unwrap());
+
+static RE_PLOT_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(LAT\.\.\.LON|TIME\.\.\.MOT\.\.\.LOC|TIME\.\.\.)").unwrap());
+
+static RE_OFFICE_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[A-Z]{2,}(?:/[A-Z]{2,})+$").unwrap());
+
+static RE_SECTION_HEADING: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Z/ ]+\.\.\.$").unwrap());
+
+static RE_NWS_INTRO: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^THE NATIONAL WEATHER SERVICE IN ").unwrap());
+
 fn collapse_spaces(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -241,12 +255,12 @@ fn titleish(phrase: &str) -> String {
         .map(|word| {
             if word.contains('/') {
                 word.split('/')
-                    .map(|part| transform_token(part))
+                    .map(transform_token)
                     .collect::<Vec<_>>()
                     .join("/")
             } else if word.contains('-') {
                 word.split('-')
-                    .map(|part| transform_token(part))
+                    .map(transform_token)
                     .collect::<Vec<_>>()
                     .join("-")
             } else {
@@ -275,7 +289,7 @@ fn sentence_case_basic(text: &str) -> String {
 
 fn restore_phrases(text: &str, phrases: &[&str]) -> String {
     let mut sorted: Vec<&&str> = phrases.iter().collect();
-    sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted.sort_by_key(|phrase| std::cmp::Reverse(phrase.len()));
 
     let mut result = text.to_string();
     for phrase in sorted {
@@ -389,17 +403,15 @@ fn split_area_items(text: &str) -> Vec<String> {
     raw.split("...")
         .map(|p| p.trim_matches(|c: char| c == ' ' || c == '.'))
         .filter(|p| !p.is_empty())
-        .map(|p| titleish(p))
+        .map(titleish)
         .collect()
 }
 
 fn split_place_items(text: &str) -> Vec<String> {
     let raw = collapse_spaces(
-        &text
-            .replace('\n', " ")
-            .trim_start_matches(|c: char| c == ' ' || c == '.')
-            .trim_end_matches(|c: char| c == ' ' || c == '.')
-            .to_string(),
+        text.replace('\n', " ")
+            .trim_start_matches([' ', '.'])
+            .trim_end_matches([' ', '.']),
     );
     if raw.is_empty() {
         return Vec::new();
@@ -507,9 +519,7 @@ fn strip_metadata(raw: &str) -> Vec<String> {
     let mut start = 0;
     for (i, line) in lines.iter().enumerate() {
         let stripped = line.trim();
-        if Regex::new(r"(?i)^(BULLETIN\s*-|URGENT\s*-|WATCH COUNTY NOTIFICATION)")
-            .unwrap()
-            .is_match(stripped)
+        if RE_BULLETIN_START.is_match(stripped)
             || is_product_line(stripped)
             || stripped.starts_with("THE NATIONAL WEATHER SERVICE")
         {
@@ -525,16 +535,10 @@ fn strip_metadata(raw: &str) -> Vec<String> {
         if stripped == "&&" || stripped == "$$" {
             break;
         }
-        if Regex::new(r"^(LAT\.\.\.LON|TIME\.\.\.MOT\.\.\.LOC|TIME\.\.\.)")
-            .unwrap()
-            .is_match(stripped)
-        {
+        if RE_PLOT_LINE.is_match(stripped) {
             break;
         }
-        if Regex::new(r"^[A-Z]{2,}(?:/[A-Z]{2,})+$")
-            .unwrap()
-            .is_match(stripped)
-        {
+        if RE_OFFICE_LINE.is_match(stripped) {
             break;
         }
         if RE_AWIPS_CODE.is_match(stripped) {
@@ -609,7 +613,7 @@ fn parse_segments(lines: &[String]) -> (BulletinHeader, Vec<Segment>) {
             continue;
         }
 
-        if Regex::new(r"^[A-Z/ ]+\.\.\.$").unwrap().is_match(&stripped) {
+        if RE_SECTION_HEADING.is_match(&stripped) {
             if let Some(seg) = current.take() {
                 segments.push(seg);
             }
@@ -648,14 +652,9 @@ struct BulletinHeader {
     issued_at: Option<String>,
 }
 
+#[derive(Default)]
 pub struct NormalizeOptions {
     pub repeat: bool,
-}
-
-impl Default for NormalizeOptions {
-    fn default() -> Self {
-        Self { repeat: false }
-    }
 }
 
 pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
@@ -693,11 +692,7 @@ pub fn normalize_nws_bulletin(raw: &str, options: &NormalizeOptions) -> String {
             entities.insert(e);
         }
 
-        if matches!(segment.kind, SegmentKind::Para)
-            && Regex::new(r"(?i)^THE NATIONAL WEATHER SERVICE IN ")
-                .unwrap()
-                .is_match(&text)
-        {
+        if matches!(segment.kind, SegmentKind::Para) && RE_NWS_INTRO.is_match(&text) {
             if let Some(caps) = re_intro.captures(&text) {
                 intro_city = Some(titleish(&caps[1]));
                 intro_action = Some(caps[2].to_lowercase());

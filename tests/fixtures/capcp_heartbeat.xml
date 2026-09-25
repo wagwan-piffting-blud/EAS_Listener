@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>NAADS-Heartbeat-2026-09-09T14:06:00-00:00</identifier>
+  <sender>NAADS-Heartbeat</sender>
+  <sent>2026-09-09T14:06:00-00:00</sent>
+  <status>System</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <references>NAADS-Heartbeat,urn:oid:2.49.0.1.124.1234567.2026,2026-09-09T14:05:00-00:00 NAADS-Heartbeat,urn:oid:2.49.0.1.124.7654321.2026,2026-09-09T14:04:00-00:00</references>
+  <info>
+    <language>en-CA</language>
+    <category>Other</category>
+    <event>NAADS Heartbeat</event>
+    <urgency>Past</urgency>
+    <severity>Unknown</severity>
+    <certainty>Unlikely</certainty>
+    <expires>2026-09-09T14:08:00-00:00</expires>
+    <senderName>NAADS Heartbeat</senderName>
+    <headline>Heartbeat</headline>
+    <description>NAADS Heartbeat</description>
+  </info>
+</alert>

@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_received_at ON alerts(received_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_event_code  ON alerts(event_code);
 CREATE INDEX IF NOT EXISTS idx_alerts_raw_zczc    ON alerts(raw_zczc);
+
+-- What the CAP-CP processor has already handled, so a restart or reload does not handle it again.
+CREATE TABLE IF NOT EXISTS cap_seen (
+    key        TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL
+);
 "#;
 
 #[derive(Clone)]
@@ -62,6 +68,10 @@ impl DbHandle {
         })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per alerts column; a parameter struct would duplicate the schema without checking it"
+    )]
     pub async fn insert_same_alert(
         &self,
         raw_zczc: &str,
@@ -117,6 +127,10 @@ impl DbHandle {
         .context("DB insert task panicked")?
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "see insert_same_alert: one argument per alerts column"
+    )]
     pub async fn insert_cap_alert(
         &self,
         raw_zczc: &str,
@@ -191,6 +205,45 @@ impl DbHandle {
         })
         .await
         .context("DB insert task panicked")?
+    }
+
+    /// The keys still in force, as `(key, expires_at)` in RFC 3339 UTC. Lapsed ones are deleted
+    /// on the way, which is all the pruning the table needs.
+    pub async fn load_cap_seen(&self, now: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.clone();
+        let now = now.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB mutex poisoned: {}", e))?;
+            guard.execute("DELETE FROM cap_seen WHERE expires_at <= ?1", params![now])?;
+            let mut statement = guard.prepare("SELECT key, expires_at FROM cap_seen")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+            Ok(rows)
+        })
+        .await
+        .context("DB read task panicked")?
+    }
+
+    pub async fn record_cap_seen(&self, key: &str, expires_at: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        let expires_at = expires_at.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB mutex poisoned: {}", e))?;
+            guard.execute(
+                "INSERT INTO cap_seen (key, expires_at) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET expires_at = excluded.expires_at",
+                params![key, expires_at],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("DB write task panicked")?
     }
 
     pub async fn update_recording_name(&self, raw_zczc: &str, recording_name: &str) {
@@ -403,6 +456,157 @@ impl DbHandle {
         );
         Ok(imported)
     }
+
+    /// Archived alerts in ascending id order, keeping only rows `keep` accepts.
+    ///
+    /// `limit` bounds how many rows are *kept*, not how many are examined: the scan walks newest
+    /// first and stops once it has enough. Applying the limit in SQL instead would let rejected
+    /// rows eat the budget and hand back fewer alerts than asked for -- sometimes none at all.
+    pub async fn fetch_alerts_where<F>(
+        &self,
+        limit: Option<usize>,
+        keep: F,
+    ) -> Result<Vec<AlertRow>>
+    where
+        F: Fn(&AlertRow) -> bool + Send + 'static,
+    {
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB mutex poisoned: {}", e))?;
+
+            let sql = format!("SELECT {ALERT_COLUMNS} FROM alerts ORDER BY id DESC");
+            let mut stmt = guard.prepare(&sql)?;
+            let mut cursor = stmt.query_map([], |row| {
+                Ok(AlertRow {
+                    raw_zczc: row.get(0)?,
+                    eas_text: row.get(1)?,
+                    event_code: row.get(2)?,
+                    event_text: row.get(3)?,
+                    originator_name: row.get(4)?,
+                    fips: row.get(5)?,
+                    locations: row.get(6)?,
+                    description: row.get(7)?,
+                    recording_name: row.get(8)?,
+                    source_type: row.get(9)?,
+                    severity: row.get(10)?,
+                    instructions: row.get(11)?,
+                    duration_hhmm: row.get(12)?,
+                    received_at: row.get(13)?,
+                    expires_at: row.get(14)?,
+                })
+            })?;
+
+            let mut kept: Vec<AlertRow> = Vec::new();
+            while let Some(row) = cursor.next().transpose()? {
+                if !keep(&row) {
+                    continue;
+                }
+                kept.push(row);
+                if limit.is_some_and(|limit| kept.len() >= limit) {
+                    break;
+                }
+            }
+
+            // Collected newest first; the dashboard renders oldest to newest.
+            kept.reverse();
+            Ok::<Vec<AlertRow>, anyhow::Error>(kept)
+        })
+        .await
+        .context("Alert fetch task panicked")?
+    }
+
+    /// Deletes every archived alert except those whose raw header is still live, and reports which
+    /// recordings the survivors still reference.
+    ///
+    /// The delete and the survivors' read share one transaction so a caller cannot archive away a
+    /// recording that a row acquired in between.
+    pub async fn vacuum_alerts(&self, keep_headers: Vec<String>) -> Result<VacuumOutcome> {
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB mutex poisoned: {}", e))?;
+
+            let tx = guard.transaction()?;
+
+            let alerts_deleted = if keep_headers.is_empty() {
+                tx.execute("DELETE FROM alerts", [])?
+            } else {
+                let placeholders = std::iter::repeat_n("?", keep_headers.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!("DELETE FROM alerts WHERE raw_zczc NOT IN ({placeholders})");
+                tx.execute(&sql, rusqlite::params_from_iter(keep_headers.iter()))?
+            };
+
+            let referenced_recordings = {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT recording_name FROM alerts \
+                     WHERE recording_name IS NOT NULL AND recording_name != ''",
+                )?;
+                let names = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+                names
+            };
+
+            tx.commit()?;
+
+            // VACUUM cannot run inside a transaction, and reclaiming space is a bonus rather than
+            // the point, so a failure here does not fail the operation.
+            let reclaimed = match guard.execute_batch("VACUUM;") {
+                Ok(_) => true,
+                Err(err) => {
+                    warn!("Could not reclaim database space after vacuum: {}", err);
+                    false
+                }
+            };
+
+            Ok::<VacuumOutcome, anyhow::Error>(VacuumOutcome {
+                alerts_deleted,
+                referenced_recordings,
+                reclaimed,
+            })
+        })
+        .await
+        .context("Alert vacuum task panicked")?
+    }
+}
+
+/// Outcome of [`DbHandle::vacuum_alerts`].
+pub struct VacuumOutcome {
+    pub alerts_deleted: usize,
+    /// Recording names the surviving rows still reference, which must not be archived away.
+    pub referenced_recordings: Vec<String>,
+    pub reclaimed: bool,
+}
+
+/// Column order must match the `row.get` indices in `fetch_alerts`.
+const ALERT_COLUMNS: &str = "raw_zczc, eas_text, event_code, event_text, originator_name, \
+     fips, locations, description, recording_name, source_type, severity, instructions, \
+     duration_hhmm, received_at, expires_at";
+
+#[derive(Debug, Clone)]
+pub struct AlertRow {
+    pub raw_zczc: String,
+    pub eas_text: String,
+    pub event_code: String,
+    pub event_text: String,
+    pub originator_name: String,
+    pub fips: String,
+    pub locations: String,
+    pub description: Option<String>,
+    pub recording_name: Option<String>,
+    pub source_type: String,
+    pub severity: Option<String>,
+    pub instructions: Option<String>,
+    pub duration_hhmm: Option<String>,
+    pub received_at: String,
+    pub expires_at: Option<String>,
 }
 
 fn build_recording_lookup(dir: &Path) -> HashMap<String, String> {
@@ -447,6 +651,104 @@ mod tests {
         let db_path = dir.path().join("test_alerts.db");
         let handle = DbHandle::open(&db_path).unwrap();
         (handle, dir)
+    }
+
+    #[tokio::test]
+    async fn cap_seen_survives_a_reopen_and_forgets_what_lapsed() {
+        let (handle, dir) = test_db();
+        handle
+            .record_cap_seen("naad:live", "2026-09-20T00:00:00Z")
+            .await
+            .unwrap();
+        handle
+            .record_cap_seen("naad:old", "2026-09-18T00:00:00Z")
+            .await
+            .unwrap();
+        // Recording again moves the expiry rather than failing on the key.
+        handle
+            .record_cap_seen("naad:live", "2026-09-21T00:00:00Z")
+            .await
+            .unwrap();
+        drop(handle);
+
+        let reopened = DbHandle::open(&dir.path().join("test_alerts.db")).unwrap();
+        let seen = reopened
+            .load_cap_seen("2026-09-19T12:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![("naad:live".to_string(), "2026-09-21T00:00:00Z".to_string())]
+        );
+    }
+
+    async fn seed_alerts(handle: &DbHandle, codes: &[&str]) {
+        for code in codes {
+            handle
+                .insert_same_alert(
+                    &format!("ZCZC-EAS-{code}-000000+0015-0010000-TEST-"),
+                    &format!("{code} body"),
+                    code,
+                    &format!("{code} event"),
+                    "EAS",
+                    "Test Originator",
+                    &["000000".to_string()],
+                    "Everywhere",
+                    None,
+                    Some("0015"),
+                    "2026-09-17T18:00:00Z",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_alerts_where_returns_oldest_first() {
+        let (handle, _dir) = test_db();
+        seed_alerts(&handle, &["AAA", "BBB", "CCC"]).await;
+
+        let rows = handle.fetch_alerts_where(None, |_| true).await.unwrap();
+        let codes: Vec<_> = rows.iter().map(|r| r.event_code.as_str()).collect();
+        assert_eq!(codes, vec!["AAA", "BBB", "CCC"]);
+    }
+
+    #[tokio::test]
+    async fn the_limit_counts_kept_rows_not_scanned_rows() {
+        let (handle, _dir) = test_db();
+        seed_alerts(&handle, &["AAA", "BBB", "CCC", "SKIP"]).await;
+
+        // "SKIP" is the newest row. Applying the limit in SQL would spend the whole budget on it
+        // and hand back nothing; the limit has to bound what survives the filter instead.
+        let rows = handle
+            .fetch_alerts_where(Some(1), |row| row.event_code != "SKIP")
+            .await
+            .unwrap();
+        let codes: Vec<_> = rows.iter().map(|r| r.event_code.as_str()).collect();
+        assert_eq!(codes, vec!["CCC"]);
+
+        let rows = handle
+            .fetch_alerts_where(Some(2), |row| row.event_code != "SKIP")
+            .await
+            .unwrap();
+        let codes: Vec<_> = rows.iter().map(|r| r.event_code.as_str()).collect();
+        assert_eq!(codes, vec!["BBB", "CCC"]);
+    }
+
+    #[tokio::test]
+    async fn a_limit_larger_than_the_table_returns_everything_that_matches() {
+        let (handle, _dir) = test_db();
+        seed_alerts(&handle, &["AAA", "BBB"]).await;
+
+        let rows = handle.fetch_alerts_where(Some(50), |_| true).await.unwrap();
+        assert_eq!(rows.len(), 2);
+
+        let rows = handle
+            .fetch_alerts_where(Some(50), |_| false)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]

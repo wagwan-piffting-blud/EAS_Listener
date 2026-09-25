@@ -1,7 +1,16 @@
 [package]
 name = "eas_listener"
-version = "0.35.0"
+version = "0.40.0"
 edition = "2021"
+
+[features]
+# Off by default so container and headless builds stay exactly as they are. A desktop build
+# opts in with: cargo build --release --features tray
+default = []
+tray = ["dep:tray-icon", "dep:winit", "dep:png"]
+# Windows service host. Separate from `tray`: a machine that runs this as a service has no
+# desktop session for a tray icon, and vice versa.
+service = ["dep:windows-service"]
 
 [dependencies]
 parking_lot = "0.12"
@@ -23,14 +32,30 @@ rubato = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "chrono"] }
 tracing-appender = "0.2"
-tokio-stream = "0.1"
+# `sync` for BroadcastStream, which the alert stream sends its pages to each listener through.
+tokio-stream = { version = "0.1", features = ["sync"] }
 crossbeam-channel = "0.5"
 Inflector = "0.11.4"
 lazy_static = "1.5.0"
 base64 = "0.22.1"
-tower-http = { version = "0.6.6", features = ["cors"] }
+tower-http = { version = "0.6.6", features = ["cors", "fs"] }
 tempfile = "3.10"
 roxmltree = "0.20"
 once_cell = "1.21.3"
 regex = "1.12.2"
 rusqlite = { version = "0.33", features = ["bundled"] }
+getrandom = "0.2"
+# Opens first-run setup in the default browser; the tray's menu uses it too.
+open = "5.4"
+
+# Desktop tray shim, pulled in only by the `tray` feature.
+tray-icon = { version = "0.25", optional = true }
+winit = { version = "0.30", optional = true }
+png = { version = "0.18", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { version = "0.8", optional = true }
+
+# The effective UID and account names, for installing a systemd unit or a launchd job.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,43 +1,4 @@
-<?php
-
-require_once __DIR__ . "/config.php";
-
-if(!session_id()) {
-    if(app_use_reverse_proxy()) {
-        session_set_cookie_params(259200, "/", "", true, true);
-    }
-
-    else {
-        session_set_cookie_params(259200, "/", "", false, true);
-    }
-    session_start();
-}
-
-$requestHeaders = getallheaders();
-
-if(app_request_is_authorized($requestHeaders)) {
-    $_SESSION['authed'] = true;
-}
-
-if(!isset($_SESSION['authed'])) {
-    header("Location: index.php?redirect=" . urlencode($_SERVER['REQUEST_URI']));
-    exit();
-}
-
-else {
-    $icecastStreamUrl = trim(app_string("ICECAST_ALERT_PUBLIC_URL", ""));
-    if ($icecastStreamUrl === "" && app_bool("ICECAST_ALERT_STREAM_ENABLED", false)) {
-        $httpHost = (string) ($_SERVER['HTTP_HOST'] ?? 'localhost');
-        $hostNoPort = substr($httpHost, 0, strpos($httpHost, ":") ?: strlen($httpHost));
-        $icecastPort = app_string("ICECAST_ALERT_PORT", "8000");
-        $icecastMount = app_string("ICECAST_ALERT_MOUNT", "/stream.ogg");
-        if ($icecastMount === "" || $icecastMount[0] !== "/") {
-            $icecastMount = "/" . $icecastMount;
-        }
-        $icecastScheme = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        $icecastStreamUrl = $icecastScheme . "://" . $hostNoPort . ":" . $icecastPort . $icecastMount;
-    }
-    ?><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
     <head>
         <meta charset="utf-8" />
@@ -48,15 +9,13 @@ else {
     <body>
         <main
             id="chargen"
-            data-api-base="<?php print_r(app_monitoring_api_base((string) ($_SERVER['HTTP_HOST'] ?? 'localhost'))); ?>"
-            data-token="<?php print_r(app_auth_token()); ?>"
             data-default-text="EAS DETAILS CHANNEL"
-            data-stream-url="<?php echo htmlspecialchars($icecastStreamUrl, ENT_QUOTES); ?>"
+            data-stream-url=""
         >
             <div id="cgControls" aria-label="Character generator options">
                 <div id="flex">
                     <button id="cgControlsToggle" type="button" aria-controls="cgControlsForm" aria-expanded="false">Show Options</button>
-                    <button id="backToDashboard" type="button" onclick="window.location.href='index.php'">Back to Dashboard</button>
+                    <button id="backToDashboard" type="button" onclick="window.location.href='/index.html'">Back to Dashboard</button>
                 </div>
                 <form id="cgControlsForm" hidden>
                     <label for="cgBgColor">Background</label>
@@ -104,4 +63,4 @@ else {
         </main>
         <script src="chargen.js"></script>
     </body>
-</html><?php } ?>
+</html>

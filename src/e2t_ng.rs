@@ -189,7 +189,7 @@ enum OutputTimeZone {
 }
 
 thread_local! {
-    static TZ_OVERRIDE: RefCell<Option<OutputTimeZone>> = RefCell::new(None);
+    static TZ_OVERRIDE: RefCell<Option<OutputTimeZone>> = const { RefCell::new(None) };
 }
 
 fn parse_output_timezone(spec: &str) -> Option<OutputTimeZone> {
@@ -369,6 +369,20 @@ fn apply_mode_template(mode_key: &str, replacements: &[(&str, String)]) -> Strin
         template = template.replace(&format!("__{}__", key), value);
     }
     template
+}
+
+/// The values `ENDEC_MODE` accepts, for validating configuration.
+///
+/// `humanize_eas` matches the mode in upper case and falls through to its generic wording for
+/// anything else, so "DEFAULT" is a real choice rather than the absence of one, and "ALL" renders
+/// every mode at once.
+pub fn known_endec_modes() -> Vec<String> {
+    let mut modes = all_endec_modes();
+    modes.push("ALL".to_string());
+    modes.push("DEFAULT".to_string());
+    modes.sort_unstable();
+    modes.dedup();
+    modes
 }
 
 fn all_endec_modes() -> Vec<String> {
@@ -687,6 +701,14 @@ fn build_fips_context(location_codes: &[String], canadian_mode: bool) -> FipsCon
             let same_name = code
                 .get(1..6)
                 .and_then(|key| lookup_same("SAME", key, canadian_mode))
+                .or_else(|| {
+                    // CAP-CP carries CLC zones that same-ca.json has no entry for; GeoToCLC.csv
+                    // names them.
+                    canadian_mode
+                        .then(|| crate::cap_cp::clc_location_name(code))
+                        .flatten()
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| format!("FIPS Code {}", code));
 
             if subdiv.is_empty() {
@@ -1029,6 +1051,13 @@ fn humanize_eas(eas: &ParsedEas, endec_emulation_mode: &str, canadian_mode: bool
             }
             if eas.originator == "EAS" {
                 org_text = "An EAS Participant".to_string();
+            }
+            // Rev96 wording, which is also what its HelloTTS front end recognises.
+            if eas.originator == "PEP" {
+                org_text = "The United States Government".to_string();
+            }
+            if eas.originator == "EAN" {
+                org_text = "The Emergency Action Notification Network".to_string();
             }
 
             let start_parts = get_zoned_parts(&eas.start_time);

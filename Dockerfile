@@ -57,10 +57,16 @@ RUN set -eu; \
 
 COPY include ./include
 COPY src ./src
+COPY build.rs ./
+# Baked into the binary by build.rs. The image serves /app/web_server as well, which wins while it
+# is there; the built-in copy is what a bind mount or a stripped image falls back to.
+COPY web_server ./web_server
+# Compiled in as the built-in pronunciation dictionary.
+COPY cap_tts_replacement_config.example.json ./
 
 RUN set -eu; \
     . /etc/cross.env; \
-    find src include -type f -exec touch {} +; \
+    find src include web_server build.rs cap_tts_replacement_config.example.json -type f -exec touch {} +; \
     cargo build --release --locked --target "${RUST_TARGET}"; \
     cp "target/${RUST_TARGET}/release/eas_listener" /usr/local/bin/eas_listener
 
@@ -71,17 +77,12 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV XDG_RUNTIME_DIR=/run/user/1000
+# The binary installs to /usr/local/bin but its assets live in /app, so the root cannot be
+# inferred from the executable's location the way a portable install allows.
+ENV EAS_APP_ROOT=/app
 ARG VARIANT=full
 ARG TARGETARCH
 ENV EAS_IMAGE_VARIANT=${VARIANT}
-ARG SPFY_REPO=wagwan-piffting-blud/Speechify
-ARG SPFY_VERSION=latest
-ARG SPFY_ASSET_SLUG_AMD64="x86_64"
-ARG SPFY_ASSET_SLUG_ARM64="arm64"
-ARG SPFY_ASSET_SLUG_ARM="armv7"
-ARG SPFY_ASSET_SHA256_AMD64=""
-ARG SPFY_ASSET_SHA256_ARM64=""
-ARG SPFY_ASSET_SHA256_ARM=""
 ARG PIPER_VERSION=2023.11.14-2
 ARG PIPER_VOICE=en_US-lessac-medium
 ARG ICECAST_ALERT_PORT=8000
@@ -95,11 +96,11 @@ RUN set -eu; \
     mkdir -p /var/lib/apt/lists/partial; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        libssl3t64 ca-certificates bash nginx jq ffmpeg curl apprise espeak-ng \
-        php-fpm php-cli php-sqlite3 icecast2; \
+        libssl3t64 ca-certificates bash jq ffmpeg curl espeak-ng \
+        7zip; \
     rm -rf /var/lib/apt/lists/*; \
     chsh -s /bin/bash; \
-    mkdir -p /data /var/www/html /app /app/piper
+    mkdir -p /data /app/web_server /app /app/piper
 
 RUN set -eu; \
     case "${TARGETARCH}" in \
@@ -118,89 +119,34 @@ RUN set -eu; \
         "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"; \
     ln -sf /app/piper/piper /usr/local/bin/piper
 
-RUN set -eu; \
-    case "${TARGETARCH}" in \
-        amd64) SPFY_SLUG="${SPFY_ASSET_SLUG_AMD64}"; SPFY_SHA256="${SPFY_ASSET_SHA256_AMD64}" ;; \
-        arm64) SPFY_SLUG="${SPFY_ASSET_SLUG_ARM64}"; SPFY_SHA256="${SPFY_ASSET_SHA256_ARM64}" ;; \
-        arm)   SPFY_SLUG="${SPFY_ASSET_SLUG_ARM}";   SPFY_SHA256="${SPFY_ASSET_SHA256_ARM}" ;; \
-        *)     SPFY_SLUG=""; SPFY_SHA256="" ;; \
-    esac; \
-    if [ "${VARIANT}" != "full" ]; then \
-        echo "Skipping Speechify Tom: VARIANT=${VARIANT}. Piper and espeak-ng remain available."; \
-        exit 0; \
-    fi; \
-    if [ -z "${SPFY_SLUG}" ]; then \
-        echo "Skipping Speechify Tom: no spfy build is published for ${TARGETARCH} yet. Piper and espeak-ng remain available."; \
-        exit 0; \
-    fi; \
-    if [ "${SPFY_SLUG}" = "x86" ]; then \
-        dpkg --add-architecture i386; \
-        apt-get update; \
-        apt-get install -y --no-install-recommends libc6:i386; \
-        rm -rf /var/lib/apt/lists/*; \
-    fi; \
-    SHA_ARG="SPFY_ASSET_SHA256_$(echo "${TARGETARCH}" | tr 'a-z' 'A-Z')"; \
-    if [ "${SPFY_VERSION}" = "latest" ]; then \
-        RELEASE_URL="https://api.github.com/repos/${SPFY_REPO}/releases/latest"; \
-    else \
-        RELEASE_URL="https://api.github.com/repos/${SPFY_REPO}/releases/tags/${SPFY_VERSION}"; \
-    fi; \
-    if ! curl -fL --retry 5 --retry-delay 2 -H 'Accept: application/vnd.github+json' \
-            -o /tmp/spfy-release.json "${RELEASE_URL}"; then \
-        echo "Could not read ${RELEASE_URL}. Set --build-arg SPFY_VERSION=<tag> and --build-arg ${SHA_ARG}=<digest> to build without the GitHub API." >&2; \
-        exit 1; \
-    fi; \
-    SPFY_RELEASE="$(jq -r '.tag_name // empty' /tmp/spfy-release.json)"; \
-    if [ -z "${SPFY_RELEASE}" ]; then \
-        echo "No tag_name in the release metadata at ${RELEASE_URL}." >&2; \
-        exit 1; \
-    fi; \
-    ASSET_NAME="spfy-linux-${SPFY_SLUG}-${SPFY_RELEASE}.tar.gz"; \
-    ASSET_URL="$(jq -r --arg n "${ASSET_NAME}" '.assets[] | select(.name == $n) | .browser_download_url' /tmp/spfy-release.json)"; \
-    if [ -z "${ASSET_URL}" ]; then \
-        echo "Release ${SPFY_RELEASE} publishes no asset named ${ASSET_NAME}. It has:" >&2; \
-        jq -r '.assets[].name' /tmp/spfy-release.json >&2; \
-        exit 1; \
-    fi; \
-    if [ -z "${SPFY_SHA256}" ]; then \
-        SPFY_SHA256="$(jq -r --arg n "${ASSET_NAME}" '.assets[] | select(.name == $n) | .digest // empty' /tmp/spfy-release.json)"; \
-    fi; \
-    SPFY_SHA256="$(printf '%s' "${SPFY_SHA256}" | tr -d '[:space:]')"; \
-    SPFY_SHA256="${SPFY_SHA256#sha256:}"; \
-    SPFY_SHA256="${SPFY_SHA256#SHA256:}"; \
-    SPFY_SHA256="$(printf '%s' "${SPFY_SHA256}" | tr 'A-F' 'a-f')"; \
-    if ! printf '%s' "${SPFY_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; then \
-        echo "No usable sha256 for ${ASSET_NAME}: the release metadata carries no digest. Pass --build-arg ${SHA_ARG}=<digest> instead." >&2; \
-        exit 1; \
-    fi; \
-    echo "Speechify: ${ASSET_NAME} from release ${SPFY_RELEASE} (sha256 ${SPFY_SHA256})"; \
-    TEMP_DIR="/tmp/spfy"; \
-    curl -fL --retry 5 --retry-delay 2 -o "/tmp/${ASSET_NAME}" "${ASSET_URL}"; \
-    echo "${SPFY_SHA256}  /tmp/${ASSET_NAME}" | sha256sum -c -; \
-    mkdir -p "${TEMP_DIR}" "/app/voices/tom"; \
-    tar -xzf "/tmp/${ASSET_NAME}" -C "${TEMP_DIR}" --strip-components=1; \
-    mv "${TEMP_DIR}/bin/spfy_synth" /usr/local/bin/spfy_synth; \
-    chmod +x /usr/local/bin/spfy_synth; \
-    mv "${TEMP_DIR}/en-US/tom" /app/voices; \
-    chmod -R 755 /app/voices; \
-    rm -rf "/tmp/${ASSET_NAME}" "${TEMP_DIR}" /tmp/spfy-release.json;
-
-RUN userdel icecast2 && useradd -m -s /bin/bash icecast2 && chown -R icecast2:icecast2 /etc/icecast2 /var/log/icecast2
+# No TTS engine is in the image. The entrypoint fetches the configured one -- cep6, loqdave or
+# Speechify, each from its own pinned release -- onto the state volume at container start, so
+# none of them is part of any published image.
+COPY tools/components.json tools/fetch_components.sh /app/tools/
+COPY tts_voices/cep6/fetch_voices.sh /app/tts_voices/cep6/fetch_voices.sh
 
 COPY --from=builder /usr/local/bin/eas_listener /usr/local/bin/eas_listener
 COPY ./docker_entrypoint.sh /docker_entrypoint.sh
-COPY ./nginx.conf /etc/nginx/sites-available/default
-COPY ./web_server/ /var/www/html
+COPY ./web_server/ /app/web_server
 COPY ./Cargo.toml /app/Cargo.toml
 
 WORKDIR /app
 
-RUN chmod +x /docker_entrypoint.sh && chmod -R 777 /data /var/www/html
+RUN chmod +x /docker_entrypoint.sh /app/tools/fetch_components.sh /app/tts_voices/cep6/fetch_voices.sh \
+    && chmod -R 777 /data /app/web_server \
+    && /app/tools/fetch_components.sh apprise
 
-HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=5s CMD curl --fail http://localhost:${MONITORING_BIND_PORT}/api/health || exit 1
+# The port comes from config.json, which this check cannot read: it does not run inside the
+# entrypoint's environment. Whichever server bound the port -- the listener or first-run setup --
+# writes where it can be reached to this file, and a missing file means nothing is listening yet.
+# The start period covers a first boot, which downloads the chosen TTS engine before binding.
+ENV EAS_HEALTH_ADDR_FILE=/tmp/eas_listener.addr
+HEALTHCHECK --interval=10s --timeout=10s --retries=3 --start-period=120s \
+    CMD curl -fsS -o /dev/null "http://$(cat "$EAS_HEALTH_ADDR_FILE" 2>/dev/null)/api/health" || exit 1
 
-EXPOSE 80
-EXPOSE ${MONITORING_BIND_PORT}
+# The dashboard, and the alert stream the listener serves itself on ICECAST_ALERT_PORT. The
+# defaults; publish whatever MONITORING_BIND_PORT and ICECAST_ALERT_PORT are set to.
+EXPOSE 8080
 EXPOSE ${ICECAST_ALERT_PORT}
 
 ENTRYPOINT ["/docker_entrypoint.sh"]

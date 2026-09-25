@@ -1,0 +1,303 @@
+{
+    "schema": 1,
+    "note": "Pinned third-party binaries the listener shells out to. Every one runs as a separate process and none is linked in, so each keeps its own licence. A component with system_packages falls back to the distro's package on a Linux platform with no pinned build. Fetching these puts the user in a direct relationship with each upstream, so this project never redistributes them. If you switch to bundling instead, the obligations in tools/README.md apply.",
+    "components": {
+        "ffmpeg": {
+            "provides": ["ffmpeg"],
+            "requirement": "required",
+            "license": "LGPL-3.0-or-later",
+            "license_note": "FFmpeg is LGPL-2.1-or-later at its core; this build adds --enable-version3, making it LGPL-3.0-or-later, which is compatible with this project's GPL-3.0. The LGPL build is deliberate and sufficient: the only encoders this project asks for are libmp3lame (LGPL-2.0-or-later) and libopus (BSD-3-Clause), per RecordingFormat::ffmpeg_codec_args in src/config.rs. Verified in the pinned build: --enable-libmp3lame and --enable-libopus are present; --enable-gpl and --enable-nonfree are absent and x264/x265/xvid/fdk-aac are explicitly disabled. Never substitute an --enable-nonfree build; those are not redistributable at all.",
+            "project_url": "https://ffmpeg.org/",
+            "builder_url": "https://github.com/BtbN/FFmpeg-Builds",
+            "source_url": "https://github.com/BtbN/FFmpeg-Builds/blob/master/README.md",
+            "version": "n8.1.2-54-gc573a95381",
+            "release_tag": "autobuild-2026-09-17-13-19",
+            "install": "archive",
+            "system_packages": {
+                "apt-get": "ffmpeg",
+                "dnf": "ffmpeg-free",
+                "apk": "ffmpeg",
+                "pacman": "ffmpeg",
+                "zypper": "ffmpeg",
+                "brew": "ffmpeg"
+            },
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-17-13-19/ffmpeg-n8.1.2-54-gc573a95381-win64-lgpl-8.1.zip",
+                    "sha256": "c740a325e7eeeddd373764cd274b50768190b4030a726fe938dca93f968dfc10",
+                    "archive": "zip"
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-17-13-19/ffmpeg-n8.1.2-54-gc573a95381-linux64-lgpl-8.1.tar.xz",
+                    "sha256": "3846384ed094486b54d44b05cdc2076a34607295cfdcce612efd6e4db2319249",
+                    "archive": "tar.xz"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-17-13-19/ffmpeg-n8.1.2-54-gc573a95381-linuxarm64-lgpl-8.1.tar.xz",
+                    "sha256": "ad666700da41e1c75dbf8f3187c219845d7ac9fd3d245712289518cf67390014",
+                    "archive": "tar.xz"
+                }
+            }
+        },
+        "apprise": {
+            "provides": ["apprise"],
+            "requirement": "optional",
+            "license": "BSD-2-Clause",
+            "license_note": "apprise-go, Unraid's Go port of Apprise, under the same BSD-2-Clause licence as upstream Apprise; permissive and GPL-compatible. It takes the same command line as the Python Apprise, which is all the listener uses. Not affiliated with the upstream Apprise project.",
+            "project_url": "https://github.com/unraid/apprise-go",
+            "source_url": "https://github.com/unraid/apprise-go/releases/tag/v0.3.3",
+            "version": "0.3.3",
+            "install": "binary",
+            "feature": "Notifications to non-Discord targets. Discord webhooks are sent natively by the listener and work without this.",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-windows-amd64.exe",
+                    "sha256": "0f04d069bacbe4e3b0818dbe45fbb044410a092b9b92ee7bdaa7481127b14beb"
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-linux-amd64",
+                    "sha256": "f7d3ecf046582fb1f14e0c5d40c768c67483bcbbe7501f54f10d517889f09f62"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-linux-arm64",
+                    "sha256": "30645753a122c8ffcb875cbbe8ecf5637f17bf1c44e1cd820f5d53cc94f04f61"
+                },
+                "linux-armv7": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-linux-armv7",
+                    "sha256": "1a5ee42df5a0fe06252c9971e2facb5d1a33f1b1b4429835134f3463b6fe7df3"
+                },
+                "macos-aarch64": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-darwin-arm64.zip",
+                    "sha256": "f6532a7fcf80e35704edac032e0478dc0bce6f9042bd50af0f74eeb7aa28849d",
+                    "archive": "zip",
+                    "archive_member": "apprise-go-darwin-arm64"
+                },
+                "macos-x86_64": {
+                    "url": "https://github.com/unraid/apprise-go/releases/download/v0.3.3/apprise-go-darwin-amd64.zip",
+                    "sha256": "44fd9ad3677ee7dc7f6651cf0a33c54874ae65326afbae05d36180e41ae63f8c",
+                    "archive": "zip",
+                    "archive_member": "apprise-go-darwin-amd64"
+                }
+            }
+        },
+        "piper": {
+            "provides": ["piper"],
+            "requirement": "optional",
+            "license": "MIT",
+            "license_note": "Piper is MIT; the onnxruntime and espeak-ng libraries in its folder keep their own licences (MIT, GPL-3.0-or-later), and it runs as a separate process. The en_US-lessac-medium voice comes from rhasspy/piper-voices, whose MODEL_CARD gives the dataset's terms. There is no macOS pin: the upstream macOS archives hold an x86_64 build that is missing libespeak-ng.",
+            "project_url": "https://github.com/rhasspy/piper",
+            "source_url": "https://github.com/rhasspy/piper/releases/tag/2023.11.14-2",
+            "version": "2023.11.14-2",
+            "install": "archive",
+            "layout": "directory",
+            "files": [
+                {
+                    "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+                    "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+                    "to": "piper/en_US-lessac-medium.onnx"
+                },
+                {
+                    "url": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
+                    "sha256": "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+                    "to": "piper/en_US-lessac-medium.onnx.json"
+                }
+            ],
+            "feature": "CAP alert text-to-speech with the piper engine, the default.",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip",
+                    "sha256": "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
+                    "archive": "zip"
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz",
+                    "sha256": "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992",
+                    "archive": "tar.gz"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz",
+                    "sha256": "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb",
+                    "archive": "tar.gz"
+                },
+                "linux-armv7": {
+                    "url": "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_armv7l.tar.gz",
+                    "sha256": "c6946fcd57c705ed1d4666ea880f80ba0bbbd14de62ecbdd13460baf3bac8e37",
+                    "archive": "tar.gz"
+                }
+            }
+        },
+        "espeak-ng": {
+            "provides": ["espeak-ng"],
+            "requirement": "optional",
+            "license": "GPL-3.0-or-later",
+            "license_note": "Installed from the system's own packages and run as a separate process.",
+            "project_url": "https://github.com/espeak-ng/espeak-ng",
+            "source_url": "https://github.com/espeak-ng/espeak-ng/releases",
+            "install": "system",
+            "system_packages": {
+                "apt-get": "espeak-ng",
+                "dnf": "espeak-ng",
+                "apk": "espeak-ng",
+                "pacman": "espeak-ng",
+                "zypper": "espeak-ng",
+                "brew": "espeak-ng"
+            },
+            "feature": "CAP alert text-to-speech with the espeak-ng engine.",
+            "platforms": {
+                "windows-x86_64": {
+                    "installer_url": "https://github.com/espeak-ng/espeak-ng/releases",
+                    "instructions": "Install the espeak-ng .msi from its releases page; it puts espeak-ng on PATH, where the listener finds it."
+                }
+            }
+        },
+        "cep6": {
+            "provides": ["cep6"],
+            "requirement": "optional",
+            "license": "none declared",
+            "license_note": "The cep6 engine from its own repository, which carries no licence file. The Cepstral voices are not part of this download; tts_voices/cep6/fetch_voices.sh installs them separately.",
+            "project_url": "https://github.com/wagwan-piffting-blud/cep6-rs",
+            "source_url": "https://github.com/wagwan-piffting-blud/cep6-rs",
+            "version": "2026.09.23",
+            "release_tag": "2026.09.23",
+            "install": "binary",
+            "feature": "TTS_ENGINE \"cepstral\".",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-windows-amd64.exe",
+                    "sha256": "0253e161bff2ed37920b380b0723692fea4ba2c5d8e5eaca484d21bb67ecd5bc"
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-linux-amd64",
+                    "sha256": "ed90996b29697ce2bd5489633b1128cf55e357010903828b28486e93852b544f"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-linux-arm64",
+                    "sha256": "a666ef2fa021d760a6bab22c2e82f2f55e9ea5fa4b8c78e901b9f1116cbe1435"
+                },
+                "linux-armv7": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-linux-armv7",
+                    "sha256": "e6eace02dc25f035308564db7a113af0157dcab41a94d4db80cbc2eb10eb4f01"
+                },
+                "macos-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-macos-universal",
+                    "sha256": "f8b5a42083ea81a50343bc895b3633da3d602a2bdf60e180c7850b4b0bc4be42"
+                },
+                "macos-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/cep6-rs/releases/download/2026.09.23/cep6-macos-universal",
+                    "sha256": "f8b5a42083ea81a50343bc895b3633da3d602a2bdf60e180c7850b4b0bc4be42"
+                }
+            }
+        },
+        "loqdave": {
+            "provides": ["loqdave"],
+            "requirement": "optional",
+            "license": "GPL-3.0",
+            "license_note": "Loquendo TTS 6 with the Dave voice built in, from the ENDEC_Dave repository's own release. Nothing else is needed beside it; LOQ6_DATA_DIR replaces the built-in voice tree only when set.",
+            "project_url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave",
+            "source_url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave",
+            "version": "2026.09.23",
+            "release_tag": "2026.09.23",
+            "install": "binary",
+            "feature": "TTS_ENGINE \"loquendo\".",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-windows-amd64.exe",
+                    "sha256": "19949308b2a71ab525393994fc1dfad6f1df4b9412a7b4cdd5d0584a76f3bc42"
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-linux-amd64",
+                    "sha256": "e3bc4ee528d1b852c687583ef4a5b83d2fb6ef1fbc44010cc3fdf0cc78dec146"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-linux-arm64",
+                    "sha256": "cfcf263c775793840f49639bfd171ec2725ce1d563592b621debe598d71f1e79"
+                },
+                "linux-armv7": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-linux-armv7",
+                    "sha256": "e8a0df2e850512aa5c15ad2913ee37636c0381538cdebdd28769f4ac7c31cd41"
+                },
+                "macos-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-macos-universal",
+                    "sha256": "2e86a16ddb15e7a767c7b00d515dc8520ad8fa64e3d54dbc10eb7915b621f956"
+                },
+                "macos-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave/releases/download/2026.09.23/loqdave-macos-universal",
+                    "sha256": "2e86a16ddb15e7a767c7b00d515dc8520ad8fa64e3d54dbc10eb7915b621f956"
+                }
+            }
+        },
+        "speechify": {
+            "provides": ["spfy_synth"],
+            "requirement": "optional",
+            "license": "GPL-3.0",
+            "license_note": "The spfy_synth engine and the Tom voice, from the Speechify repository's own release. The listener looks for Tom in tts_voices/spfy/voices/tom, which is where the data entry below puts it. The Windows build is a bare 32-bit executable, so Tom comes from the repository at the same tag instead.",
+            "project_url": "https://github.com/wagwan-piffting-blud/Speechify",
+            "source_url": "https://github.com/wagwan-piffting-blud/Speechify",
+            "version": "2026.09.25",
+            "release_tag": "2026.09.25",
+            "install": "archive",
+            "feature": "TTS_ENGINE \"speechify\".",
+            "data": [
+                { "from": "en-US/tom", "to": "tts_voices/spfy/voices/tom" }
+            ],
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy_synth-windows-x86-2026.09.25.exe",
+                    "sha256": "7723b62b0fa4b4100bdd33e2f07e6abb32a70ea2ddd21d55c7781fe7977ea9d5",
+                    "files": [
+                        {
+                            "url": "https://raw.githubusercontent.com/wagwan-piffting-blud/Speechify/2026.09.25/en-US/tom/tom.vin",
+                            "sha256": "5487ad30bcd9a96ce3fd313f74343f75096ecb11dc82dbd48f3f8c8dd7840d2c",
+                            "to": "tts_voices/spfy/voices/tom/tom.vin"
+                        },
+                        {
+                            "url": "https://raw.githubusercontent.com/wagwan-piffting-blud/Speechify/2026.09.25/en-US/tom/tom8.vdb",
+                            "sha256": "e35bf4f8dbe5f608f0d0441e5b07acadd95b2b32d4102e6747c8ab43bf35d660",
+                            "to": "tts_voices/spfy/voices/tom/tom8.vdb"
+                        },
+                        {
+                            "url": "https://raw.githubusercontent.com/wagwan-piffting-blud/Speechify/2026.09.25/en-US/tom/tom.vcf",
+                            "sha256": "f6948a9ff2654af200220808bbe3f8d1feca1c72175994dcff7b64aa4368101c",
+                            "to": "tts_voices/spfy/voices/tom/tom.vcf"
+                        },
+                        {
+                            "url": "https://raw.githubusercontent.com/wagwan-piffting-blud/Speechify/2026.09.25/en-US/tom/tom8.pmdata",
+                            "sha256": "5aff283e47277da35cc893aca0c39ed9584635720867ca123b2a8e97c0dce742",
+                            "to": "tts_voices/spfy/voices/tom/tom8.pmdata"
+                        },
+                        {
+                            "url": "https://raw.githubusercontent.com/wagwan-piffting-blud/Speechify/2026.09.25/en-US/tom/tom8.pmindex",
+                            "sha256": "a91c159e114ef5fc22f97e14e47c815ab7b9222e1998ec2bb8aec28a730e2ebe",
+                            "to": "tts_voices/spfy/voices/tom/tom8.pmindex"
+                        }
+                    ]
+                },
+                "linux-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy-linux-x86_64-2026.09.25.tar.gz",
+                    "sha256": "0aa68e4eeb7f6ce7717865d7815f65aef2512b9bac0fec324fce123c0b585604",
+                    "archive": "tar.gz"
+                },
+                "linux-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy-linux-arm64-2026.09.25.tar.gz",
+                    "sha256": "25e205145b1290104bcf5740bfda16a879e2d4aabfe499feaa8fa167c2224bc0",
+                    "archive": "tar.gz"
+                },
+                "linux-armv7": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy-linux-armv7-2026.09.25.tar.gz",
+                    "sha256": "011275c2fd32d09c6c1d0276a6d8a2f200366a78e3c4695f1266895817540f09",
+                    "archive": "tar.gz"
+                },
+                "macos-aarch64": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy-macos-arm64-2026.09.25.tar.gz",
+                    "sha256": "ce10d3904838f8fcbe3a3edea2d4c04b058b38eae8f53c6ed6197f2813d39026",
+                    "archive": "tar.gz"
+                },
+                "macos-x86_64": {
+                    "url": "https://github.com/wagwan-piffting-blud/Speechify/releases/download/2026.09.25/spfy-macos-x86_64-2026.09.25.tar.gz",
+                    "sha256": "f7684c72cb90992bc52cda4d3c751905c1201f72832a6169021c162ea62f10fa",
+                    "archive": "tar.gz"
+                }
+            }
+        }
+    }
+}

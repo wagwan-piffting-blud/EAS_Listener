@@ -23,7 +23,6 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       image_id: ${{ steps.meta.outputs.image_id }}
       version: ${{ steps.meta.outputs.version }}
-      spfy_version: ${{ steps.spfy.outputs.version }}
     steps:
       - name: Compute build matrix
         id: matrix
@@ -44,15 +43,6 @@ jobs:
           [ "$VERSION" == "main" ] && VERSION=latest
           echo "image_id=${IMAGE_ID}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-      - name: Resolve latest Speechify release
-        id: spfy
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SPFY_VERSION=$(gh api repos/wagwan-piffting-blud/Speechify/releases/latest --jq .tag_name 2>/dev/null || true)
-          [ -n "$SPFY_VERSION" ] || SPFY_VERSION=latest
-          echo "Speechify release: ${SPFY_VERSION}"
-          echo "version=${SPFY_VERSION}" >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-24.04
@@ -105,7 +95,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             VARIANT=${{ matrix.variant }}
-            SPFY_VERSION=${{ needs.setup.outputs.spfy_version }}
           labels: runnumber=${{ github.run_id }}
           provenance: false
           outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', needs.setup.outputs.image_id) || 'type=cacheonly' }}

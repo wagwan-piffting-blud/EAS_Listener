@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use hound::{WavSpec, WavWriter};
 use roxmltree::{Document, Node};
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -27,22 +27,47 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 const CAP_POLL_INTERVAL_SECS: u64 = 60;
-const CAP_HTTP_TIMEOUT_SECS: u64 = 10;
+pub(crate) const CAP_HTTP_TIMEOUT_SECS: u64 = 10;
 const CAP_DEFAULT_PURGE_SECS: u64 = 30 * 60;
-const CAP_SEEN_DEFAULT_TTL_SECS: i64 = 6 * 60 * 60;
+pub(crate) const CAP_SEEN_DEFAULT_TTL_SECS: i64 = 6 * 60 * 60;
 const CAP_FORBIDDEN_SKIP_TTL_SECS: i64 = 24 * 60 * 60;
 const CAP_PARSE_ERROR_SKIP_TTL_SECS: i64 = 24 * 60 * 60;
 const CAP_AUDIO_MAX_BYTES: usize = 25 * 1024 * 1024;
 const CAP_RECORDING_SAMPLE_RATE: u32 = 48_000;
 const CAP_HEADER_AMPLITUDE: f64 = 0.42;
-const CAP_TTS_DEFAULT_PIPER_MODEL: &str = "/app/piper/en_US-lessac-medium.onnx";
-const CAP_TTS_REPLACEMENT_DICT_PATH: &str = "/app/cap_tts_replacement_config.json";
+const CAP_TTS_DEFAULT_CEPSTRAL_VOICE: &str = "Allison";
+const CAP_TTS_CEPSTRAL_VOICES: &str = "Allison, David, Jean-Pierre, William";
+const CAP_TTS_SUPPORTED_ENGINES: &str = "piper, espeak-ng, speechify, cepstral, loquendo";
+// A canonical PCM WAV header is 44 bytes, so anything at or under that carries no samples.
+const CAP_TTS_EMPTY_WAV_BYTES: u64 = 44;
+// Speechify runs the voice inside an emulated win32 address space with a fixed 128 MB guest
+// heap, and a long enough passage exhausts it. The process still exits 0 and leaves a
+// header-only WAV, so there is nothing to detect until the file is inspected. How much text fits
+// depends heavily on content -- plain prose has cleared 5,600 characters while a real alert has
+// failed at 2,794 -- so no fixed size is safe. This is only the starting split; a passage that
+// comes back empty is halved and retried until it fits.
+const CAP_TTS_MAX_CHUNK_CHARS: usize = 1_500;
+// Below this there is no point halving again: the failure is not about length.
+const CAP_TTS_MIN_CHUNK_CHARS: usize = 200;
+// Safety valve so a passage that always fails cannot spin forever. Sized to leave room for a
+// genuinely long alert split into floor-sized pieces, not just for the failure case.
+const CAP_TTS_MAX_SYNTH_ATTEMPTS: usize = 256;
+const _: () = assert!(CAP_TTS_MIN_CHUNK_CHARS < CAP_TTS_MAX_CHUNK_CHARS);
+// A real alert came back empty at 2,794 characters, so the first attempt starts below that.
+const _: () = assert!(CAP_TTS_MAX_CHUNK_CHARS < 2_794);
 const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
+pub(crate) const DEFAULT_NO_DESCRIPTION: &str = "No CAP description provided.";
 const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
 const CAP_HEADER_SOURCE_MARKER_WEA: &str = "IPAWSWEA";
+const CAP_HEADER_SOURCE_MARKER_NAAD: &str = "NAADSCAP";
+/// The Canadian Alerting Attention Signal Alert Ready broadcasts open with. Compiled in, so a
+/// standalone binary and the container image both have it without shipping `include/`.
+const ALERT_READY_TONE_WAV: &[u8] = include_bytes!("../include/pelmorex.wav");
 const URL_SPELL_MODE_ON: &str = "\\!rp70 \\!tsc";
 const URL_SPELL_MODE_OFF: &str = "\\!rpr \\!ts0";
-const URL_BARE_HOST_TLDS: &[&str] = &["com", "org", "net", "gov", "edu", "mil", "info", "biz"];
+const URL_BARE_HOST_TLDS: &[&str] = &[
+    "com", "org", "net", "gov", "edu", "mil", "info", "biz", "ca",
+];
 const URL_TWO_LABEL_SUFFIXES: &[&str] = &[
     "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk", "com.au", "net.au", "org.au",
     "gov.au", "edu.au", "co.nz", "govt.nz", "org.nz", "co.jp", "or.jp", "ne.jp", "co.za", "org.za",
@@ -53,30 +78,32 @@ static CAP_TTS_SYNTH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-struct CapAlert {
-    identifier: String,
-    originator_code: String,
-    sender: String,
-    sender_name: Option<String>,
-    sent: Option<DateTime<Utc>>,
-    expires: Option<DateTime<Utc>>,
-    msg_type: String,
-    scope: String,
-    event_text: String,
-    event_code: String,
-    urgency: Option<String>,
-    severity: Option<String>,
-    certainty: Option<String>,
-    description: String,
-    description_raw: String,
-    instructions: Option<String>,
-    simple_description: String,
-    areas: Vec<String>,
-    fips: Vec<String>,
-    audio_uri: Option<String>,
-    audio_deref_uri: Option<String>,
-    audio_mime_type: Option<String>,
-    source_url: String,
+pub(crate) struct CapAlert {
+    pub(crate) identifier: String,
+    pub(crate) originator_code: String,
+    pub(crate) sender: String,
+    pub(crate) sender_name: Option<String>,
+    pub(crate) sent: Option<DateTime<Utc>>,
+    pub(crate) expires: Option<DateTime<Utc>>,
+    pub(crate) msg_type: String,
+    pub(crate) scope: String,
+    pub(crate) event_text: String,
+    pub(crate) event_code: String,
+    pub(crate) urgency: Option<String>,
+    pub(crate) severity: Option<String>,
+    pub(crate) certainty: Option<String>,
+    pub(crate) description: String,
+    pub(crate) description_raw: String,
+    pub(crate) instructions: Option<String>,
+    pub(crate) simple_description: String,
+    pub(crate) areas: Vec<String>,
+    pub(crate) fips: Vec<String>,
+    pub(crate) audio_uri: Option<String>,
+    pub(crate) audio_deref_uri: Option<String>,
+    pub(crate) audio_mime_type: Option<String>,
+    pub(crate) source_url: String,
+    /// CAP-CP (Canadian) alerts humanize against `include/same-ca.json` instead of `same-us.json`.
+    pub(crate) canadian: bool,
 }
 
 fn spawn_cap_processor_task(
@@ -92,11 +119,16 @@ fn spawn_cap_processor_task(
     })
 }
 
+/// Describes both CAP feeds, not just IPAWS: this supervisor always runs and sees every reload,
+/// so it owns the status panel's configuration for CAP-CP too.
 async fn sync_cap_runtime_config_status(app_state: &Arc<Mutex<AppState>>, config: &Config) {
     let mut guard = app_state.lock().await;
-    guard.cap_status.enabled = config.process_cap_alerts;
+    guard.cap_status.enabled = config.process_cap_alerts || config.process_capcp_alerts;
+    guard.cap_status.ipaws_enabled = config.process_cap_alerts;
     guard.cap_status.endpoint_count = config.cap_endpoints.len();
     guard.cap_status.endpoints = config.cap_endpoints.clone();
+    guard.cap_status.capcp_enabled = config.process_capcp_alerts;
+    guard.cap_status.capcp_endpoints = config.capcp_stream_endpoints.clone();
 }
 
 pub async fn run_cap_supervisor(
@@ -466,7 +498,7 @@ fn parsed_identifier_from_url(url: &str) -> String {
         .to_string()
 }
 
-async fn load_persisted_active_dedupe_keys(shared_state_dir: &Path) -> HashSet<String> {
+pub(crate) async fn load_persisted_active_dedupe_keys(shared_state_dir: &Path) -> HashSet<String> {
     let path = shared_state_dir.join(CAP_ACTIVE_ALERTS_FILE);
     let bytes = match fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -513,7 +545,10 @@ fn active_alert_has_dedupe_key(alerts: &[ActiveAlert], dedupe_key: &str) -> bool
     })
 }
 
-async fn cap_alert_is_active(app_state: &Arc<Mutex<AppState>>, dedupe_key: &str) -> bool {
+pub(crate) async fn cap_alert_is_active(
+    app_state: &Arc<Mutex<AppState>>,
+    dedupe_key: &str,
+) -> bool {
     let guard = app_state.lock().await;
     active_alert_has_dedupe_key(&guard.active_alerts, dedupe_key)
 }
@@ -548,7 +583,7 @@ fn backfill_alert_cap_details(
     changed
 }
 
-async fn backfill_persisted_cap_details(
+pub(crate) async fn backfill_persisted_cap_details(
     config: &Config,
     app_state: &Arc<Mutex<AppState>>,
     monitoring: &MonitoringHub,
@@ -631,7 +666,80 @@ async fn update_cap_alert_recording_metadata(
     monitoring.broadcast_alerts(active_snapshot, None, None);
 }
 
-async fn process_cap_alert(
+/// Writes an alert to the dedicated CAP log and the alert database.
+///
+/// Split out of `process_cap_alert` so a caller that has decided an alert should be archived but
+/// not made active -- a CAP-CP alert recovered from the NAAD archive after it expired, say -- can
+/// record it without also relaying it.
+pub(crate) async fn archive_cap_alert(
+    config: &Config,
+    db: &DbHandle,
+    alert: &CapAlert,
+    event_code: &str,
+    source_stream: &str,
+) {
+    if let Err(err) = append_cap_log(config, alert).await {
+        warn!("Failed to append CAP log entry: {}", err);
+    }
+
+    let received_at_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expires_at_iso = alert
+        .expires
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    let cap_duration = encode_expiration_from_cap(alert.sent, alert.expires);
+    let cap_raw_header = build_cap_raw_header(
+        &alert.originator_code,
+        event_code,
+        &alert.fips,
+        alert.sent,
+        alert.expires,
+        &alert.source_url,
+    );
+    let cap_locations = if alert.areas.is_empty() {
+        "Unknown".to_string()
+    } else {
+        alert.areas.join(", ")
+    };
+    let cap_originator_name = alert
+        .sender_name
+        .as_deref()
+        .unwrap_or(alert.sender.as_str());
+    let cap_eas_text = build_eas_text(
+        alert,
+        config.timezone.to_string().as_str(),
+        &config.endec_mode,
+    );
+
+    match db
+        .insert_cap_alert(
+            &cap_raw_header,
+            &cap_eas_text,
+            event_code,
+            &alert.event_text,
+            &alert.originator_code,
+            cap_originator_name,
+            &alert.fips,
+            &cap_locations,
+            Some(alert.simple_description.as_str()),
+            source_stream,
+            alert.urgency.as_deref(),
+            alert.severity.as_deref(),
+            alert.certainty.as_deref(),
+            alert.instructions.as_deref(),
+            &alert.identifier,
+            &alert.sender,
+            Some(cap_duration.as_str()),
+            &received_at_iso,
+            expires_at_iso.as_deref(),
+        )
+        .await
+    {
+        Ok(id) => info!("CAP alert saved to database (id={})", id),
+        Err(err) => warn!("Failed to save CAP alert to database: {}", err),
+    }
+}
+
+pub(crate) async fn process_cap_alert(
     config: &Config,
     app_state: &Arc<Mutex<AppState>>,
     monitoring: &MonitoringHub,
@@ -659,61 +767,7 @@ async fn process_cap_alert(
     let should_log_cap_entry =
         filter::should_log_action(action) && (cap_relevant || config.should_log_all_alerts);
     if should_log_cap_entry {
-        if let Err(err) = append_cap_log(config, &alert).await {
-            warn!("Failed to append CAP log entry: {}", err);
-        }
-
-        let received_at_iso = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let expires_at_iso = alert
-            .expires
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        let cap_duration = encode_expiration_from_cap(alert.sent, alert.expires);
-        let cap_raw_header = build_cap_raw_header(
-            &alert.originator_code,
-            &event_code,
-            &alert.fips,
-            alert.sent,
-            alert.expires,
-            &alert.source_url,
-        );
-        let cap_locations = if alert.areas.is_empty() {
-            "Unknown".to_string()
-        } else {
-            alert.areas.join(", ")
-        };
-        let cap_originator_name = alert
-            .sender_name
-            .as_deref()
-            .unwrap_or(alert.sender.as_str());
-        let cap_eas_text = build_eas_text(&alert, config.timezone.to_string().as_str());
-
-        match db
-            .insert_cap_alert(
-                &cap_raw_header,
-                &cap_eas_text,
-                &event_code,
-                &alert.event_text,
-                &alert.originator_code,
-                cap_originator_name,
-                &alert.fips,
-                &cap_locations,
-                Some(alert.simple_description.as_str()),
-                source_stream,
-                alert.urgency.as_deref(),
-                alert.severity.as_deref(),
-                alert.certainty.as_deref(),
-                alert.instructions.as_deref(),
-                &alert.identifier,
-                &alert.sender,
-                Some(cap_duration.as_str()),
-                &received_at_iso,
-                expires_at_iso.as_deref(),
-            )
-            .await
-        {
-            Ok(id) => info!("CAP alert saved to database (id={})", id),
-            Err(err) => warn!("Failed to save CAP alert to database: {}", err),
-        }
+        archive_cap_alert(config, db, &alert, &event_code, source_stream).await;
     }
 
     if !cap_relevant {
@@ -737,7 +791,7 @@ async fn process_cap_alert(
         .and_then(|json| serde_json::from_str(&json).ok());
     let purge_time = determine_purge_time(alert.expires);
     let timezone = config.timezone.to_string();
-    let eas_text = build_eas_text(&alert, timezone.as_str());
+    let eas_text = build_eas_text(&alert, timezone.as_str(), &config.endec_mode);
     let locations = if alert.areas.is_empty() {
         "Unknown".to_string()
     } else {
@@ -781,10 +835,16 @@ async fn process_cap_alert(
         guard.active_alerts.clone()
     };
 
-    monitoring.broadcast_alerts(active_snapshot, Some(source_stream), Some(&event_code));
+    // No source stream: a CAP feed is not an audio stream. Registering one made the dashboard
+    // filter it back out by URL, which only ever knew the IPAWS endpoints -- and a CAP-CP source
+    // carries the alert identifier, so each alert would have added a new phantom stream.
+    monitoring.broadcast_alerts(active_snapshot, None, None);
 
+    let framing = recording_framing(config, &alert);
     let cap_recording_path =
-        match fetch_cap_audio_recording(client, config, &alert, &raw_header, &event_code).await {
+        match fetch_cap_audio_recording(client, config, &alert, &raw_header, &event_code, framing)
+            .await
+        {
             Ok(path) => path,
             Err(err) => {
                 warn!(
@@ -827,11 +887,14 @@ async fn process_cap_alert(
     }
 
     if filter::should_forward_action(action) {
+        // The raw header stays the alert's identity everywhere internally; it is only kept out of
+        // what gets published when the alert went out as Alert Ready rather than as SAME.
+        let published_header = (framing == RecordingFraming::Same).then_some(raw_header.as_str());
         send_alert_webhook(
             source_stream,
             &alert_for_webhook,
             &eas_text,
-            &raw_header,
+            published_header,
             cap_recording_path.clone(),
         )
         .await;
@@ -971,7 +1034,7 @@ fn parse_inline_alert_documents(
     }
 }
 
-fn simple_sanitize_description(description: &str) -> String {
+pub(crate) fn simple_sanitize_description(description: &str) -> String {
     let mut return_value = description.trim().to_string();
 
     return_value = return_value.replace("\n", " ");
@@ -1099,7 +1162,7 @@ fn parse_cap_alert(xml: &str, source_url: &str) -> Result<CapAlert> {
     let description_raw = normalized_description
         .or(cmam_long_text)
         .or(description_text)
-        .unwrap_or_else(|| "No CAP description provided.".to_string());
+        .unwrap_or_else(|| DEFAULT_NO_DESCRIPTION.to_string());
     let description = sanitize_cap_description(&description_raw);
     let expires = child_text(info_node, "expires")
         .as_deref()
@@ -1174,6 +1237,7 @@ fn parse_cap_alert(xml: &str, source_url: &str) -> Result<CapAlert> {
         audio_deref_uri,
         audio_mime_type,
         source_url: source_url.to_string(),
+        canadian: false,
     })
 }
 
@@ -1219,6 +1283,69 @@ fn normalize_urls_in_description(text: &str, use_spell_tags: bool) -> String {
     collapse_inline_whitespace(&out)
 }
 
+/// Prepares text for TTS: URLs first, then hashtags.
+///
+/// Order matters. The URL pass consumes a trailing `#fragment` as part of the match and drops
+/// it, so by the time hashtags are considered no `#` belonging to a URL is left to misread.
+fn normalize_text_for_speech(text: &str, use_spell_tags: bool) -> String {
+    let spoken = normalize_urls_in_description(text, use_spell_tags);
+    normalize_hashtags_for_speech(&spoken, use_spell_tags)
+}
+
+/// Speaks `#QCStorm` as "hashtag" followed by the tag spelled out, matching how URLs are read.
+fn normalize_hashtags_for_speech(text: &str, use_spell_tags: bool) -> String {
+    if !text.contains('#') {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut cursor = 0usize;
+
+    for caps in hashtag_regex().captures_iter(text) {
+        let whole = caps.get(0).expect("capture group 0 always exists");
+        let tag = caps.name("tag").map(|m| m.as_str()).unwrap_or_default();
+        if tag.is_empty() {
+            continue;
+        }
+
+        out.push_str(&text[cursor..whole.start()]);
+        out.push_str(caps.name("lead").map(|m| m.as_str()).unwrap_or_default());
+        out.push_str("hashtag ");
+        if use_spell_tags {
+            out.push_str(URL_SPELL_MODE_ON);
+            out.push(' ');
+            out.push_str(tag);
+            out.push(' ');
+            out.push_str(URL_SPELL_MODE_OFF);
+        } else {
+            // Without control tags the engine still needs the letters separated to spell it.
+            let mut letters = String::with_capacity(tag.len() * 2);
+            for (index, ch) in tag.chars().enumerate() {
+                if index > 0 {
+                    letters.push(' ');
+                }
+                letters.extend(ch.to_lowercase());
+            }
+            out.push_str(&letters);
+        }
+        cursor = whole.end();
+    }
+
+    out.push_str(&text[cursor..]);
+    collapse_inline_whitespace(&out)
+}
+
+fn hashtag_regex() -> &'static regex::Regex {
+    // Preceded by start-of-text or whitespace so a "#" inside a word or a leftover URL fragment
+    // is not treated as a tag. Tags are alphanumeric with underscores, as on every platform.
+    // The regex crate has no lookbehind, so the preceding boundary is captured and written back.
+    static HASHTAG_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?P<lead>^|\s)#(?P<tag>[A-Za-z0-9_]{1,140})")
+            .expect("valid CAP hashtag regex")
+    });
+    &HASHTAG_RE
+}
+
 fn url_regex() -> &'static regex::Regex {
     static URL_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
         regex::Regex::new(
@@ -1257,7 +1384,13 @@ fn speak_url_host(host: &str, has_scheme: bool, use_spell_tags: bool) -> Option<
         if index > 0 {
             spoken.push_str(" dot ");
         }
-        let spell = use_spell_tags && index < suffix_start && !(index == 0 && starts_with_www);
+        // The final label is spoken as a word normally -- "dot com", "dot org" -- but a
+        // two-letter country code is not a word, and Speechify reads ".ca" as "circa".
+        let is_country_code_tld = index + 1 == labels.len()
+            && label.len() == 2
+            && label.bytes().all(|byte| byte.is_ascii_alphabetic());
+        let spell = use_spell_tags
+            && (is_country_code_tld || (index < suffix_start && !(index == 0 && starts_with_www)));
         if spell {
             spoken.push_str(URL_SPELL_MODE_ON);
             spoken.push(' ');
@@ -1320,7 +1453,7 @@ fn collapse_inline_whitespace(input: &str) -> String {
     out
 }
 
-fn sanitize_cap_description(description: &str) -> String {
+pub(crate) fn sanitize_cap_description(description: &str) -> String {
     let mut working = description.trim();
 
     if let Some(nws_start) = working.find("The National Weather Service") {
@@ -1356,63 +1489,7 @@ fn sanitize_cap_description(description: &str) -> String {
         return String::new();
     }
 
-    let file_contents = match std::fs::read_to_string(CAP_TTS_REPLACEMENT_DICT_PATH) {
-        Ok(contents) => contents,
-        Err(err) => {
-            warn!(
-                "Failed to read CAP TTS replacement dictionary from {}: {}. No custom replacements will be applied.",
-                CAP_TTS_REPLACEMENT_DICT_PATH, err
-            );
-            String::new()
-        }
-    };
-
-    let replacements: HashMap<String, String> = match serde_json::from_str(&file_contents) {
-        Ok(map) => map,
-        Err(err) => {
-            warn!(
-                "Failed to parse CAP TTS replacement dictionary JSON from {}: {}. No custom replacements will be applied.",
-                CAP_TTS_REPLACEMENT_DICT_PATH, err
-            );
-            HashMap::new()
-        }
-    };
-
-    let mut replaced = cleaned.clone();
-
-    for (target, replacement) in replacements {
-        let escaped = regex::escape(&target);
-        let pattern = format!(
-            "{}{}{}",
-            if target.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-                "\\b"
-            } else {
-                ""
-            },
-            escaped,
-            if target.ends_with(|c: char| c.is_alphanumeric() || c == '_') {
-                "\\b"
-            } else {
-                ""
-            },
-        );
-        let re = match regex::RegexBuilder::new(&pattern)
-            .case_insensitive(true)
-            .build()
-        {
-            Ok(r) => r,
-            Err(err) => {
-                warn!(
-                    "Failed to build regex for CAP TTS replacement target '{}': {}. Skipping.",
-                    target, err
-                );
-                continue;
-            }
-        };
-        replaced = re.replace_all(&replaced, replacement.as_str()).into_owned();
-    }
-
-    expand_cap_times_for_tts(&replaced)
+    expand_cap_times_for_tts(&cleaned)
 }
 
 fn is_nws_leading_code_line(line: &str) -> bool {
@@ -1562,6 +1639,189 @@ fn spoken_timezone_name(tz: &str) -> Option<&'static str> {
     }
 }
 
+/// The pronunciation fixes in `cap_tts_replacement_config.json`: each key is replaced by its value,
+/// as a whole token, in a single pass.
+///
+/// Keys used to be applied as raw substrings, one after another in `HashMap` order, so `"S "`
+/// turned "HAS ISSUED" into "HASouth ISSUED" -- and the all-caps ENDEC modes made collisions like
+/// that routine. Now a key only matches where its word characters don't run into more word
+/// characters, the longest key wins where several start at the same place, and replaced text is
+/// never matched again, so the order of the file cannot change the result.
+struct TtsReplacements {
+    pattern: regex::Regex,
+    table: HashMap<String, String>,
+}
+
+/// The dictionary that ships with the listener. Without one, every engine mispronounces county
+/// names, abbreviations and N-1-1 numbers, so it applies unless `TTS_BUILTIN_REPLACEMENTS` turns it
+/// off rather than only when someone has created the file.
+static BUILTIN_TTS_REPLACEMENTS: once_cell::sync::Lazy<HashMap<String, String>> =
+    once_cell::sync::Lazy::new(|| {
+        serde_json::from_str(include_str!("../cap_tts_replacement_config.example.json"))
+            .expect("the built-in TTS dictionary is a JSON object of strings")
+    });
+
+impl TtsReplacements {
+    /// The built-in dictionary with the one at `path` laid over it, the file winning where both
+    /// have a key.
+    fn load(path: &Path, builtin: bool) -> Option<Self> {
+        let mut table = if builtin {
+            BUILTIN_TTS_REPLACEMENTS.clone()
+        } else {
+            HashMap::new()
+        };
+
+        match std::fs::read_to_string(path) {
+            // A typo used to disable every replacement without a word.
+            Ok(contents) => match serde_json::from_str::<HashMap<String, String>>(&contents) {
+                Ok(own) => table.extend(own),
+                Err(err) => warn!(
+                    "Ignoring TTS replacements in {}: it must be a JSON object of strings ({}).",
+                    path.display(),
+                    err
+                ),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                "Could not read TTS replacements from {}: {}",
+                path.display(),
+                err
+            ),
+        }
+
+        Self::new(table)
+    }
+
+    fn new(mut table: HashMap<String, String>) -> Option<Self> {
+        table.retain(|key, _| !key.is_empty());
+        if table.is_empty() {
+            return None;
+        }
+
+        // Alternation takes the first branch that matches, so longer keys go first -- "SSW " has
+        // to beat "S " at the same spot -- and ties sort alphabetically to keep the pattern stable.
+        let mut keys: Vec<&String> = table.keys().collect();
+        keys.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        let alternation = keys
+            .iter()
+            .map(|key| replacement_key_pattern(key))
+            .collect::<Vec<_>>()
+            .join("|");
+
+        match regex::Regex::new(&alternation) {
+            Ok(pattern) => Some(Self { pattern, table }),
+            Err(err) => {
+                warn!("Ignoring TTS replacements: {}", err);
+                None
+            }
+        }
+    }
+
+    fn apply(&self, text: &str) -> String {
+        // A closure rather than a replacement string, so `$` in a value is not a capture reference.
+        self.pattern
+            .replace_all(text, |caps: &regex::Captures| {
+                let found = &caps[0];
+                // An all-lowercase key matches in any case, so "HWY " arrives here as itself and
+                // is looked up by the key that matched it.
+                self.table
+                    .get(found)
+                    .or_else(|| self.table.get(&found.to_lowercase()))
+                    .cloned()
+                    .unwrap_or_else(|| found.to_string())
+            })
+            .into_owned()
+    }
+
+    /// Applies the dictionary to prose only, before `normalize_text_for_speech` runs. URLs and
+    /// hashtags pass through exactly as written for that step to read out, found by the very same
+    /// detectors so the two cannot disagree about what a URL is. Running first also means the
+    /// dictionary never sees what that step emits, which for Speechify includes engine-specific
+    /// control codes.
+    fn apply_to_prose(&self, text: &str) -> String {
+        let mut protected: Vec<(usize, usize)> = url_regex()
+            .find_iter(text)
+            .chain(hashtag_regex().find_iter(text))
+            .map(|found| (found.start(), found.end()))
+            .collect();
+        protected.sort_unstable();
+
+        let mut out = String::with_capacity(text.len() + 32);
+        let mut cursor = 0usize;
+        for (start, end) in protected {
+            if end <= cursor {
+                continue;
+            }
+            let start = start.max(cursor);
+            out.push_str(&self.apply(&text[cursor..start]));
+            out.push_str(&text[start..end]);
+            cursor = end;
+        }
+        out.push_str(&self.apply(&text[cursor..]));
+        out
+    }
+}
+
+/// A key's letters and digits must not run into more letters and digits at either end, so `"S "`
+/// cannot match the end of "HAS " nor `"EAS"` the middle of "AREAS". An end that is already a space
+/// or punctuation delimits itself and is matched as written.
+///
+/// Case follows the key, the way smartcase search does: an all-lowercase key such as `"hwy "`
+/// also catches "HWY " in all-caps text, while a key with capitals matches exactly -- so `"LA"`
+/// leaves the French "la" alone and `"S "` cannot reach the "s " of "it's ".
+fn replacement_key_pattern(key: &str) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let lead = if key.starts_with(is_word) { r"\b" } else { "" };
+    let trail = if key.ends_with(is_word) { r"\b" } else { "" };
+    let escaped = regex::escape(key);
+    if key.chars().any(char::is_uppercase) {
+        format!("{lead}{escaped}{trail}")
+    } else {
+        format!("{lead}(?i:{escaped}){trail}")
+    }
+}
+
+fn raw_header_sender(header: &str) -> &str {
+    header
+        .trim_end_matches('-')
+        .rsplit('-')
+        .next()
+        .unwrap_or_default()
+}
+
+/// Drops the sender every ENDEC template ends its sentence with -- "(KWO35)", "Message from
+/// KWO35." or a bare "KWO35" -- so `TTS_READ_CALLSIGN` silences the call sign whichever mode wrote
+/// the text. Line by line, for `ENDEC_MODE=ALL`.
+fn strip_sender_clause(text: &str, sender: &str) -> String {
+    let sender = sender.trim();
+    if sender.is_empty() {
+        return text.to_string();
+    }
+    let pattern = format!(
+        r"(?i)[ \t]*(?:[.,;:]?[ \t]*message from[ \t]+)?\(?{}\)?[ \t]*\.?[ \t]*$",
+        regex::escape(sender)
+    );
+    let Ok(clause) = regex::Regex::new(&pattern) else {
+        return text.to_string();
+    };
+
+    text.lines()
+        .map(|line| {
+            let stripped = clause.replace(line, "");
+            if stripped.len() == line.len() {
+                return line.to_string();
+            }
+            let stripped = stripped.trim_end();
+            if stripped.is_empty() || stripped.ends_with(['.', '!', '?']) {
+                stripped.to_string()
+            } else {
+                format!("{stripped}.")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 async fn synthesize_cap_tts_audio(
     config: &Config,
     alert: &CapAlert,
@@ -1572,7 +1832,7 @@ async fn synthesize_cap_tts_audio(
         alert.identifier, event_code
     );
     let timezone = config.timezone.to_string();
-    let alert_prefix_raw = build_eas_text(alert, timezone.as_str());
+    let alert_prefix_raw = build_eas_text(alert, timezone.as_str(), &config.endec_mode);
 
     let alert_prefix = if let Some((before_nws, after_nws)) =
         alert_prefix_raw.split_once("The National Weather Service in ")
@@ -1586,21 +1846,37 @@ async fn synthesize_cap_tts_audio(
         alert_prefix_raw.clone()
     };
 
-    let alert_prefix = CAP_TTS_REPLACEMENT_DICT_PATH
-        .parse::<PathBuf>()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|file_contents| {
-            serde_json::from_str::<HashMap<String, String>>(&file_contents).ok()
-        })
-        .map(|replacements| {
-            let mut replaced = alert_prefix.clone();
-            for (target, replacement) in replacements {
-                replaced = replaced.replace(&target, &replacement);
-            }
-            replaced
-        })
-        .unwrap_or_else(|| alert_prefix.clone());
+    // The SAGE's own front end, when Loquendo is standing in for the SAGE's Loquendo.
+    let alert_prefix =
+        if config.tts_engine == "loquendo" && config.endec_mode.eq_ignore_ascii_case("SAGE") {
+            crate::hellotts::rewrite(&alert_prefix)
+        } else {
+            alert_prefix
+        };
+    let alert_prefix = if config.tts_read_callsign {
+        alert_prefix
+    } else {
+        let header = build_cap_raw_header(
+            &alert.originator_code,
+            &alert.event_code,
+            &alert.fips,
+            alert.sent,
+            alert.expires,
+            &alert.source_url,
+        );
+        strip_sender_clause(&alert_prefix, raw_header_sender(&header))
+    };
+
+    // One dictionary for everything that gets spoken, whatever the engine.
+    let replacements = TtsReplacements::load(
+        &crate::paths::cap_tts_replacement_dict(),
+        config.tts_builtin_replacements,
+    );
+    let respell = |text: &str| match &replacements {
+        Some(table) => table.apply_to_prose(text),
+        None => text.to_string(),
+    };
+    let alert_prefix = respell(&alert_prefix);
 
     let description = alert.description.trim();
 
@@ -1639,83 +1915,42 @@ async fn synthesize_cap_tts_audio(
         .filter(|s| !s.is_empty());
 
     let use_spell_tags = config.tts_engine == "speechify";
-    let spoken_description = normalize_urls_in_description(description, use_spell_tags);
+    let spoken_description = normalize_text_for_speech(&respell(description), use_spell_tags);
     let spoken_instructions = deduped_instructions
         .as_deref()
-        .map(|instr| normalize_urls_in_description(instr, use_spell_tags))
+        .map(|instr| normalize_text_for_speech(&respell(instr), use_spell_tags))
         .unwrap_or_default();
 
     let tts_text = format!("{alert_prefix} {spoken_description} {spoken_instructions}");
+    // Exactly what the engine is handed, so a replacement that misfires can be seen, not guessed.
+    debug!(
+        "CAP TTS text for alert {} ({}): {}",
+        alert.identifier, event_code, tts_text
+    );
 
-    let status = match config.tts_engine.as_str() {
-        "piper" => {
-            let model = config
-                .tts_model
-                .as_deref()
-                .unwrap_or(CAP_TTS_DEFAULT_PIPER_MODEL);
-            let mut child = Command::new("piper")
-                .arg("--model")
-                .arg(model)
-                .arg("--output_file")
-                .arg(&tts_path)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .context("Failed to spawn Piper TTS process")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(tts_text.as_bytes())
-                    .await
-                    .context("Failed to write text to Piper stdin")?;
-                drop(stdin);
-            }
-            child
-                .wait()
-                .await
-                .context("Failed to wait for Piper TTS process")?
-        }
-        "espeak-ng" => Command::new("espeak-ng")
-            .arg("-w")
-            .arg(&tts_path)
-            .arg(&tts_text)
-            .status()
-            .await
-            .context("Failed to execute espeak-ng TTS command")?,
-        "speechify" => {
-            let output = Command::new("spfy_synth")
-                .arg("/app/voices/tom/tom.vin")
-                .arg("/app/voices/tom/tom8.vdb")
-                .arg("/app/voices/tom/tom.vcf")
-                .arg(&tts_text)
-                .arg(&tts_path)
-                .output()
-                .await
-                .context("Failed to execute Speechify TTS command")?;
-            if !output.status.success() {
-                return Err(anyhow!(
-                    "Speechify (spfy_synth) failed with status {:?}: {}",
-                    output.status.code(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-            output.status
-        }
-        other => {
-            return Err(anyhow!(
-                "Unknown TTS engine '{}'. Supported: piper, espeak-ng, speechify",
-                other
-            ));
-        }
+    let Some((sample_rate, samples)) =
+        synthesize_tts_samples(config, &tts_text, &alert.identifier, event_code).await?
+    else {
+        warn!(
+            "CAP TTS produced no audio for alert {} ({}) from {} character(s) of text.",
+            alert.identifier,
+            event_code,
+            tts_text.chars().count()
+        );
+        return Ok(None);
     };
 
-    if !status.success() {
-        return Err(anyhow!(
-            "CAP TTS command failed with status {:?}",
-            status.code()
-        ));
-    }
+    write_wav_i16(&tts_path, sample_rate, &samples).await?;
 
     let metadata = fs::metadata(&tts_path).await?;
-    if metadata.len() == 0 {
+    if metadata.len() <= CAP_TTS_EMPTY_WAV_BYTES {
+        warn!(
+            "CAP TTS produced no audio for alert {} ({}): {} byte(s) from {} character(s) of text.",
+            alert.identifier,
+            event_code,
+            metadata.len(),
+            tts_text.chars().count()
+        );
         let _ = fs::remove_file(&tts_path).await;
         return Ok(None);
     }
@@ -1727,6 +1962,801 @@ async fn synthesize_cap_tts_audio(
     );
 
     Ok(Some(tts_path))
+}
+
+/// Whether a failed engine run means the binary is missing or not executable, as opposed to an
+/// engine that ran and choked on its input.
+fn tts_engine_could_not_start(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            )
+        })
+    })
+}
+
+/// How each engine is named aloud in the test alert's narration.
+fn tts_engine_spoken_name(engine: &str) -> &str {
+    match engine {
+        "piper" => "Piper",
+        "espeak-ng" => "e Speak",
+        "speechify" => "Speechify",
+        "cepstral" => "Cepstral",
+        "loquendo" => "Loquendo",
+        other => other,
+    }
+}
+
+/// The test alert's narration. Generic, but it names the engine, so a recording can be matched to
+/// the configuration that produced it when several engines are being compared.
+pub(crate) fn test_alert_tts_script(config: &Config) -> String {
+    format!(
+        "This is a test of the E A S Listener text to speech system, using the {} engine. \
+         If you can hear this message, alerts that arrive without audio will be read aloud in \
+         this voice. No action is required. This concludes this test of E A S Listener.",
+        tts_engine_spoken_name(&config.tts_engine)
+    )
+}
+
+/// Narrates the test alert through exactly the path CAP alerts take -- voice resolution, chunking
+/// and the halve-and-retry recovery included -- so a pass here means CAP narration will work.
+pub(crate) async fn synthesize_test_alert_narration(
+    config: &Config,
+) -> Result<Option<(u32, Vec<i16>)>> {
+    let use_spell_tags = config.tts_engine == "speechify";
+    let text = normalize_text_for_speech(&test_alert_tts_script(config), use_spell_tags);
+
+    // Shared with CAP narration, so a test never runs an engine alongside a real alert's.
+    let _guard = cap_tts_synth_lock().lock().await;
+    synthesize_tts_samples(config, &text, "test-alert", "RWT").await
+}
+
+/// One synthesis attempt: either audio, or a reason it produced none.
+enum TtsAttempt {
+    Audio(u32, Vec<i16>),
+    NoAudio(String),
+}
+
+/// Synthesizes `text`, halving and retrying any passage the engine cannot handle.
+///
+/// Speechify's guest heap ceiling moves with content, not just length, so a passage that comes
+/// back as a header-only WAV is split and retried rather than written off. Returns `None` only
+/// when nothing at all could be synthesized.
+async fn synthesize_tts_samples(
+    config: &Config,
+    text: &str,
+    alert_id: &str,
+    event_code: &str,
+) -> Result<Option<(u32, Vec<i16>)>> {
+    // Checked once up front so a misconfigured engine fails outright instead of being retried
+    // as though it were a length problem.
+    if !matches!(
+        config.tts_engine.as_str(),
+        "piper" | "espeak-ng" | "speechify" | "cepstral" | "loquendo"
+    ) {
+        return Err(anyhow!(
+            "Unknown TTS engine '{}'. Supported: {}",
+            config.tts_engine,
+            CAP_TTS_SUPPORTED_ENGINES
+        ));
+    }
+    // A Speechify voice outside the default folder is the user's own, which no fetch can supply,
+    // so it is reported before anything is downloaded.
+    if config.tts_engine == "speechify" && config.spfy_voice_dir != crate::paths::spfy_voice_dir() {
+        speechify_voice(config)?;
+    }
+    // Before the voice checks below, which would otherwise fail on a voice that is only missing
+    // because it has not been fetched yet.
+    ensure_tts_engine(config).await?;
+    match config.tts_engine.as_str() {
+        "speechify" => {
+            speechify_voice(config)?;
+        }
+        "cepstral" => {
+            cepstral_voice_dir(config)?;
+        }
+        _ => {}
+    }
+
+    let mut pending: VecDeque<String> = split_tts_text(text, CAP_TTS_MAX_CHUNK_CHARS)
+        .into_iter()
+        .collect();
+    if pending.is_empty() {
+        return Ok(None);
+    }
+
+    let mut combined: Vec<i16> = Vec::new();
+    let mut sample_rate: Option<u32> = None;
+    let mut synthesized = 0usize;
+    let mut dropped = 0usize;
+    let mut attempts = 0usize;
+    // Lowered whenever a passage comes back empty, and applied to everything still queued. The
+    // engine's ceiling is a property of the run, not of one passage, so rediscovering it chunk
+    // by chunk would burn an attempt per chunk per halving.
+    let mut size_limit = CAP_TTS_MAX_CHUNK_CHARS;
+
+    while let Some(piece) = pending.pop_front() {
+        attempts += 1;
+        if attempts > CAP_TTS_MAX_SYNTH_ATTEMPTS {
+            warn!(
+                "CAP TTS for alert {} ({}) hit the {}-attempt ceiling with {} passage(s) still queued.",
+                alert_id,
+                event_code,
+                CAP_TTS_MAX_SYNTH_ATTEMPTS,
+                pending.len() + 1
+            );
+            dropped += pending.len() + 1;
+            break;
+        }
+
+        let reason = match synthesize_tts_piece(config, &piece).await? {
+            TtsAttempt::Audio(rate, samples) => {
+                match sample_rate {
+                    Some(existing) if existing != rate => {
+                        return Err(anyhow!(
+                            "TTS returned {} Hz for one passage but {} Hz for an earlier one",
+                            rate,
+                            existing
+                        ));
+                    }
+                    Some(_) => {}
+                    None => sample_rate = Some(rate),
+                }
+                combined.extend_from_slice(&samples);
+                synthesized += 1;
+                continue;
+            }
+            TtsAttempt::NoAudio(reason) => reason,
+        };
+
+        let chars = piece.chars().count();
+        if chars <= CAP_TTS_MIN_CHUNK_CHARS {
+            warn!(
+                "CAP TTS could not synthesize a {}-character passage of alert {} ({}); omitting it. {}",
+                chars, alert_id, event_code, reason
+            );
+            dropped += 1;
+            continue;
+        }
+
+        let next_limit = chars.div_ceil(2).max(CAP_TTS_MIN_CHUNK_CHARS);
+        if next_limit < size_limit {
+            size_limit = next_limit;
+            let queued: Vec<String> = pending.drain(..).collect();
+            pending = queued
+                .iter()
+                .flat_map(|queued_piece| split_tts_text(queued_piece, size_limit))
+                .collect();
+        }
+
+        let halves = split_tts_text(&piece, size_limit);
+        if halves.len() < 2 {
+            warn!(
+                "CAP TTS could not split a {}-character passage of alert {} ({}) any further; omitting it. {}",
+                chars, alert_id, event_code, reason
+            );
+            dropped += 1;
+            continue;
+        }
+
+        info!(
+            "CAP TTS retrying a {}-character passage of alert {} ({}) as {} pieces of at most {} characters. {}",
+            chars,
+            alert_id,
+            event_code,
+            halves.len(),
+            size_limit,
+            reason
+        );
+        for half in halves.into_iter().rev() {
+            pending.push_front(half);
+        }
+    }
+
+    if dropped > 0 {
+        warn!(
+            "CAP TTS omitted {} passage(s) of alert {} ({}); {} passage(s) were synthesized.",
+            dropped, alert_id, event_code, synthesized
+        );
+    }
+
+    if synthesized == 0 {
+        return Ok(None);
+    }
+
+    let rate = sample_rate.ok_or_else(|| anyhow!("TTS produced audio with no sample rate"))?;
+    Ok(Some((rate, combined)))
+}
+
+async fn synthesize_tts_piece(config: &Config, text: &str) -> Result<TtsAttempt> {
+    let out_path = tempfile::Builder::new()
+        .prefix("cap_tts_chunk_")
+        .suffix(".wav")
+        .tempfile()
+        .context("Failed to create TTS output file")?
+        .into_temp_path();
+    // TempPath is AsRef for both Path and OsStr, so pin the one the calls below need.
+    let out_path: &Path = out_path.as_ref();
+
+    // A failure here is reported rather than propagated: for the engine that actually has a
+    // ceiling the fix is to retry with less text, and the caller decides that. An engine that
+    // could not be started at all is the exception -- less text will not start it either.
+    let diagnostic = match run_tts_engine(config, text, out_path).await {
+        Ok(stderr) => stderr,
+        Err(err) if tts_engine_could_not_start(&err) => return Err(err),
+        Err(err) => return Ok(TtsAttempt::NoAudio(err.to_string())),
+    };
+
+    let byte_len = match fs::metadata(out_path).await {
+        Ok(metadata) => metadata.len(),
+        Err(err) => {
+            return Ok(TtsAttempt::NoAudio(format!(
+                "engine wrote no output file: {err}"
+            )))
+        }
+    };
+
+    if byte_len <= CAP_TTS_EMPTY_WAV_BYTES {
+        let detail = if diagnostic.is_empty() {
+            String::new()
+        } else {
+            format!(" Engine said: {diagnostic}")
+        };
+        return Ok(TtsAttempt::NoAudio(format!(
+            "{} character(s) produced {} byte(s) of WAV.{}",
+            text.chars().count(),
+            byte_len,
+            detail
+        )));
+    }
+
+    match read_wav_i16(out_path).await {
+        Ok((rate, samples)) => Ok(TtsAttempt::Audio(rate, samples)),
+        Err(err) => Ok(TtsAttempt::NoAudio(format!("unreadable WAV: {err}"))),
+    }
+}
+
+/// Resolves the configured Cepstral voice to a directory, checked before the engine is spawned so
+/// a voice that was never fetched reports what to run instead of the engine's bare
+/// "cannot open voice".
+/// The three files `spfy_synth` needs to open one voice.
+#[derive(Debug, PartialEq, Eq)]
+struct SpeechifyVoice {
+    vin: PathBuf,
+    vdb: PathBuf,
+    vcf: PathBuf,
+}
+
+/// Where a Speechify voice could live, given `TTS_MODEL`.
+///
+/// `SPFY_VOICE_DIR` historically pointed straight at one voice (`.../voices/tom`), but a bare
+/// `TTS_MODEL` reads naturally as a voice sitting *inside* it. Both layouts are in the wild, so a
+/// name is looked for in each and the first that actually holds a voice wins.
+fn speechify_voice_dir_candidates(config: &Config) -> Vec<PathBuf> {
+    let Some(model) = config
+        .tts_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return vec![config.spfy_voice_dir.clone()];
+    };
+
+    let model_path = Path::new(model);
+    if model_path.is_absolute() {
+        return vec![model_path.to_path_buf()];
+    }
+
+    if model.contains(['/', '\\']) {
+        // A relative path is anchored to the application root, like config.json's other paths,
+        // with the working directory kept as a fallback.
+        return vec![
+            crate::paths::in_app_root(model_path),
+            model_path.to_path_buf(),
+        ];
+    }
+
+    let mut candidates = vec![config.spfy_voice_dir.join(model)];
+    if let Some(parent) = config.spfy_voice_dir.parent() {
+        let sibling = parent.join(model);
+        if !candidates.contains(&sibling) {
+            candidates.push(sibling);
+        }
+    }
+    candidates
+}
+
+/// Resolves `TTS_MODEL` to a Speechify voice, or explains exactly where it looked.
+///
+/// A voice directory holds three files named after the directory itself -- `crstom/crstom.vin`,
+/// `crstom8.vdb`, `crstom.vcf` -- so the stem comes from the directory name rather than being
+/// pinned to Tom. The `8`/`16` in the `.vdb` is its sample rate; Tom ships both and everything else
+/// ships only 8, so 8 is preferred and 16 is accepted when it is all that is there.
+fn speechify_voice(config: &Config) -> Result<SpeechifyVoice> {
+    const VDB_RATES: &[&str] = &["8", "16"];
+
+    let candidates = speechify_voice_dir_candidates(config);
+    let mut tried = Vec::new();
+
+    for dir in &candidates {
+        let Some(stem) = dir.file_name().and_then(|name| name.to_str()) else {
+            tried.push(format!("{} (not a voice directory)", dir.display()));
+            continue;
+        };
+
+        if !dir.is_dir() {
+            tried.push(format!("{} (no such directory)", dir.display()));
+            continue;
+        }
+
+        let vin = dir.join(format!("{stem}.vin"));
+        let vcf = dir.join(format!("{stem}.vcf"));
+        let vdb = VDB_RATES
+            .iter()
+            .map(|rate| dir.join(format!("{stem}{rate}.vdb")))
+            .find(|path| path.is_file());
+
+        let mut missing = Vec::new();
+        if !vin.is_file() {
+            missing.push(format!("{stem}.vin"));
+        }
+        if vdb.is_none() {
+            missing.push(format!("{stem}8.vdb"));
+        }
+        if !vcf.is_file() {
+            missing.push(format!("{stem}.vcf"));
+        }
+
+        if let Some(vdb) = vdb {
+            if missing.is_empty() {
+                return Ok(SpeechifyVoice { vin, vdb, vcf });
+            }
+        }
+        tried.push(format!(
+            "{} (missing {})",
+            dir.display(),
+            missing.join(", ")
+        ));
+    }
+
+    let requested = config
+        .tts_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| format!("TTS_MODEL '{model}'"))
+        .unwrap_or_else(|| format!("SPFY_VOICE_DIR {}", config.spfy_voice_dir.display()));
+
+    Err(anyhow!(
+        "Could not resolve a Speechify voice from {}. A voice directory holds <name>.vin, \
+         <name>8.vdb and <name>.vcf, all named after the directory itself. Looked in: {}",
+        requested,
+        tried.join("; ")
+    ))
+}
+
+fn cepstral_voice_dir(config: &Config) -> Result<PathBuf> {
+    let voice = config
+        .tts_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(CAP_TTS_DEFAULT_CEPSTRAL_VOICE);
+
+    if voice.contains(['/', '\\']) || voice.contains("..") {
+        return Err(anyhow!(
+            "TTS_MODEL '{}' is not a Cepstral voice name. Use one of: {}",
+            voice,
+            CAP_TTS_CEPSTRAL_VOICES
+        ));
+    }
+
+    let voice_dir = config.cep6_voice_dir.join(voice);
+    if !voice_dir.join("voice.idx").is_file() {
+        return Err(anyhow!(
+            "Cepstral voice '{}' is not installed in {}. Run: tts_voices/cep6/fetch_voices.sh -d {} {}",
+            voice,
+            config.cep6_voice_dir.display(),
+            config.cep6_voice_dir.display(),
+            voice
+        ));
+    }
+
+    Ok(voice_dir)
+}
+
+/// Text as loqdave reads it: one Latin-1 byte per character. The punctuation NWS and CAP-CP text
+/// is full of has an ASCII stand-in; anything else outside Latin-1 becomes a space, which the
+/// engine treats as a pause rather than reading out a replacement character.
+fn to_latin1(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{0000}'..='\u{00FF}' => bytes.push(ch as u8),
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => bytes.push(b'\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => bytes.push(b'"'),
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => bytes.push(b'-'),
+            '\u{2026}' => bytes.extend_from_slice(b"..."),
+            _ => bytes.push(b' '),
+        }
+    }
+    bytes
+}
+
+/// loqdave writes a fixed Loquendo banner and an interactive prompt to stderr on every run, so a
+/// real diagnostic arrives buried in nine lines of boilerplate. Keep only what is not boilerplate.
+fn strip_loqdave_banner(stderr: &str) -> String {
+    const BANNER_PREFIXES: [&str; 8] = [
+        "Copyright (C)",
+        "LoquendoTTS",
+        "Multilingual Text-To-Speech",
+        "Speaker =",
+        "Speech Format =",
+        "Audio destination library =",
+        "End your sentence with",
+        "Press Ctrl-D to exit.",
+    ];
+
+    stderr
+        .lines()
+        .map(|line| line.trim_start_matches('>').trim())
+        .filter(|line| {
+            !line.is_empty()
+                && !BANNER_PREFIXES
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Fetches the configured engine, and the voice it needs, the first time they are wanted: a
+/// standalone install ships none of them. An engine that cannot be had is reported the way one
+/// that fails to launch is, so the caller does not retry it passage by passage.
+pub(crate) async fn ensure_tts_engine(config: &Config) -> Result<()> {
+    use crate::components::{self, CEP6, ESPEAK_NG, LOQDAVE, PIPER, SPFY_SYNTH};
+    let unavailable = |why: String| {
+        anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, why)).context(
+            format!("The {} TTS engine is not available", config.tts_engine),
+        )
+    };
+
+    match config.tts_engine.as_str() {
+        "piper" => {
+            components::ensure(&PIPER).await.map_err(unavailable)?;
+            let default_model = crate::paths::piper_default_model();
+            if config.tts_model.is_none() && !default_model.is_file() {
+                components::refetch(&PIPER, move || default_model.is_file())
+                    .await
+                    .map_err(unavailable)?;
+            }
+        }
+        "espeak-ng" => {
+            components::ensure(&ESPEAK_NG).await.map_err(unavailable)?;
+        }
+        "speechify" => {
+            components::ensure(&SPFY_SYNTH).await.map_err(unavailable)?;
+            // The Tom voice comes with the engine's download, into the default voice folder; a
+            // voice anywhere else is the user's own to install.
+            if speechify_voice(config).is_err()
+                && config.spfy_voice_dir == crate::paths::spfy_voice_dir()
+            {
+                let config = config.clone();
+                components::refetch(&SPFY_SYNTH, move || speechify_voice(&config).is_ok())
+                    .await
+                    .map_err(unavailable)?;
+            }
+        }
+        "cepstral" => {
+            components::ensure(&CEP6).await.map_err(unavailable)?;
+            if cepstral_voice_dir(config).is_err() {
+                let voice = config
+                    .tts_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(CAP_TTS_DEFAULT_CEPSTRAL_VOICE);
+                // A name that is not one of the four is left to cepstral_voice_dir to explain.
+                if CAP_TTS_CEPSTRAL_VOICES
+                    .split(", ")
+                    .any(|known| known == voice)
+                {
+                    let installed = config.clone();
+                    components::ensure_cepstral_voice(&config.cep6_voice_dir, voice, move || {
+                        cepstral_voice_dir(&installed).is_ok()
+                    })
+                    .await
+                    .map_err(unavailable)?;
+                }
+            }
+        }
+        "loquendo" => {
+            components::ensure(&LOQDAVE).await.map_err(unavailable)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Started with the listener and after each reload, so the first alert does not wait on a
+/// download of the engine it is about to use.
+pub(crate) async fn prefetch_tts_engine(config: Config) {
+    match ensure_tts_engine(&config).await {
+        Ok(()) => {}
+        Err(err) => warn!("{err:#}"),
+    }
+}
+
+async fn run_tts_engine(config: &Config, text: &str, out_path: &Path) -> Result<String> {
+    ensure_tts_engine(config).await?;
+
+    // Engines that take the text as a command-line argument blow past the per-argument limit on
+    // a long alert, so every engine reads from a file instead. The handle is closed but the path
+    // is unlinked on drop, so it is cleaned up on every path out of this function.
+    let input_path = {
+        use std::io::Write as _;
+
+        let mut input_file = tempfile::Builder::new()
+            .prefix("cap_tts_")
+            .suffix(".txt")
+            .tempfile()
+            .context("Failed to create TTS input file")?;
+        // loqdave drives the engine with InputTextCoding=ansi, one byte per character; handed
+        // UTF-8, every curly quote or accent would be read as two or three wrong letters.
+        let bytes = if config.tts_engine == "loquendo" {
+            std::borrow::Cow::Owned(to_latin1(text))
+        } else {
+            std::borrow::Cow::Borrowed(text.as_bytes())
+        };
+        input_file
+            .write_all(&bytes)
+            .context("Failed to write TTS input file")?;
+        input_file
+            .flush()
+            .context("Failed to flush TTS input file")?;
+        input_file.into_temp_path()
+    };
+
+    let mut diagnostic = String::new();
+    let status = match config.tts_engine.as_str() {
+        "piper" => {
+            let default_model = crate::paths::piper_default_model();
+            let model: &Path = config
+                .tts_model
+                .as_deref()
+                .map_or(default_model.as_path(), Path::new);
+            let mut child = Command::new(crate::components::binary(&crate::components::PIPER))
+                .arg("--model")
+                .arg(model)
+                .arg("--output_file")
+                .arg(out_path)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("Failed to spawn Piper TTS process")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(text.as_bytes())
+                    .await
+                    .context("Failed to write text to Piper stdin")?;
+                drop(stdin);
+            }
+            child
+                .wait()
+                .await
+                .context("Failed to wait for Piper TTS process")?
+        }
+        "espeak-ng" => {
+            let output = Command::new(crate::components::binary(&crate::components::ESPEAK_NG))
+                .arg("-w")
+                .arg(out_path)
+                .arg("-f")
+                .arg(input_path.as_os_str())
+                .output()
+                .await
+                .context("Failed to execute espeak-ng TTS command")?;
+            diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            output.status
+        }
+        "speechify" => {
+            let voice = speechify_voice(config)?;
+            // With --file the "<text>" positional is omitted, leaving the three voice paths and
+            // the output path.
+            let output = Command::new(crate::components::binary(&crate::components::SPFY_SYNTH))
+                .arg("--file")
+                .arg(input_path.as_os_str())
+                .arg(&voice.vin)
+                .arg(&voice.vdb)
+                .arg(&voice.vcf)
+                .arg(out_path)
+                .output()
+                .await
+                .context("Failed to execute Speechify TTS command")?;
+            // spfy_synth exits 0 even when its guest heap runs dry, so stderr is the only
+            // evidence of what went wrong and has to survive a successful exit.
+            diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "Speechify (spfy_synth) failed with status {:?}: {}",
+                    output.status.code(),
+                    diagnostic
+                ));
+            }
+            output.status
+        }
+        "cepstral" => {
+            let voice_dir = cepstral_voice_dir(config)?;
+            let output = Command::new(crate::components::binary(&crate::components::CEP6))
+                .arg(&voice_dir)
+                .arg("file")
+                .arg(input_path.as_os_str())
+                .arg(out_path)
+                .output()
+                .await
+                .context("Failed to execute Cepstral (cep6) TTS command")?;
+            diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            output.status
+        }
+        "loquendo" => {
+            let mut command = Command::new(crate::components::binary(&crate::components::LOQDAVE));
+            // --data replaces the voice built into loqdave rather than adding to it, so it is
+            // only passed when someone has pointed it somewhere on purpose.
+            if !config.loq6_data_dir.as_os_str().is_empty() {
+                command.arg("--data").arg(&config.loq6_data_dir);
+            }
+            let output = command
+                .arg("--file")
+                .arg(input_path.as_os_str())
+                .arg("--out")
+                .arg(out_path)
+                .output()
+                .await
+                .context("Failed to execute Loquendo (loqdave) TTS command")?;
+            diagnostic = strip_loqdave_banner(&String::from_utf8_lossy(&output.stderr));
+            output.status
+        }
+        other => {
+            return Err(anyhow!(
+                "Unknown TTS engine '{}'. Supported: {}",
+                other,
+                CAP_TTS_SUPPORTED_ENGINES
+            ));
+        }
+    };
+
+    if !status.success() {
+        return Err(anyhow!(
+            "CAP TTS command failed with status {:?}: {}",
+            status.code(),
+            diagnostic
+        ));
+    }
+
+    Ok(diagnostic)
+}
+
+/// Splits TTS text into pieces no longer than `max_chars`, preferring sentence boundaries so a
+/// chunk never starts mid-thought. Falls back to word boundaries for a single long sentence, and
+/// to character boundaries for a single long word.
+fn split_tts_text(text: &str, max_chars: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || max_chars == 0 {
+        return Vec::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return vec![trimmed.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for sentence in split_sentences(trimmed) {
+        for piece in split_oversized(&sentence, max_chars) {
+            let would_be = if current.is_empty() {
+                piece.chars().count()
+            } else {
+                current.chars().count() + 1 + piece.chars().count()
+            };
+
+            if !current.is_empty() && would_be > max_chars {
+                chunks.push(std::mem::take(&mut current));
+            }
+
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(&piece);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        if matches!(ch, '.' | '!' | '?') && chars.peek().is_none_or(|next| next.is_whitespace()) {
+            let sentence = current.trim().to_string();
+            if !sentence.is_empty() {
+                sentences.push(sentence);
+            }
+            current.clear();
+        }
+    }
+
+    let tail = current.trim().to_string();
+    if !tail.is_empty() {
+        sentences.push(tail);
+    }
+
+    sentences
+}
+
+fn split_oversized(sentence: &str, max_chars: usize) -> Vec<String> {
+    if sentence.chars().count() <= max_chars {
+        return vec![sentence.to_string()];
+    }
+
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+
+    for word in sentence.split_whitespace() {
+        if word.chars().count() > max_chars {
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+            }
+            for ch in word.chars() {
+                if current.chars().count() == max_chars {
+                    pieces.push(std::mem::take(&mut current));
+                }
+                current.push(ch);
+            }
+            continue;
+        }
+
+        let would_be = if current.is_empty() {
+            word.chars().count()
+        } else {
+            current.chars().count() + 1 + word.chars().count()
+        };
+
+        if !current.is_empty() && would_be > max_chars {
+            pieces.push(std::mem::take(&mut current));
+        }
+
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        pieces.push(current);
+    }
+
+    pieces
+}
+
+async fn read_wav_i16(path: &Path) -> Result<(u32, Vec<i16>)> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(u32, Vec<i16>)> {
+        let mut reader = hound::WavReader::open(&path)?;
+        let spec = reader.spec();
+        let samples = reader
+            .samples::<i16>()
+            .collect::<std::result::Result<Vec<i16>, _>>()?;
+        Ok((spec.sample_rate, samples))
+    })
+    .await?
 }
 
 fn deduplicate_instructions(description: &str, instructions: &str) -> String {
@@ -1764,7 +2794,7 @@ fn cap_tts_synth_lock() -> &'static Mutex<()> {
     CAP_TTS_SYNTH_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn child_text<'a, 'input>(node: Node<'a, 'input>, child_name: &str) -> Option<String> {
+pub(crate) fn child_text<'a, 'input>(node: Node<'a, 'input>, child_name: &str) -> Option<String> {
     node.children()
         .find(|child| child.is_element() && child.tag_name().name() == child_name)
         .and_then(|child| child.text())
@@ -1785,7 +2815,9 @@ fn extract_same_value<'a, 'input>(node: Node<'a, 'input>, container_name: &str) 
     None
 }
 
-fn extract_same_from_container<'a, 'input>(container: Node<'a, 'input>) -> Option<String> {
+pub(crate) fn extract_same_from_container<'a, 'input>(
+    container: Node<'a, 'input>,
+) -> Option<String> {
     let value_name = child_text(container, "valueName").unwrap_or_default();
     let value = child_text(container, "value").unwrap_or_default();
     if value_name.eq_ignore_ascii_case("SAME") && !value.is_empty() {
@@ -1795,7 +2827,7 @@ fn extract_same_from_container<'a, 'input>(container: Node<'a, 'input>) -> Optio
     }
 }
 
-fn split_fips_codes(value: &str) -> Vec<String> {
+pub(crate) fn split_fips_codes(value: &str) -> Vec<String> {
     value
         .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
         .filter_map(|part| {
@@ -1809,13 +2841,13 @@ fn split_fips_codes(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_cap_time(raw: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_cap_time(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|ts| ts.with_timezone(&Utc))
         .ok()
 }
 
-fn build_eas_text(alert: &CapAlert, timezone: &str) -> String {
+fn build_eas_text(alert: &CapAlert, timezone: &str, endec_mode: &str) -> String {
     let mut header = build_cap_raw_header(
         &alert.originator_code,
         &alert.event_code,
@@ -1835,7 +2867,7 @@ fn build_eas_text(alert: &CapAlert, timezone: &str) -> String {
         alert.description.clone()
     };
 
-    let eas_text = crate::e2t_ng::E2T(&header, "", false, Some(timezone));
+    let eas_text = crate::e2t_ng::E2T(&header, endec_mode, alert.canadian, Some(timezone));
     if eas_text == "Invalid EAS header format" || eas_text.trim().is_empty() {
         warn!(
             "E2T-NG failed to generate EAS text for CAP header {}, using fallback text.",
@@ -1874,7 +2906,7 @@ fn derive_event_code(event_text: &str) -> String {
     }
 }
 
-fn normalize_event_code(event_code: &str) -> String {
+pub(crate) fn normalize_event_code(event_code: &str) -> String {
     let mut normalized: String = event_code
         .trim()
         .chars()
@@ -1891,7 +2923,7 @@ fn normalize_event_code(event_code: &str) -> String {
     }
 }
 
-fn build_cap_raw_header(
+pub(crate) fn build_cap_raw_header(
     originator_code: &str,
     event_code: &str,
     fips_list: &[String],
@@ -1922,17 +2954,67 @@ fn build_cap_raw_header(
     )
 }
 
+/// What surrounds a CAP alert's message audio in its recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingFraming {
+    /// SAME header, attention tone, the message, then NNNN.
+    Same,
+    /// The Alert Ready attention signal, once, then the message -- nothing after it. Also keeps
+    /// the SAME header out of webhooks, since nothing about the alert went out as SAME.
+    AlertReady,
+    /// `EMIT_HEADER_TONES` is off: the message audio alone, with nothing around it. Like
+    /// `AlertReady`, no header goes out, so none is published either.
+    Bare,
+}
+
+fn recording_framing(config: &Config, alert: &CapAlert) -> RecordingFraming {
+    if !config.emit_header_tones {
+        return RecordingFraming::Bare;
+    }
+
+    let from_naad = cap_header_source_marker(&alert.source_url) == CAP_HEADER_SOURCE_MARKER_NAAD;
+    if from_naad && config.capcp_use_alert_ready_tone {
+        RecordingFraming::AlertReady
+    } else {
+        RecordingFraming::Same
+    }
+}
+
+/// Whether an alert came from any CAP feed -- IPAWS, IPAWS WEA or NAAD -- judged by the sender ID
+/// its synthesised header carries. The one place that knows the full set; checking for "IPAWS"
+/// alone is how CAP-CP alerts used to fall through.
+pub(crate) fn is_cap_raw_header(raw_header: &str) -> bool {
+    raw_header
+        .trim()
+        .trim_end_matches('-')
+        .rsplit_once('-')
+        .is_some_and(|(_, sender)| {
+            [
+                CAP_HEADER_SOURCE_MARKER_CAP,
+                CAP_HEADER_SOURCE_MARKER_WEA,
+                CAP_HEADER_SOURCE_MARKER_NAAD,
+            ]
+            .contains(&sender.trim())
+        })
+}
+
 fn cap_header_source_marker(source_hint: &str) -> &'static str {
+    if contains_ascii_ignore_case(source_hint, b"naad")
+        || contains_ascii_ignore_case(source_hint, b"pelmorex")
+    {
+        return CAP_HEADER_SOURCE_MARKER_NAAD;
+    }
+
     if source_hint
         .get(..4)
-        .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("WEA-"))
         || contains_ascii_ignore_case(source_hint, b"publicwea")
         || contains_ascii_ignore_case(source_hint, b"/wea/")
         || contains_ascii_ignore_case(source_hint, b"/wea#")
-        || source_hint.rsplit_once('#').map_or(false, |(_, fragment)| {
+        || source_hint.rsplit_once('#').is_some_and(|(_, fragment)| {
             fragment
                 .get(..4)
-                .map_or(false, |prefix| prefix.eq_ignore_ascii_case("WEA-"))
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("WEA-"))
         })
     {
         CAP_HEADER_SOURCE_MARKER_WEA
@@ -1975,7 +3057,7 @@ async fn append_cap_log(config: &Config, alert: &CapAlert) -> Result<()> {
     );
 
     let timezone = config.timezone.to_string();
-    let alert_desc = build_eas_text(alert, timezone.as_str());
+    let alert_desc = build_eas_text(alert, timezone.as_str(), &config.endec_mode);
 
     let received_at = Utc::now();
     let local_time = received_at.with_timezone(&config.timezone);
@@ -2104,7 +3186,7 @@ fn build_dedupe_key_components(
     ))
 }
 
-fn build_dedupe_key(alert: &CapAlert) -> String {
+pub(crate) fn build_dedupe_key(alert: &CapAlert) -> String {
     let issuance = alert
         .sent
         .map(|sent| sent.format("%j%H%M").to_string())
@@ -2136,7 +3218,7 @@ fn build_dedupe_key_from_raw_header(raw_header: &str) -> Option<String> {
     build_dedupe_key_components(originator, event_code, issuance, &fips)
 }
 
-fn extract_parameter_value<'a, 'input>(
+pub(crate) fn extract_parameter_value<'a, 'input>(
     info_node: Node<'a, 'input>,
     parameter_name: &str,
 ) -> Option<String> {
@@ -2155,7 +3237,7 @@ fn extract_parameter_value<'a, 'input>(
     None
 }
 
-fn normalize_originator_code(value: &str) -> String {
+pub(crate) fn normalize_originator_code(value: &str) -> String {
     let mut cleaned: String = value
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
@@ -2171,7 +3253,7 @@ fn normalize_originator_code(value: &str) -> String {
     }
 }
 
-fn normalize_fips_code(value: &str) -> Option<String> {
+pub(crate) fn normalize_fips_code(value: &str) -> Option<String> {
     let digits: String = value.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
@@ -2204,7 +3286,11 @@ fn encode_expiration_from_cap(
     format!("{hours:02}{mins:02}")
 }
 
-fn is_audio_resource(mime: Option<&str>, uri: Option<&str>, deref_uri: Option<&str>) -> bool {
+pub(crate) fn is_audio_resource(
+    mime: Option<&str>,
+    uri: Option<&str>,
+    deref_uri: Option<&str>,
+) -> bool {
     if let Some(mime_value) = mime {
         let lower = mime_value.to_ascii_lowercase();
         if lower.starts_with("audio/") || lower.contains("audio") {
@@ -2231,6 +3317,7 @@ async fn fetch_cap_audio_recording(
     alert: &CapAlert,
     raw_header: &str,
     event_code: &str,
+    framing: RecordingFraming,
 ) -> Result<Option<PathBuf>> {
     fs::create_dir_all(&config.recording_dir).await?;
 
@@ -2279,19 +3366,45 @@ async fn fetch_cap_audio_recording(
         download_path
     };
 
-    let (output_path, should_remove_cap_audio_input) =
-        match build_recording_with_same_header(config, raw_header, event_code, &cap_audio_path)
+    // Named for the feed the alert came from -- IPAWS, IPAWS WEA or NAAD -- by the same function
+    // that picked its header's sender ID, so the two can never disagree.
+    let source_marker = cap_header_source_marker(&alert.source_url);
+    let framed = match framing {
+        RecordingFraming::Same => {
+            build_recording_with_same_header(
+                config,
+                raw_header,
+                event_code,
+                source_marker,
+                &cap_audio_path,
+            )
             .await
-        {
-            Ok(path) => (Some(path), true),
-            Err(err) => {
-                warn!(
-                    "Failed to prepend SAME header to CAP audio, using raw CAP audio file: {}",
-                    err
-                );
-                (Some(cap_audio_path.clone()), false)
-            }
-        };
+        }
+        RecordingFraming::AlertReady => {
+            build_recording_with_alert_ready_tone(
+                config,
+                event_code,
+                source_marker,
+                &cap_audio_path,
+            )
+            .await
+        }
+        RecordingFraming::Bare => {
+            // Still goes through the concat so the recording is named and encoded the same way
+            // every other one is.
+            concat_recording(config, event_code, source_marker, &[&cap_audio_path]).await
+        }
+    };
+    let (output_path, should_remove_cap_audio_input) = match framed {
+        Ok(path) => (Some(path), true),
+        Err(err) => {
+            warn!(
+                "Failed to add {:?} framing to CAP audio, using the raw CAP audio file: {}",
+                framing, err
+            );
+            (Some(cap_audio_path.clone()), false)
+        }
+    };
 
     if should_remove_cap_audio_input {
         let _ = fs::remove_file(&cap_audio_path).await;
@@ -2321,18 +3434,25 @@ fn decode_deref_uri_audio(deref_uri: &str) -> Result<Vec<u8>> {
         .context("Invalid CAP derefUri payload")
 }
 
+fn recording_segment_id(event_code: &str) -> String {
+    format!(
+        "{}_{}",
+        sanitize_filename_label(event_code),
+        sanitize_filename_label(&Utc::now().timestamp_millis().to_string())
+    )
+}
+
+/// SAME framing: header, attention tone, a second of silence, the message, silence, NNNN. With
+/// `CUSTOM_HEADER_AUDIO` set, that file replaces the header and attention tone; the closing NNNN
+/// stays, since only the opening is replaced.
 async fn build_recording_with_same_header(
     config: &Config,
     raw_header: &str,
     event_code: &str,
-    cap_audio_input_path: &PathBuf,
+    source_marker: &str,
+    cap_audio_input_path: &Path,
 ) -> Result<PathBuf> {
-    let tmp_id = format!(
-        "{}_{}",
-        sanitize_filename_label(event_code),
-        sanitize_filename_label(&Utc::now().timestamp_millis().to_string())
-    );
-
+    let tmp_id = recording_segment_id(event_code);
     let header_path = config
         .recording_dir
         .join(format!("cap_header_{}.wav", tmp_id));
@@ -2346,31 +3466,112 @@ async fn build_recording_with_same_header(
         .recording_dir
         .join(format!("cap_nnnn_{}.wav", tmp_id));
 
-    let header_samples = header::generate_same_header_samples(
-        raw_header,
-        CAP_RECORDING_SAMPLE_RATE,
-        CAP_HEADER_AMPLITUDE,
-    )?;
-    let silence_samples = header::generate_silence_for_duration(CAP_RECORDING_SAMPLE_RATE, 1.0);
-    let attn_samples =
-        header::generate_attention_tone(CAP_RECORDING_SAMPLE_RATE, CAP_HEADER_AMPLITUDE)?;
-    let nnnn_samples = header::generate_same_header_samples(
-        "NNNN",
-        CAP_RECORDING_SAMPLE_RATE,
-        CAP_HEADER_AMPLITUDE,
-    )?;
+    let custom_opening = config.header_audio_override().map(Path::to_path_buf);
 
-    write_wav_i16(&header_path, CAP_RECORDING_SAMPLE_RATE, &header_samples).await?;
-    write_wav_i16(&attn_tone_path, CAP_RECORDING_SAMPLE_RATE, &attn_samples).await?;
-    write_wav_i16(&silence_path, CAP_RECORDING_SAMPLE_RATE, &silence_samples).await?;
-    write_wav_i16(&nnnn_path, CAP_RECORDING_SAMPLE_RATE, &nnnn_samples).await?;
+    let result = async {
+        let silence_samples = header::generate_silence_for_duration(CAP_RECORDING_SAMPLE_RATE, 1.0);
+        let nnnn_samples = header::generate_same_header_samples(
+            "NNNN",
+            CAP_RECORDING_SAMPLE_RATE,
+            CAP_HEADER_AMPLITUDE,
+        )?;
 
+        let mut segments: Vec<&Path> = Vec::with_capacity(6);
+        if let Some(custom) = &custom_opening {
+            segments.push(custom);
+        } else {
+            let header_samples = header::generate_same_header_samples(
+                raw_header,
+                CAP_RECORDING_SAMPLE_RATE,
+                CAP_HEADER_AMPLITUDE,
+            )?;
+            let attn_samples =
+                header::generate_attention_tone(CAP_RECORDING_SAMPLE_RATE, CAP_HEADER_AMPLITUDE)?;
+            write_wav_i16(&header_path, CAP_RECORDING_SAMPLE_RATE, &header_samples).await?;
+            write_wav_i16(&attn_tone_path, CAP_RECORDING_SAMPLE_RATE, &attn_samples).await?;
+            segments.push(&header_path);
+            segments.push(&attn_tone_path);
+        }
+
+        write_wav_i16(&silence_path, CAP_RECORDING_SAMPLE_RATE, &silence_samples).await?;
+        write_wav_i16(&nnnn_path, CAP_RECORDING_SAMPLE_RATE, &nnnn_samples).await?;
+        segments.extend_from_slice(&[
+            &silence_path,
+            cap_audio_input_path,
+            &silence_path,
+            &nnnn_path,
+        ]);
+
+        concat_recording(config, event_code, source_marker, &segments).await
+    }
+    .await;
+
+    for temp in [&header_path, &nnnn_path, &silence_path, &attn_tone_path] {
+        let _ = fs::remove_file(temp).await;
+    }
+    result
+}
+
+/// Alert Ready framing: the attention signal exactly once, a second of silence, then the message.
+/// Unlike SAME there is nothing after the message -- no closing tone, no NNNN.
+/// `CUSTOM_HEADER_AUDIO` replaces the attention signal when it is set.
+async fn build_recording_with_alert_ready_tone(
+    config: &Config,
+    event_code: &str,
+    source_marker: &str,
+    cap_audio_input_path: &Path,
+) -> Result<PathBuf> {
+    let tmp_id = recording_segment_id(event_code);
+    let tone_path = config
+        .recording_dir
+        .join(format!("cap_alert_ready_{}.wav", tmp_id));
+    let silence_path = config
+        .recording_dir
+        .join(format!("cap_silence_{}.wav", tmp_id));
+
+    let custom_opening = config.header_audio_override().map(Path::to_path_buf);
+
+    let result = async {
+        let opening: &Path = match &custom_opening {
+            Some(custom) => custom,
+            None => {
+                fs::write(&tone_path, ALERT_READY_TONE_WAV).await?;
+                &tone_path
+            }
+        };
+        let silence_samples = header::generate_silence_for_duration(CAP_RECORDING_SAMPLE_RATE, 1.0);
+        write_wav_i16(&silence_path, CAP_RECORDING_SAMPLE_RATE, &silence_samples).await?;
+
+        concat_recording(
+            config,
+            event_code,
+            source_marker,
+            &[opening, &silence_path, cap_audio_input_path],
+        )
+        .await
+    }
+    .await;
+
+    for temp in [&tone_path, &silence_path] {
+        let _ = fs::remove_file(temp).await;
+    }
+    result
+}
+
+fn concat_filter(inputs: usize) -> String {
+    let labels: String = (0..inputs).map(|index| format!("[{index}:a]")).collect();
+    format!("{labels}concat=n={inputs}:v=0:a=1[outa]")
+}
+
+/// Joins `segments` in order into one recording in the configured storage format. ffmpeg's concat
+/// filter negotiates a common rate and layout, so the segments do not have to match.
+async fn concat_recording(
+    config: &Config,
+    event_code: &str,
+    source_marker: &str,
+    segments: &[&Path],
+) -> Result<PathBuf> {
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let source_marker = if raw_header.contains(CAP_HEADER_SOURCE_MARKER_WEA) {
-        CAP_HEADER_SOURCE_MARKER_WEA
-    } else {
-        CAP_HEADER_SOURCE_MARKER_CAP
-    };
     let storage_saver = config.storage_saver_mode;
     let saver_format = config.storage_saver_ext;
     let extension = if storage_saver {
@@ -2394,27 +3595,19 @@ async fn build_recording_with_same_header(
         output_path.clone()
     };
 
-    let mut ffmpeg = Command::new("ffmpeg");
+    let mut ffmpeg = Command::new(crate::components::ffmpeg());
     ffmpeg
         .arg("-nostdin")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("warning")
-        .arg("-y")
-        .arg("-i")
-        .arg(&header_path)
-        .arg("-i")
-        .arg(&attn_tone_path)
-        .arg("-i")
-        .arg(&silence_path)
-        .arg("-i")
-        .arg(cap_audio_input_path)
-        .arg("-i")
-        .arg(&silence_path)
-        .arg("-i")
-        .arg(&nnnn_path)
+        .arg("-y");
+    for segment in segments {
+        ffmpeg.arg("-i").arg(segment);
+    }
+    ffmpeg
         .arg("-filter_complex")
-        .arg("[0:a][1:a][2:a][3:a][4:a][5:a]concat=n=6:v=0:a=1[outa]")
+        .arg(concat_filter(segments.len()))
         .arg("-map")
         .arg("[outa]");
 
@@ -2426,17 +3619,12 @@ async fn build_recording_with_same_header(
     ffmpeg.arg(&ffmpeg_output_path);
 
     let status = ffmpeg.status().await?;
-    let _ = fs::remove_file(&header_path).await;
-    let _ = fs::remove_file(&nnnn_path).await;
-    let _ = fs::remove_file(&silence_path).await;
-    let _ = fs::remove_file(&attn_tone_path).await;
-
     if !status.success() {
         if storage_saver {
             let _ = fs::remove_file(&ffmpeg_output_path).await;
         }
         return Err(anyhow!(
-            "ffmpeg failed to build CAP recording with SAME header (status {:?})",
+            "ffmpeg failed to build the CAP recording (status {:?})",
             status.code()
         ));
     }
@@ -2450,8 +3638,8 @@ async fn build_recording_with_same_header(
     Ok(output_path)
 }
 
-async fn write_wav_i16(path: &PathBuf, sample_rate: u32, samples: &[i16]) -> Result<()> {
-    let path = path.clone();
+async fn write_wav_i16(path: &Path, sample_rate: u32, samples: &[i16]) -> Result<()> {
+    let path = path.to_path_buf();
     let samples = samples.to_vec();
     tokio::task::spawn_blocking(move || -> Result<()> {
         let spec = WavSpec {
@@ -2531,6 +3719,540 @@ mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, TimeZone};
     use std::time::Duration;
+
+    fn config_with_speechify_voice(voice_dir: &Path, model: Option<&str>) -> Config {
+        let mut config = Config::safe_internal_defaults();
+        config.tts_engine = "speechify".to_string();
+        config.tts_model = model.map(|name| name.to_string());
+        config.spfy_voice_dir = voice_dir.to_path_buf();
+        config
+    }
+
+    fn install_speechify_voice(parent: &Path, name: &str, vdb_rate: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(&dir).expect("voice dir");
+        std::fs::write(dir.join(format!("{name}.vin")), b"vin").expect("vin");
+        std::fs::write(dir.join(format!("{name}{vdb_rate}.vdb")), b"vdb").expect("vdb");
+        std::fs::write(dir.join(format!("{name}.vcf")), b"vcf").expect("vcf");
+        dir
+    }
+
+    #[test]
+    fn speechify_voice_defaults_to_the_configured_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let tom = install_speechify_voice(root.path(), "tom", "8");
+
+        // No TTS_MODEL: SPFY_VOICE_DIR points straight at the voice, as it always has.
+        let config = config_with_speechify_voice(&tom, None);
+        let voice = speechify_voice(&config).expect("voice resolves");
+        assert_eq!(voice.vin, tom.join("tom.vin"));
+        assert_eq!(voice.vdb, tom.join("tom8.vdb"));
+        assert_eq!(voice.vcf, tom.join("tom.vcf"));
+    }
+
+    #[test]
+    fn speechify_voice_selects_a_named_voice_beside_or_inside_the_configured_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let tom = install_speechify_voice(root.path(), "tom", "8");
+        let crstom = install_speechify_voice(root.path(), "crstom", "8");
+
+        // SPFY_VOICE_DIR points at one voice, TTS_MODEL names a sibling.
+        let config = config_with_speechify_voice(&tom, Some("crstom"));
+        let voice = speechify_voice(&config).expect("sibling voice resolves");
+        assert_eq!(voice.vin, crstom.join("crstom.vin"));
+        assert_eq!(voice.vdb, crstom.join("crstom8.vdb"));
+        assert_eq!(voice.vcf, crstom.join("crstom.vcf"));
+
+        // SPFY_VOICE_DIR points at the voices folder, TTS_MODEL names one inside it.
+        let config = config_with_speechify_voice(root.path(), Some("crstom"));
+        let voice = speechify_voice(&config).expect("nested voice resolves");
+        assert_eq!(voice.vin, crstom.join("crstom.vin"));
+    }
+
+    #[test]
+    fn speechify_voice_accepts_an_absolute_path_and_falls_back_to_a_16k_vdb() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let crsmara = install_speechify_voice(root.path(), "crsmara", "16");
+
+        let config = config_with_speechify_voice(root.path(), Some(&crsmara.display().to_string()));
+        let voice = speechify_voice(&config).expect("absolute path resolves");
+        assert_eq!(voice.vdb, crsmara.join("crsmara16.vdb"));
+    }
+
+    #[test]
+    fn speechify_voice_prefers_the_8k_vdb_when_both_are_present() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let tom = install_speechify_voice(root.path(), "tom", "8");
+        std::fs::write(tom.join("tom16.vdb"), b"vdb").expect("16k vdb");
+
+        let config = config_with_speechify_voice(&tom, None);
+        assert_eq!(
+            speechify_voice(&config).expect("voice resolves").vdb,
+            tom.join("tom8.vdb")
+        );
+    }
+
+    fn replacements(entries: &[(&str, &str)]) -> TtsReplacements {
+        TtsReplacements::new(
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+        .expect("replacements")
+    }
+
+    /// The report that found this: TFT's all-caps prefix read as "A CIVIL AUTHORITY HASOUTH
+    /// ISSUED...". These are the entries from the live dictionary that collided with it.
+    #[test]
+    fn replacements_leave_words_that_merely_contain_a_key_alone() {
+        let table = replacements(&[
+            ("S ", "South "),
+            ("E ", "East "),
+            ("N ", "North "),
+            ("W ", "West "),
+            ("S.", "South "),
+            ("E.", "East "),
+            ("N.", "North "),
+            ("EAS", "E A S"),
+            ("LEA", "Law Enforcement Agency"),
+            ("EM", "Emergency Management"),
+            ("LA", "Los Angeles"),
+            ("IPAWSWEA", "i paws w e a."),
+        ]);
+
+        let prefix = "A CIVIL AUTHORITY HAS ISSUED A LOCAL AREA EMERGENCY FOR THE FOLLOWING \
+                      COUNTIES/AREAS: COBB, GA; DOUGLAS, GA; FULTON, GA; AT 9:26 PM ON SEP 18, \
+                      2026 EFFECTIVE UNTIL 9:26 PM SEP 19, 2026. PLEASE STAND BY. MESSAGE FROM \
+                      IPAWSWEA.";
+        let expected = prefix.replace("IPAWSWEA.", "i paws w e a..");
+        assert_eq!(table.apply(prefix), expected);
+
+        // The tokens those entries exist for still expand.
+        assert_eq!(
+            table.apply("5 MI S OF ATLANTA, CALL LEA OR EM. EAS"),
+            "5 MI South OF ATLANTA, CALL Law Enforcement Agency OR Emergency Management. E A S"
+        );
+    }
+
+    #[test]
+    fn replacements_prefer_the_longest_key_and_never_rematch_their_own_output() {
+        let table = replacements(&[
+            ("S ", "South "),
+            ("SW ", "Southwest "),
+            ("SSW ", "South-Southwest "),
+            ("EAS", "E A S"),
+            ("E ", "East "),
+            ("A ", "Alpha "),
+        ]);
+        assert_eq!(
+            table.apply("10 MI SSW OF TOWN, 5 MI SW OF CITY, 2 MI S "),
+            "10 MI South-Southwest OF TOWN, 5 MI Southwest OF CITY, 2 MI South "
+        );
+        // "E A S" is the output of one entry and the input of two others; it must stay put.
+        assert_eq!(table.apply("THE EAS TEST"), "THE E A S TEST");
+    }
+
+    #[test]
+    fn replacement_values_are_inserted_literally() {
+        let table = replacements(&[
+            ("Pottawattamie", r"\![.1pa.0tx.0wa.0tu.0mi]"),
+            ("Mt.", "Mount"),
+            ("fee", "$1 fee"),
+        ]);
+        assert_eq!(
+            table.apply("Pottawattamie County near Mt. Hood, not Amt. fee"),
+            r"\![.1pa.0tx.0wa.0tu.0mi] County near Mount Hood, not Amt. $1 fee"
+        );
+    }
+
+    #[test]
+    fn replacements_reach_prose_but_never_urls_or_hashtags() {
+        // "ca", "#" and "S " all appear inside the URL and the hashtag; only prose may change.
+        let table = replacements(&[
+            ("ca", "c a"),
+            ("#", "hashtag "),
+            ("S ", "South "),
+            ("info ", "information "),
+            ("Mngt", "Management"),
+        ]);
+        let text = "More info from Emergency Mngt at weather.gc.ca/S or #QCStorm, 5 MI S of town.";
+        let prose = table.apply_to_prose(text);
+        assert_eq!(
+            prose,
+            "More information from Emergency Management at weather.gc.ca/S or #QCStorm, 5 MI South of town."
+        );
+
+        // Spelling-out and its control codes stay Speechify's alone; every other engine gets
+        // plain words from the same dictionary.
+        let plain = normalize_text_for_speech(&prose, false);
+        assert!(!plain.contains(r"\!"), "{plain}");
+        assert!(
+            plain.contains("information from Emergency Management"),
+            "{plain}"
+        );
+        assert!(plain.contains("5 MI South of town"), "{plain}");
+    }
+
+    /// Descriptions used to get the dictionary case-insensitively, which let "LA" rewrite every
+    /// French "la" and "S " reach into "it's". Case now follows the key.
+    #[test]
+    fn replacement_case_follows_the_key() {
+        let table = replacements(&[
+            ("hwy ", "highway "),
+            ("Hwy ", "Highway "),
+            ("LA", "Los Angeles"),
+            ("S ", "South "),
+            ("US ", "U S Highway "),
+        ]);
+        assert_eq!(
+            table.apply("HWY 75 and Hwy 6 and hwy 2"),
+            "highway 75 and Highway 6 and highway 2"
+        );
+        assert_eq!(
+            table.apply("la tornade près de LA, it's moving S at us "),
+            "la tornade près de Los Angeles, it's moving South at us "
+        );
+        assert_eq!(table.apply("CLOSED US 75"), "CLOSED U S Highway 75");
+    }
+
+    #[test]
+    fn a_broken_replacement_file_is_ignored_rather_than_fatal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(TtsReplacements::load(&dir.path().join("missing.json"), false).is_none());
+
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, r#"{ "S ": "South ", }"#).expect("write");
+        assert!(TtsReplacements::load(&broken, false).is_none());
+
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "{}").expect("write");
+        assert!(TtsReplacements::load(&empty, false).is_none());
+    }
+
+    #[test]
+    fn every_cap_feed_is_recognised_by_its_header_and_nothing_else_is() {
+        for header in [
+            "ZCZC-WXR-TOR-031055+0030-1231645-IPAWSCAP-",
+            "ZCZC-WXR-TOR-031055+0030-1231645-IPAWSWEA-",
+            "ZCZC-WXR-TOR-043100-046100+0030-2612008-NAADSCAP-",
+            // Whatever build_cap_raw_header emits must round-trip.
+            &build_cap_raw_header(
+                "WXR",
+                "TOR",
+                &["043100".to_string()],
+                None,
+                None,
+                "naad://streaming1.naad-adna.pelmorex.com:8080#TEST",
+            ),
+        ] {
+            assert!(is_cap_raw_header(header), "{header}");
+        }
+
+        for header in [
+            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35   -",
+            "ZCZC-EAS-RWT-000000+0015-2610534-EASLSTNR-",
+            // A sender that merely contains a marker is not one.
+            "ZCZC-WXR-TOR-031055+0030-1231645-XIPAWSCAP-",
+            "NNNN",
+            "",
+        ] {
+            assert!(!is_cap_raw_header(header), "{header}");
+        }
+    }
+
+    /// A CAP-CP-only setup used to hide the panel entirely: "enabled" meant IPAWS polling.
+    #[tokio::test]
+    async fn cap_status_describes_both_feeds() {
+        let app_state = Arc::new(Mutex::new(AppState::new(Vec::new())));
+        let mut config = Config::safe_internal_defaults();
+        config.process_cap_alerts = false;
+        config.process_capcp_alerts = true;
+        config.capcp_stream_endpoints = vec!["streaming1.naad-adna.pelmorex.com:8080".to_string()];
+
+        sync_cap_runtime_config_status(&app_state, &config).await;
+        {
+            let status = &app_state.lock().await.cap_status;
+            assert!(status.enabled);
+            assert!(!status.ipaws_enabled);
+            assert!(status.capcp_enabled);
+            assert_eq!(
+                status.capcp_endpoints,
+                vec!["streaming1.naad-adna.pelmorex.com:8080"]
+            );
+        }
+
+        config.process_capcp_alerts = false;
+        sync_cap_runtime_config_status(&app_state, &config).await;
+        assert!(!app_state.lock().await.cap_status.enabled);
+    }
+
+    /// Recording names and header sender IDs both come from this, so it is what decides whether a
+    /// CAP-CP recording is labelled NAAD. It used to be labelled IPAWS: the recording builder
+    /// re-derived the marker from the header and only knew about WEA.
+    #[test]
+    fn source_marker_follows_the_feed_the_alert_came_from() {
+        for (source, expected) in [
+            (
+                "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/feed",
+                CAP_HEADER_SOURCE_MARKER_CAP,
+            ),
+            (
+                "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/eas/recent/2019-12-31T11:59:59Z",
+                CAP_HEADER_SOURCE_MARKER_CAP,
+            ),
+            (
+                "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/PublicWEA/recent/2012-08-21T11:40:43Z",
+                CAP_HEADER_SOURCE_MARKER_WEA,
+            ),
+            (
+                "naad://streaming1.naad-adna.pelmorex.com:8080#TEST-CAPCP-001",
+                CAP_HEADER_SOURCE_MARKER_NAAD,
+            ),
+            (
+                "http://capcp1.naad-adna.pelmorex.com/2026-09-18/2026_09_18T12_00_00Z/TEST.xml",
+                CAP_HEADER_SOURCE_MARKER_NAAD,
+            ),
+        ] {
+            assert_eq!(cap_header_source_marker(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn alert_ready_framing_needs_both_the_option_and_a_naad_source() {
+        let mut alert = parse_cap_alert(
+            include_str!("../tests/fixtures/cap_alert_valid.xml"),
+            "https://alerts.example/valid",
+        )
+        .expect("alert");
+        let mut config = Config::safe_internal_defaults();
+
+        // Live NAAD documents and ones recovered from the archive both count as CAP-CP.
+        for naad_source in [
+            "naad://streaming1.naad-adna.pelmorex.com:8080#TEST-CAPCP-001",
+            "http://capcp1.naad-adna.pelmorex.com/2026-09-18/2026_09_18T12_00_00Z/TEST.xml",
+        ] {
+            alert.source_url = naad_source.to_string();
+            config.capcp_use_alert_ready_tone = false;
+            assert_eq!(recording_framing(&config, &alert), RecordingFraming::Same);
+            config.capcp_use_alert_ready_tone = true;
+            assert_eq!(
+                recording_framing(&config, &alert),
+                RecordingFraming::AlertReady,
+                "{naad_source}"
+            );
+        }
+
+        // The option is CAP-CP's alone: an IPAWS alert keeps its SAME framing regardless.
+        alert.source_url = "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/feed".to_string();
+        assert_eq!(recording_framing(&config, &alert), RecordingFraming::Same);
+    }
+
+    #[test]
+    fn header_tones_switched_off_outrank_every_other_framing() {
+        let mut alert = parse_cap_alert(
+            include_str!("../tests/fixtures/cap_alert_valid.xml"),
+            "https://alerts.example/valid",
+        )
+        .expect("alert");
+        let mut config = Config::safe_internal_defaults();
+        config.emit_header_tones = false;
+        config.capcp_use_alert_ready_tone = true;
+
+        for source in [
+            "https://apps.fema.gov/IPAWSOPEN_EAS_SERVICE/rest/feed",
+            "naad://streaming1.naad-adna.pelmorex.com:8080#TEST-CAPCP-001",
+        ] {
+            alert.source_url = source.to_string();
+            assert_eq!(
+                recording_framing(&config, &alert),
+                RecordingFraming::Bare,
+                "{source}"
+            );
+        }
+
+        // Nothing opens the recording, so custom header audio is not consulted either.
+        config.custom_header_audio = std::env::current_exe().expect("a real file");
+        assert_eq!(config.header_audio_override(), None);
+    }
+
+    #[test]
+    fn the_compiled_in_alert_ready_tone_is_the_real_signal() {
+        let reader = hound::WavReader::new(std::io::Cursor::new(ALERT_READY_TONE_WAV))
+            .expect("pelmorex.wav parses as a WAV");
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 44_100);
+        assert_eq!(spec.bits_per_sample, 16);
+
+        let seconds = reader.duration() as f64 / spec.sample_rate as f64;
+        assert!((7.5..=8.5).contains(&seconds), "{seconds}s");
+    }
+
+    #[test]
+    fn concat_filter_labels_every_segment() {
+        // Byte-for-byte what the SAME framing used to hard-code.
+        assert_eq!(
+            concat_filter(6),
+            "[0:a][1:a][2:a][3:a][4:a][5:a]concat=n=6:v=0:a=1[outa]"
+        );
+        assert_eq!(concat_filter(3), "[0:a][1:a][2:a]concat=n=3:v=0:a=1[outa]");
+    }
+
+    #[test]
+    fn test_alert_script_names_the_engine_it_is_testing() {
+        for (engine, spoken) in [
+            ("piper", "Piper"),
+            ("espeak-ng", "e Speak"),
+            ("speechify", "Speechify"),
+            ("cepstral", "Cepstral"),
+            ("loquendo", "Loquendo"),
+        ] {
+            let mut config = Config::safe_internal_defaults();
+            config.tts_engine = engine.to_string();
+            let script = test_alert_tts_script(&config);
+            assert!(
+                script.contains(&format!("using the {spoken} engine")),
+                "{engine}: {script}"
+            );
+            // Short enough to be one passage, so a pass is not an artefact of the chunking.
+            assert!(script.chars().count() < CAP_TTS_MAX_CHUNK_CHARS, "{script}");
+        }
+    }
+
+    #[test]
+    fn only_an_engine_that_cannot_start_skips_the_retry_path() {
+        let missing = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("Failed to execute Loquendo (loqdave) TTS command");
+        assert!(tts_engine_could_not_start(&missing));
+
+        let denied =
+            anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(tts_engine_could_not_start(&denied));
+
+        // An engine that ran and failed may well succeed on less text.
+        let exited = anyhow!("Speechify (spfy_synth) failed with status Some(1): heap OOM");
+        assert!(!tts_engine_could_not_start(&exited));
+    }
+
+    #[tokio::test]
+    async fn a_missing_voice_fails_before_any_engine_runs() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = config_with_speechify_voice(&root.path().join("tom"), Some("crstom"));
+
+        let err = synthesize_tts_samples(&config, "Hello there.", "test", "RWT")
+            .await
+            .expect_err("no voice is installed");
+        assert!(
+            err.to_string()
+                .contains("Could not resolve a Speechify voice"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn speechify_voice_error_names_every_place_it_looked() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let tom = install_speechify_voice(root.path(), "tom", "8");
+        // A directory that exists but whose files carry the wrong stem is the likely mistake.
+        let jill = root.path().join("jill");
+        std::fs::create_dir_all(&jill).expect("voice dir");
+        std::fs::write(jill.join("tom.vin"), b"vin").expect("misnamed vin");
+
+        let config = config_with_speechify_voice(&tom, Some("jill"));
+        let err = speechify_voice(&config)
+            .expect_err("voice is not installed")
+            .to_string();
+        assert!(err.contains("TTS_MODEL 'jill'"), "{err}");
+        assert!(err.contains("jill.vin"), "{err}");
+        assert!(err.contains("jill8.vdb"), "{err}");
+        assert!(err.contains(&jill.display().to_string()), "{err}");
+        // Both the nested and the sibling candidate are reported.
+        assert!(
+            err.contains(&tom.join("jill").display().to_string()),
+            "{err}"
+        );
+    }
+
+    fn config_with_cepstral_voice(voice_root: &Path, model: Option<&str>) -> Config {
+        let mut config = Config::safe_internal_defaults();
+        config.tts_engine = "cepstral".to_string();
+        config.tts_model = model.map(|name| name.to_string());
+        config.cep6_voice_dir = voice_root.to_path_buf();
+        config
+    }
+
+    #[test]
+    fn loqdave_banner_is_stripped_but_real_errors_survive() {
+        let stderr = concat!(
+            "Copyright (C) 2006 - Loquendo SpA.\n",
+            "LoquendoTTS (LTTS v.6.6 Build 20071113) - Sep  5 2013 16:14:42\n",
+            "Multilingual Text-To-Speech Synthesis System.\n",
+            "Speaker = Dave (American English male voice)\n",
+            "Speech Format = 16KHz loqmsx, Audio Format = 16KHz l\n",
+            "Audio destination library = LoqAudioFile\n",
+            "End your sentence with one of the following punctuation marks: \".;:!?\"\n",
+            "Press Ctrl-D to exit.\n",
+            "> out of guest memory\n",
+            "loqdave: the engine driver returned 0xe006000a\n",
+        );
+
+        assert_eq!(
+            strip_loqdave_banner(stderr),
+            "out of guest memory; loqdave: the engine driver returned 0xe006000a"
+        );
+    }
+
+    #[test]
+    fn loqdave_input_is_one_latin1_byte_per_character() {
+        assert_eq!(to_latin1("TORNADO WARNING"), b"TORNADO WARNING");
+        // French CAP-CP text survives as Latin-1 rather than as two UTF-8 bytes per accent.
+        assert_eq!(to_latin1("Qu\u{e9}bec"), b"Qu\xe9bec");
+        assert_eq!(
+            to_latin1("Take cover \u{2014} it\u{2019}s \u{201c}now\u{201d}\u{2026}"),
+            b"Take cover - it's \"now\"..."
+        );
+        assert_eq!(to_latin1("\u{26a0} Alert"), b"  Alert");
+    }
+
+    #[test]
+    fn loqdave_banner_alone_leaves_nothing() {
+        let stderr = "Copyright (C) 2006 - Loquendo SpA.\nPress Ctrl-D to exit.\n> ";
+        assert!(strip_loqdave_banner(stderr).is_empty());
+    }
+
+    #[test]
+    fn cepstral_voice_dir_defaults_to_allison_and_needs_the_voice_installed() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = config_with_cepstral_voice(root.path(), None);
+
+        let missing = cepstral_voice_dir(&config).expect_err("voice is not installed");
+        assert!(missing.to_string().contains("Allison"));
+        assert!(missing.to_string().contains("fetch_voices.sh"));
+
+        let installed = root.path().join("Allison");
+        std::fs::create_dir_all(&installed).expect("voice dir");
+        std::fs::write(installed.join("voice.idx"), b"index").expect("voice index");
+
+        assert_eq!(
+            cepstral_voice_dir(&config).expect("voice resolves"),
+            installed
+        );
+    }
+
+    #[test]
+    fn cepstral_voice_dir_rejects_a_path_instead_of_a_voice_name() {
+        let root = tempfile::tempdir().expect("temp dir");
+
+        for model in ["../../etc", "sub/Allison", ".."] {
+            let config = config_with_cepstral_voice(root.path(), Some(model));
+            let err = cepstral_voice_dir(&config).expect_err("path is not a voice name");
+            assert!(
+                err.to_string().contains("is not a Cepstral voice name"),
+                "unexpected error for {model}: {err}"
+            );
+        }
+    }
 
     fn sample_alert_data(event_code: &str, fips: &[&str]) -> EasAlertData {
         EasAlertData {
@@ -2836,8 +4558,6 @@ mod tests {
         assert!(!is_cap_relevant(&alert_fips, &watched));
     }
 
-    /// Wraps a label the way `speak_url_host` does, so these expectations follow
-    /// URL_SPELL_MODE_ON/OFF rather than pinning whatever rate they carry today.
     fn spelled(label: &str) -> String {
         format!("{URL_SPELL_MODE_ON} {label} {URL_SPELL_MODE_OFF}")
     }
@@ -2887,9 +4607,10 @@ mod tests {
                 true
             ),
             format!(
-                "Check {} dot gov and www dot {} dot co dot uk slash help today.",
+                "Check {} dot gov and www dot {} dot co dot {} slash help today.",
                 spelled("ready"),
-                spelled("example")
+                spelled("example"),
+                spelled("uk")
             )
         );
     }
@@ -2919,6 +4640,366 @@ mod tests {
     fn normalize_urls_leaves_prose_and_emails_alone() {
         let prose = "Move to shelter.Motorists should use caution. Winds of 1.5 inches. Email info@example.com now.";
         assert_eq!(normalize_urls_in_description(prose, true), prose);
+    }
+
+    /// Mirrors the halving loop in `synthesize_tts_samples` against a fake engine that refuses
+    /// anything over `ceiling` characters, which is how Speechify's guest heap behaves.
+    fn simulate_adaptive_split(text: &str, ceiling: usize) -> (Vec<String>, Vec<String>) {
+        let mut pending: std::collections::VecDeque<String> =
+            split_tts_text(text, CAP_TTS_MAX_CHUNK_CHARS)
+                .into_iter()
+                .collect();
+        let mut synthesized = Vec::new();
+        let mut dropped = Vec::new();
+        let mut attempts = 0usize;
+        let mut size_limit = CAP_TTS_MAX_CHUNK_CHARS;
+
+        while let Some(piece) = pending.pop_front() {
+            attempts += 1;
+            assert!(
+                attempts <= CAP_TTS_MAX_SYNTH_ATTEMPTS,
+                "halving failed to converge"
+            );
+
+            let chars = piece.chars().count();
+            if chars <= ceiling {
+                synthesized.push(piece);
+                continue;
+            }
+            if chars <= CAP_TTS_MIN_CHUNK_CHARS {
+                dropped.push(piece);
+                continue;
+            }
+
+            let next_limit = chars.div_ceil(2).max(CAP_TTS_MIN_CHUNK_CHARS);
+            if next_limit < size_limit {
+                size_limit = next_limit;
+                let queued: Vec<String> = pending.drain(..).collect();
+                pending = queued
+                    .iter()
+                    .flat_map(|queued_piece| split_tts_text(queued_piece, size_limit))
+                    .collect();
+            }
+
+            let halves = split_tts_text(&piece, size_limit);
+            if halves.len() < 2 {
+                dropped.push(piece);
+                continue;
+            }
+            for half in halves.into_iter().rev() {
+                pending.push_front(half);
+            }
+        }
+
+        (synthesized, dropped)
+    }
+
+    #[test]
+    fn adaptive_split_converges_below_a_content_dependent_ceiling() {
+        let sentence = "A special weather statement is in effect for Colville Lake. ";
+        let text = sentence.repeat(120);
+
+        // The reported failure: 2,794 characters came back empty, well under the old 3,000
+        // starting chunk size. A ceiling that tight must still converge.
+        for ceiling in [2_794usize, 1_200, 700, 400, 250] {
+            let (synthesized, dropped) = simulate_adaptive_split(&text, ceiling);
+
+            assert!(dropped.is_empty(), "ceiling {ceiling} dropped passages");
+            assert!(
+                !synthesized.is_empty(),
+                "ceiling {ceiling} produced nothing"
+            );
+            for piece in &synthesized {
+                assert!(
+                    piece.chars().count() <= ceiling,
+                    "ceiling {ceiling} kept a {}-character passage",
+                    piece.chars().count()
+                );
+            }
+
+            let original: Vec<&str> = text.split_whitespace().collect();
+            let rejoined = synthesized.join(" ");
+            let round_tripped: Vec<&str> = rejoined.split_whitespace().collect();
+            assert_eq!(original, round_tripped, "ceiling {ceiling} lost words");
+        }
+    }
+
+    #[test]
+    fn adaptive_split_gives_up_below_the_floor_instead_of_spinning() {
+        // An engine that fails on everything cannot be satisfied by halving, so the loop has to
+        // terminate at the floor rather than recurse forever.
+        let text = "Short sentence here. ".repeat(40);
+        let (synthesized, dropped) = simulate_adaptive_split(&text, 0);
+
+        assert!(synthesized.is_empty());
+        assert!(!dropped.is_empty());
+        for piece in &dropped {
+            assert!(piece.chars().count() <= CAP_TTS_MIN_CHUNK_CHARS);
+        }
+    }
+
+    #[test]
+    fn hashtags_are_spoken_and_spelled_like_urls() {
+        let spoken = normalize_hashtags_for_speech("Follow #QCStorm for updates.", true);
+        assert_eq!(
+            spoken,
+            format!("Follow hashtag {URL_SPELL_MODE_ON} QCStorm {URL_SPELL_MODE_OFF} for updates.")
+        );
+    }
+
+    #[test]
+    fn hashtags_spell_out_letters_without_control_tags() {
+        assert_eq!(
+            normalize_hashtags_for_speech("Follow #QCStorm now.", false),
+            "Follow hashtag q c s t o r m now."
+        );
+    }
+
+    #[test]
+    fn hashtags_at_the_start_and_in_sequence_are_handled() {
+        assert_eq!(
+            normalize_hashtags_for_speech("#ONStorm and #QCStorm", false),
+            "hashtag o n s t o r m and hashtag q c s t o r m"
+        );
+    }
+
+    #[test]
+    fn a_bare_hash_is_left_alone() {
+        // Not a tag: no word after it, or attached to a preceding token.
+        assert_eq!(
+            normalize_hashtags_for_speech("Call # now", false),
+            "Call # now"
+        );
+        assert_eq!(
+            normalize_hashtags_for_speech("item#4 shipped", false),
+            "item#4 shipped"
+        );
+        assert_eq!(
+            normalize_hashtags_for_speech("no hashes here", false),
+            "no hashes here"
+        );
+    }
+
+    #[test]
+    fn url_fragments_are_not_mistaken_for_hashtags() {
+        // The URL pass runs first and drops the fragment, so nothing is left for the hashtag
+        // pass to misread.
+        let spoken = normalize_text_for_speech(
+            "See https://weather.gc.ca/warnings/index_e.html#current for details.",
+            false,
+        );
+        assert!(
+            !spoken.contains("hashtag"),
+            "a URL fragment was read as a hashtag: {spoken}"
+        );
+        assert!(!spoken.contains('#'), "an unspoken # survived: {spoken}");
+    }
+
+    #[test]
+    fn two_letter_country_code_tlds_are_spelled_not_spoken() {
+        // ".ca" spoken as a word comes out "circa", so it has to be spelled.
+        let spoken = normalize_urls_in_description("Visit weather.gc.ca today.", true);
+        let tail = format!("dot {URL_SPELL_MODE_ON} ca {URL_SPELL_MODE_OFF}");
+        assert!(
+            spoken.contains(&tail),
+            "the .ca TLD was not spelled: {spoken}"
+        );
+    }
+
+    #[test]
+    fn multi_letter_tlds_are_still_spoken_as_words() {
+        let spoken = normalize_urls_in_description("See https://example.com now.", true);
+        assert!(spoken.contains("dot com"), "{spoken}");
+        assert!(
+            !spoken.contains(&format!("{URL_SPELL_MODE_ON} com")),
+            "the .com TLD should not be spelled: {spoken}"
+        );
+    }
+
+    #[test]
+    fn the_call_sign_comes_out_of_every_endec_mode_s_sentence() {
+        let header = "ZCZC-WXR-TOR-031055+0030-2621515-KWO35-";
+        assert_eq!(raw_header_sender(header), "KWO35");
+
+        for mode in crate::e2t_ng::known_endec_modes() {
+            if mode == "ALL" {
+                continue;
+            }
+            let text = crate::e2t_ng::E2T(header, &mode, false, Some("America/Chicago"));
+            let stripped = strip_sender_clause(&text, "KWO35");
+            assert!(
+                !stripped.to_ascii_uppercase().contains("KWO35"),
+                "{mode}: {stripped}"
+            );
+            assert!(
+                !stripped.to_ascii_lowercase().contains("message from"),
+                "{mode}: {stripped}"
+            );
+            if text.contains("KWO35") {
+                assert!(stripped.ends_with('.'), "{mode}: {stripped}");
+            } else {
+                assert_eq!(stripped, text, "{mode} has no sender to strip");
+            }
+        }
+
+        assert_eq!(
+            strip_sender_clause("Nothing to see here", "KWO35"),
+            "Nothing to see here"
+        );
+    }
+
+    #[test]
+    fn the_built_in_dictionary_applies_and_a_local_file_overrides_it() {
+        assert!(BUILTIN_TTS_REPLACEMENTS.len() > 100);
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("cap_tts_replacement_config.json");
+        let builtin = TtsReplacements::load(&missing, true).expect("built-in dictionary");
+        assert_eq!(builtin.apply("Call 911 now"), "Call nine one one now");
+        assert!(TtsReplacements::load(&missing, false).is_none());
+
+        std::fs::write(&missing, r#"{ "911": "nine eleven" }"#).expect("write");
+        let merged = TtsReplacements::load(&missing, true).expect("merged dictionary");
+        assert_eq!(
+            merged.apply("Call 911 in Pottawattamie"),
+            "Call nine eleven in Pot-a-wat-a-mee"
+        );
+    }
+
+    #[test]
+    fn normalize_text_for_speech_handles_urls_and_hashtags_together() {
+        let spoken = normalize_text_for_speech("Updates at weather.gc.ca and on #QCStorm.", false);
+        assert!(spoken.contains("hashtag q c s t o r m"), "{spoken}");
+        assert!(spoken.contains("dot ca"), "{spoken}");
+    }
+
+    #[tokio::test]
+    async fn wav_round_trip_preserves_samples_and_rate() {
+        // The chunk joiner reads each engine WAV back and rewrites one file, so these two have
+        // to agree. Speechify emits 8 kHz mono 16-bit.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("round_trip.wav");
+        let samples: Vec<i16> = (0..2_000).map(|n| ((n % 512) as i16) - 256).collect();
+
+        write_wav_i16(&path, 8_000, &samples).await.expect("write");
+        let (rate, read_back) = read_wav_i16(&path).await.expect("read");
+
+        assert_eq!(rate, 8_000);
+        assert_eq!(read_back, samples);
+    }
+
+    #[tokio::test]
+    async fn wav_join_concatenates_chunks_in_order() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let first: Vec<i16> = (0..500).map(|n| n as i16).collect();
+        let second: Vec<i16> = (500..900).map(|n| n as i16).collect();
+
+        let first_path = dir.path().join("a.wav");
+        let second_path = dir.path().join("b.wav");
+        write_wav_i16(&first_path, 8_000, &first)
+            .await
+            .expect("write a");
+        write_wav_i16(&second_path, 8_000, &second)
+            .await
+            .expect("write b");
+
+        let mut combined = Vec::new();
+        for path in [&first_path, &second_path] {
+            let (rate, samples) = read_wav_i16(path).await.expect("read chunk");
+            assert_eq!(rate, 8_000);
+            combined.extend_from_slice(&samples);
+        }
+
+        let joined_path = dir.path().join("joined.wav");
+        write_wav_i16(&joined_path, 8_000, &combined)
+            .await
+            .expect("write joined");
+        let (_, joined) = read_wav_i16(&joined_path).await.expect("read joined");
+
+        assert_eq!(joined.len(), first.len() + second.len());
+        assert_eq!(&joined[..first.len()], &first[..]);
+        assert_eq!(&joined[first.len()..], &second[..]);
+    }
+
+    #[test]
+    fn split_tts_text_leaves_short_text_alone() {
+        let text = "A tornado warning is in effect. Take shelter now.";
+        assert_eq!(split_tts_text(text, 3_000), vec![text.to_string()]);
+        assert!(split_tts_text("   ", 3_000).is_empty());
+        assert!(split_tts_text("anything", 0).is_empty());
+    }
+
+    #[test]
+    fn split_tts_text_breaks_on_sentence_boundaries() {
+        let sentence = "A special weather statement is in effect for Colville Lake. ";
+        let text = sentence.repeat(40);
+        let chunks = split_tts_text(&text, 300);
+
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(
+                chunk.chars().count() <= 300,
+                "chunk of {} chars exceeded the limit",
+                chunk.chars().count()
+            );
+            // Sentence-aligned: a chunk starts a sentence and ends one.
+            assert!(
+                chunk.starts_with('A'),
+                "chunk started mid-sentence: {chunk:?}"
+            );
+            assert!(chunk.ends_with('.'), "chunk ended mid-sentence: {chunk:?}");
+        }
+    }
+
+    #[test]
+    fn split_tts_text_preserves_every_word() {
+        let sentence = "Environment Canada has issued a warning for the region. ";
+        let text = sentence.repeat(60);
+        let chunks = split_tts_text(&text, 250);
+
+        let rejoined = chunks.join(" ");
+        let original: Vec<&str> = text.split_whitespace().collect();
+        let round_tripped: Vec<&str> = rejoined.split_whitespace().collect();
+        assert_eq!(original, round_tripped, "chunking lost or reordered words");
+    }
+
+    #[test]
+    fn split_tts_text_falls_back_to_word_then_character_boundaries() {
+        // One sentence longer than the limit has to break on words.
+        let long_sentence = format!("{} end.", "word ".repeat(200));
+        for chunk in split_tts_text(&long_sentence, 100) {
+            assert!(chunk.chars().count() <= 100);
+        }
+
+        // A single unbroken token longer than the limit has to break on characters.
+        let giant_word = "x".repeat(500);
+        let chunks = split_tts_text(&giant_word, 100);
+        assert_eq!(chunks.len(), 5);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 100);
+        }
+        assert_eq!(chunks.concat(), giant_word);
+    }
+
+    #[test]
+    fn split_tts_text_never_splits_inside_a_character() {
+        // Multi-byte characters must survive the character-boundary fallback intact.
+        let text = "é".repeat(250);
+        let chunks = split_tts_text(&text, 100);
+        assert_eq!(chunks.concat(), text);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 100);
+            assert!(chunk.chars().all(|ch| ch == 'é'));
+        }
+    }
+
+    #[test]
+    fn split_tts_text_stays_under_the_speechify_heap_ceiling() {
+        let sentence = "A special weather statement is in effect for Colville Lake. ";
+        let text = sentence.repeat(400);
+        for chunk in split_tts_text(&text, CAP_TTS_MAX_CHUNK_CHARS) {
+            assert!(chunk.chars().count() <= CAP_TTS_MAX_CHUNK_CHARS);
+        }
     }
 
     #[test]

@@ -43,14 +43,12 @@ lazy_static! {
     static ref GLOBAL_FILTERS: RwLock<Vec<FilterRule>> = RwLock::new(Vec::new());
 }
 
-pub fn parse_filters(config_json: &Value) -> Vec<FilterRule> {
+/// `enabled` is resolved by the caller so `ENABLE_FILTERS` honours the environment as well as
+/// config.json; the rules themselves are a nested array and stay JSON-only.
+pub fn parse_filters(config_json: &Value, enabled: Option<bool>) -> Vec<FilterRule> {
     let mut filters = Vec::new();
 
-    let filters_enabled = config_json
-        .get("ENABLE_FILTERS")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    if !filters_enabled {
+    if !enabled.unwrap_or(true) {
         return filters;
     }
 
@@ -112,6 +110,11 @@ pub fn install_filters(filters: Vec<FilterRule>) {
     let mut global_filters = GLOBAL_FILTERS.write();
     *global_filters = filters;
 }
+
+/// The filter set is process-global, so any test that installs one and then reads it back has to
+/// hold this for the duration or a test running in parallel will swap the set out underneath it.
+#[cfg(test)]
+pub(crate) static GLOBAL_FILTER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(dead_code)]
 pub fn evaluate_action(filters: &[FilterRule], event_code: &str) -> FilterAction {
@@ -224,7 +227,7 @@ mod tests {
                 }
             ]
         });
-        let filters = parse_filters(&cfg);
+        let filters = parse_filters(&cfg, Some(false));
         assert!(filters.is_empty());
     }
 
@@ -244,7 +247,7 @@ mod tests {
                 }
             ]
         });
-        let filters = parse_filters(&cfg);
+        let filters = parse_filters(&cfg, None);
         let matched = match_filter(&filters, "TOR").expect("match");
         assert_eq!(matched.name, "Tornado");
         assert_eq!(evaluate_action(&filters, "TOR"), FilterAction::Ignore);
@@ -262,13 +265,14 @@ mod tests {
                 }
             ]
         });
-        let filters = parse_filters(&cfg);
+        let filters = parse_filters(&cfg, None);
         assert_eq!(filters.len(), 1);
         assert_eq!(filters[0].action, FilterAction::Relay);
     }
 
     #[test]
     fn global_filters_drive_helper_functions() {
+        let _guard = GLOBAL_FILTER_TEST_LOCK.lock().expect("global filter lock");
         let cfg = json!({
             "FILTERS": [
                 {
@@ -283,7 +287,7 @@ mod tests {
                 }
             ]
         });
-        let filters = parse_filters(&cfg);
+        let filters = parse_filters(&cfg, None);
         install_filters(filters.clone());
 
         assert_eq!(determine_filter_name("RWT"), "RWT ignore");

@@ -48,58 +48,104 @@ fn icecast_source_to_listener_url(source: &str) -> Option<String> {
     Some(format!("{listener_scheme}://{host_port}{path}"))
 }
 
+/// Enough of a stream for its codec to be read: the first frames of MP3 or AAC, or the header
+/// pages Icecast replays to every new Ogg listener.
+const PROBE_BYTES: usize = 64 * 1024;
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the relay's destination mount is already playing, so the relay can be encoded to match.
+/// Read by listening to the mount and handing its first bytes to symphonia; the bitrate, which a
+/// stream's headers do not carry reliably, comes from Icecast's own response headers.
 async fn probe_icecast_format(source_url: &str) -> Option<MatchedFormat> {
     let listener_url = icecast_source_to_listener_url(source_url)?;
 
-    let probe = Command::new("ffprobe")
-        .arg("-v")
-        .arg("error")
-        .arg("-hide_banner")
-        .arg("-rw_timeout")
-        .arg("8000000")
-        .arg("-select_streams")
-        .arg("a:0")
-        .arg("-show_entries")
-        .arg("stream=codec_name,sample_rate,channels,bit_rate:format=bit_rate")
-        .arg("-of")
-        .arg("json")
-        .arg(&listener_url)
-        .kill_on_drop(true)
-        .output();
+    let listen = async {
+        let mut response = Client::new()
+            .get(&listener_url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let bitrate = icecast_bitrate(response.headers());
+        let mut head = Vec::with_capacity(PROBE_BYTES);
+        while head.len() < PROBE_BYTES {
+            match response.chunk().await.ok()? {
+                Some(chunk) => head.extend_from_slice(&chunk),
+                None => break,
+            }
+        }
+        Some((head, bitrate))
+    };
+    let (head, bitrate) = tokio::time::timeout(PROBE_TIMEOUT, listen).await.ok()??;
 
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), probe)
+    let stream = tokio::task::spawn_blocking(move || probe_stream_head(head))
         .await
-        .ok()?
+        .ok()??;
+    matched_format(stream, bitrate)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProbedStream {
+    codec: &'static str,
+    sample_rate: u32,
+    channels: u16,
+}
+
+fn probe_stream_head(head: Vec<u8>) -> Option<ProbedStream> {
+    use symphonia::core::codecs::{
+        CODEC_TYPE_AAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP3, CODEC_TYPE_OPUS, CODEC_TYPE_VORBIS,
+    };
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let source = MediaSourceStream::new(Box::new(std::io::Cursor::new(head)), Default::default());
+    let probed = symphonia::default::get_probe()
+        .format(
+            &Hint::new(),
+            source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .ok()?;
+    let params = &probed.format.default_track()?.codec_params;
+    let codec = match params.codec {
+        CODEC_TYPE_MP3 => "mp3",
+        CODEC_TYPE_VORBIS => "vorbis",
+        CODEC_TYPE_OPUS => "opus",
+        CODEC_TYPE_AAC => "aac",
+        CODEC_TYPE_FLAC => "flac",
+        _ => return None,
+    };
+    Some(ProbedStream {
+        codec,
+        sample_rate: params.sample_rate?,
+        channels: u16::try_from(params.channels?.count()).ok()?,
+    })
+}
 
-    if !output.status.success() {
-        return None;
-    }
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let stream = json.get("streams")?.as_array()?.first()?;
-
-    let codec = stream.get("codec_name")?.as_str()?;
-    let sample_rate = stream
-        .get("sample_rate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u32>().ok())?;
-    let channels = stream
-        .get("channels")
-        .and_then(|v| v.as_u64())
-        .map(|c| c as u16)?;
-    let bitrate = stream
-        .get("bit_rate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u32>().ok())
+/// In bits per second, as `-b:a` takes it. Icecast states it in kbps, in `icy-br` or inside
+/// `ice-audio-info`.
+fn icecast_bitrate(headers: &reqwest::header::HeaderMap) -> Option<u32> {
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let kbps = text("icy-br")
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().parse::<u32>().ok())
         .or_else(|| {
-            json.get("format")
-                .and_then(|f| f.get("bit_rate"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u32>().ok())
-        });
+            text("ice-audio-info")?.split(';').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                matches!(key.trim(), "bitrate" | "ice-bitrate")
+                    .then(|| value.trim().parse::<u32>().ok())
+                    .flatten()
+            })
+        })?;
+    (kbps > 0).then_some(kbps * 1000)
+}
 
-    let (encoder, container, content_type) = match codec {
+fn matched_format(stream: ProbedStream, bitrate: Option<u32>) -> Option<MatchedFormat> {
+    let (encoder, container, content_type) = match stream.codec {
         "mp3" => ("libmp3lame", "mp3", "audio/mpeg"),
         "vorbis" => ("libvorbis", "ogg", "audio/ogg"),
         "opus" => ("libopus", "ogg", "audio/ogg"),
@@ -112,8 +158,8 @@ async fn probe_icecast_format(source_url: &str) -> Option<MatchedFormat> {
         encoder,
         container,
         content_type,
-        sample_rate,
-        channels,
+        sample_rate: stream.sample_rate,
+        channels: stream.channels,
         bitrate: if encoder == "flac" { None } else { bitrate },
     })
 }
@@ -247,7 +293,7 @@ impl RelayState {
         let combined_path = combined_temp.into_temp_path();
         let combined_path_buf = combined_path.to_path_buf();
 
-        let mut prepare = Command::new("ffmpeg");
+        let mut prepare = Command::new(crate::components::ffmpeg());
         prepare.arg("-nostdin");
         prepare.arg("-hide_banner");
         prepare.arg("-loglevel").arg("info");
@@ -356,7 +402,7 @@ impl RelayState {
                             .unwrap_or_default()
                     );
 
-                    let mut stream_cmd = Command::new("ffmpeg");
+                    let mut stream_cmd = Command::new(crate::components::ffmpeg());
                     stream_cmd.arg("-nostdin");
                     stream_cmd.arg("-hide_banner");
                     stream_cmd.arg("-loglevel").arg("info");
@@ -500,7 +546,7 @@ impl RelayState {
                     .unwrap_or_default()
             );
 
-            let total_chunks = (audio_b64.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let total_chunks = audio_b64.len().div_ceil(CHUNK_SIZE);
             if total_chunks == 0 {
                 warn!("Chunked relay aborted: no audio data to send.");
                 return Ok(());
@@ -579,7 +625,73 @@ impl RelayState {
 
 #[cfg(test)]
 mod tests {
-    use super::icecast_source_to_listener_url;
+    use super::*;
+
+    #[test]
+    fn symphonia_reads_what_a_mount_is_playing_from_its_first_bytes() {
+        for (bytes, expected) in [
+            (
+                include_bytes!("../tests/fixtures/probe_mp3_mono_22050.mp3").as_slice(),
+                ("mp3", 22_050, 1),
+            ),
+            (
+                include_bytes!("../tests/fixtures/probe_opus_stereo.ogg").as_slice(),
+                ("opus", 48_000, 2),
+            ),
+            (
+                include_bytes!("../tests/fixtures/probe_vorbis_stereo_44100.ogg").as_slice(),
+                ("vorbis", 44_100, 2),
+            ),
+        ] {
+            let probed = probe_stream_head(bytes.to_vec()).expect("a recognised stream");
+            assert_eq!(
+                (probed.codec, probed.sample_rate, probed.channels),
+                expected
+            );
+        }
+
+        assert_eq!(probe_stream_head(b"not audio at all".to_vec()), None);
+    }
+
+    #[test]
+    fn the_bitrate_comes_from_icecasts_headers_in_bits_per_second() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut map = reqwest::header::HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, reqwest::header::HeaderValue::from_static(value));
+            }
+            map
+        };
+        assert_eq!(
+            icecast_bitrate(&headers(&[("icy-br", "128")])),
+            Some(128_000)
+        );
+        assert_eq!(
+            icecast_bitrate(&headers(&[("icy-br", "64,64")])),
+            Some(64_000)
+        );
+        assert_eq!(
+            icecast_bitrate(&headers(&[(
+                "ice-audio-info",
+                "channels=2;samplerate=44100;bitrate=96"
+            )])),
+            Some(96_000)
+        );
+        assert_eq!(icecast_bitrate(&headers(&[])), None);
+        assert_eq!(icecast_bitrate(&headers(&[("icy-br", "0")])), None);
+    }
+
+    #[test]
+    fn flac_is_matched_without_a_bitrate() {
+        let flac = ProbedStream {
+            codec: "flac",
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        let matched = matched_format(flac, Some(900_000)).expect("flac is relayable");
+        assert_eq!(matched.encoder, "flac");
+        assert_eq!(matched.bitrate, None);
+    }
 
     #[test]
     fn derives_listener_url_stripping_credentials() {

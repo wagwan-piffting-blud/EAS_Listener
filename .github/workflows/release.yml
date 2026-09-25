@@ -1,0 +1,425 @@
+name: Release
+
+# A tag run can only restore a cache made on its own tag or on main, so without runs on main every
+# release compiled every dependency from scratch. Pushes to main that change the dependencies (or
+# this file) build without publishing, and only those runs save the cache the tag runs restore.
+# GitHub drops a cache nobody has used for 7 days; after a quiet spell, run this workflow on main
+# by hand (Run workflow, branch main, with no tag) before tagging, and the release builds warm.
+on:
+  push:
+    tags: [ "v*" ]
+    branches: [ main ]
+    # Not applied to tag pushes, which always run.
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag to build and publish, such as v0.40.0. Leave empty to only build the chosen branch, which refreshes the build cache on main."
+        required: false
+        default: ""
+      draft:
+        description: "Publish as a draft instead of a release"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      # False for a build of a branch, which only warms the cache: nothing is signed or published.
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - name: Resolve the tag and version
+        id: resolve
+        run: |
+          TAG='${{ github.event.inputs.tag || github.ref_name }}'
+          RELEASE='${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') }}'
+          {
+            echo "tag=${TAG}"
+            echo "version=${TAG#v}"
+            echo "release=${RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$RELEASE" = true ]; then
+            echo "Building release ${TAG}"
+          else
+            echo "Building ${TAG} to refresh the build cache; nothing will be published"
+          fi
+
+  test:
+    needs: meta
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test
+          # Tag runs cannot share what they save; see the note at the top.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run test suite
+        run: cargo test --release --locked
+
+  build:
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: ""
+          - name: linux-aarch64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ""
+          # The tray and the service host are Windows-only and are what a desktop install is for,
+          # so the published binary carries both. Neither does anything until asked: the service
+          # flags are opt-in and the tray needs a desktop session.
+          - name: windows-x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            features: "tray,service"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # What the Dockerfile's builder stage installs: reqwest links OpenSSL and rusqlite is built
+      # from source.
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config build-essential libssl-dev
+
+      - name: Build
+        run: |
+          FEATURES='${{ matrix.features }}'
+          if [ -n "$FEATURES" ]; then
+            cargo build --release --locked --target '${{ matrix.target }}' --features "$FEATURES"
+          else
+            cargo build --release --locked --target '${{ matrix.target }}'
+          fi
+
+      # Catches a binary that will not start on the runner it was built on -- a missing shared
+      # library, or a dashboard that failed to bake in.
+      - name: Smoke test the binary
+        run: |
+          if [ '${{ runner.os }}' = 'Windows' ]; then
+            './target/${{ matrix.target }}/release/eas_listener.exe' --help
+          else
+            './target/${{ matrix.target }}/release/eas_listener' --help
+          fi
+
+      - name: Check the tag against Cargo.toml
+        if: needs.meta.outputs.release == 'true'
+        run: |
+          CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$CRATE_VERSION" != '${{ needs.meta.outputs.version }}' ]; then
+            echo "::warning::Cargo.toml is ${CRATE_VERSION}, the tag says ${{ needs.meta.outputs.version }}"
+          fi
+
+      # The dashboard is built into the binary, so nothing from web_server/ is shipped beside it.
+      # EAS_WEB_ROOT still points at a checkout for anyone editing the pages.
+      - name: Stage the archive
+        id: stage
+        run: |
+          STAGE='eas-listener-${{ needs.meta.outputs.version }}-${{ matrix.name }}'
+          mkdir -p "dist/${STAGE}/tools" "dist/${STAGE}/tts_voices/cep6"
+          # The listener runs these itself the first time the Cepstral engine needs a voice.
+          cp tts_voices/cep6/fetch_voices.sh tts_voices/cep6/fetch_voices.ps1 "dist/${STAGE}/tts_voices/cep6/"
+          if [ '${{ runner.os }}' = 'Windows' ]; then
+            cp 'target/${{ matrix.target }}/release/eas_listener.exe' "dist/${STAGE}/"
+          else
+            # No unit file ships: `eas_listener --install-service` writes one for wherever this
+            # is unpacked.
+            cp 'target/${{ matrix.target }}/release/eas_listener' "dist/${STAGE}/"
+          fi
+          cp README.md CHANGES.md LICENSE config.example.json \
+             cap_tts_replacement_config.example.json example.env "dist/${STAGE}/"
+          cp tools/components.json tools/fetch_components.sh \
+             tools/fetch_components.ps1 \
+             tools/README.md "dist/${STAGE}/tools/"
+          echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Pack (tar.gz)
+        if: runner.os != 'Windows'
+        run: tar -czf 'dist/${{ steps.stage.outputs.stage }}.tar.gz' -C dist '${{ steps.stage.outputs.stage }}'
+
+      - name: Pack (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/${{ steps.stage.outputs.stage }}" -DestinationPath "dist/${{ steps.stage.outputs.stage }}.zip"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.stage }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # One universal binary for Apple silicon and Intel Macs, built on an Apple silicon runner. With
+  # the signing secrets set, it is signed with the Developer ID certificate and notarized, and a
+  # .dmg with the notarization ticket stapled on ships beside the .tar.gz; without them it ships
+  # unsigned, which Gatekeeper blocks when it is downloaded in a browser. The secrets:
+  #
+  #   MACOS_CERTIFICATE_P12_BASE64  the "Developer ID Application" certificate with its private
+  #                                 key, exported from Keychain Access as .p12, then base64
+  #   MACOS_CERTIFICATE_PASSWORD    the password the .p12 was exported with
+  #   APPLE_API_KEY_P8_BASE64       an App Store Connect API key (.p8), base64
+  #   APPLE_API_KEY_ID              that key's ID
+  #   APPLE_API_ISSUER_ID           the issuer ID shown above the keys in App Store Connect
+  macos:
+    needs: meta
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      SIGNING: ${{ needs.meta.outputs.release == 'true' && secrets.MACOS_CERTIFICATE_P12_BASE64 != '' && secrets.APPLE_API_KEY_P8_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build both architectures
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target" --features tray
+          done
+
+      - name: Join them into one universal binary
+        run: |
+          mkdir -p target/universal
+          lipo -create -output target/universal/eas_listener \
+            target/aarch64-apple-darwin/release/eas_listener \
+            target/x86_64-apple-darwin/release/eas_listener
+          lipo -archs target/universal/eas_listener
+
+      - name: Smoke test both halves
+        run: |
+          target/universal/eas_listener --help
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 target/universal/eas_listener --help
+          else
+            echo "::notice::Rosetta is not installed on this runner, so the x86_64 half was not run."
+          fi
+
+      - name: Check the tag against Cargo.toml
+        if: needs.meta.outputs.release == 'true'
+        run: |
+          CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$CRATE_VERSION" != '${{ needs.meta.outputs.version }}' ]; then
+            echo "::warning::Cargo.toml is ${CRATE_VERSION}, the tag says ${{ needs.meta.outputs.version }}"
+          fi
+
+      # A keychain of its own, deleted at the end, so the runner's login keychain never holds the
+      # certificate and codesign never stops to ask for a password.
+      - name: Load the signing certificate
+        if: env.SIGNING == 'true'
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="${RUNNER_TEMP}/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$P12_BASE64" | base64 --decode > "${RUNNER_TEMP}/certificate.p12"
+          security import "${RUNNER_TEMP}/certificate.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "${RUNNER_TEMP}/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" "${HOME}/Library/Keychains/login.keychain-db"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12_BASE64 holds no Developer ID Application identity."
+            exit 1
+          fi
+          echo "Signing as: ${IDENTITY}"
+          echo "IDENTITY=${IDENTITY}" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=${KEYCHAIN}" >> "$GITHUB_ENV"
+
+      # The hardened runtime is what notarization requires. The listener needs no entitlements:
+      # it only runs its tools as child processes and opens network sockets.
+      - name: Sign the binary
+        if: env.SIGNING == 'true'
+        run: |
+          codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" \
+            --sign "$IDENTITY" target/universal/eas_listener
+          codesign --verify --strict --verbose=2 target/universal/eas_listener
+          codesign -dv target/universal/eas_listener 2>&1 | grep -E "Authority|TeamIdentifier|flags"
+
+      - name: Stage the archive
+        id: stage
+        run: |
+          STAGE='eas-listener-${{ needs.meta.outputs.version }}-macos-universal'
+          mkdir -p "dist/${STAGE}/tools" "dist/${STAGE}/tts_voices/cep6"
+          # The listener runs these itself the first time the Cepstral engine needs a voice.
+          cp tts_voices/cep6/fetch_voices.sh tts_voices/cep6/fetch_voices.ps1 "dist/${STAGE}/tts_voices/cep6/"
+          # No plist ships: `eas_listener --install-service` writes one for wherever this is unpacked.
+          cp target/universal/eas_listener "dist/${STAGE}/"
+          cp README.md CHANGES.md LICENSE config.example.json \
+             cap_tts_replacement_config.example.json example.env "dist/${STAGE}/"
+          cp tools/components.json tools/fetch_components.sh tools/README.md "dist/${STAGE}/tools/"
+          echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
+          tar -czf "dist/${STAGE}.tar.gz" -C dist "$STAGE"
+          if [ "$SIGNING" != 'true' ] && [ '${{ needs.meta.outputs.release }}' = 'true' ]; then
+            echo "::warning::The macOS build is unsigned: set the signing secrets listed in release.yml to sign and notarize it."
+          fi
+
+      # Notarizing the .dmg also registers the binary inside it, so the signed binary in the
+      # .tar.gz passes Gatekeeper's online check too; only the .dmg carries the ticket offline.
+      - name: Build, sign and notarize the .dmg
+        if: env.SIGNING == 'true'
+        env:
+          API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          STAGE='${{ steps.stage.outputs.stage }}'
+          DMG="dist/${STAGE}.dmg"
+          # hdiutil on hosted runners fails now and then with "Resource busy"; a retry clears it.
+          for attempt in 1 2 3; do
+            hdiutil create -volname "EAS Listener ${{ needs.meta.outputs.version }}" \
+              -srcfolder "dist/${STAGE}" -ov -format UDZO "$DMG" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
+          codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$IDENTITY" "$DMG"
+
+          KEY="${RUNNER_TEMP}/AuthKey.p8"
+          printf '%s' "$API_KEY_P8_BASE64" | base64 --decode > "$KEY"
+          xcrun notarytool submit "$DMG" --key "$KEY" --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" --wait --timeout 30m --output-format json | tee notarize.json
+          STATUS=$(jq -r '.status' notarize.json)
+          if [ "$STATUS" != 'Accepted' ]; then
+            SUBMISSION=$(jq -r '.id' notarize.json)
+            xcrun notarytool log "$SUBMISSION" --key "$KEY" --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID" || true
+            echo "::error::Notarization finished as ${STATUS}."
+            exit 1
+          fi
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+
+      - name: Remove the keychain and the API key
+        if: always() && env.SIGNING == 'true'
+        run: |
+          [ -n "${KEYCHAIN:-}" ] && security delete-keychain "$KEYCHAIN" || true
+          rm -f "${RUNNER_TEMP}/AuthKey.p8"
+
+      - name: Upload the archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.stage }}
+          path: |
+            dist/*.tar.gz
+            dist/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [meta, test, build, macos]
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: eas-listener-*
+          merge-multiple: true
+
+      - name: Checksum every archive
+        working-directory: dist
+        run: |
+          sha256sum eas-listener-* > SHA256SUMS
+          cat SHA256SUMS
+
+      # The changelog is written by hand, so the release notes are the section it already has for
+      # this version. Without one, GitHub's generated notes stand in.
+      - name: Take the release notes from CHANGES.md
+        id: notes
+        run: |
+          awk -v version='${{ needs.meta.outputs.version }}' '
+            $0 ~ "^## v" version "([^0-9]|$)" { inside = 1; next }
+            inside && /^## / { exit }
+            inside { print }
+          ' CHANGES.md > release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No CHANGES.md section for ${{ needs.meta.outputs.version }}; using generated notes."
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: ${{ needs.meta.outputs.tag }}
+          body_path: ${{ steps.notes.outputs.generate == 'false' && 'release-notes.md' || '' }}
+          generate_release_notes: ${{ steps.notes.outputs.generate == 'true' }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft == 'true' }}
+          fail_on_unmatched_files: true
+          # One pattern for every archive, since the .dmg only exists once macOS signing is set up
+          # and a pattern that matches nothing fails the release.
+          files: |
+            dist/eas-listener-*
+            dist/SHA256SUMS

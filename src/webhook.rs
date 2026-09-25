@@ -44,9 +44,11 @@ impl WebhookRuntimeConfig {
     }
 
     fn from_disk_or_default() -> Self {
-        let config = Config::from_config_json("/app/config.json").unwrap_or_else(|err| {
+        let config_path = crate::paths::config_json();
+        let config = Config::from_config_json(&config_path).unwrap_or_else(|err| {
             eprintln!(
-                "Warning: failed to load /app/config.json for webhook config: {:?}. Using built-in safe defaults.",
+                "Warning: failed to load {} for webhook config: {:?}. Using built-in safe defaults.",
+                config_path.display(),
                 err
             );
             Config::safe_internal_defaults()
@@ -117,41 +119,126 @@ pub fn a_or_an(word: &str) -> &str {
     }
 }
 
+/// Discord webhooks are posted by the listener itself, with an embed and the recording attached;
+/// Apprise gets every other URL.
+pub fn is_native_discord(url: &str) -> bool {
+    url.trim().starts_with("discord://")
+}
+
+/// The webhook endpoint for `discord://[botname@]id/token[/][?args]`, and the bot name if one
+/// was given. Apprise-only query arguments are dropped.
+fn discord_endpoint(url: &str) -> Option<(String, Option<String>)> {
+    let rest = url.trim().strip_prefix("discord://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    let (botname, path) = match rest.split_once('@') {
+        Some((name, path)) => (Some(name), path),
+        None => (None, rest),
+    };
+    let mut parts = path.trim_end_matches('/').split('/');
+    let (id, token) = (parts.next()?, parts.next()?);
+    if id.is_empty() || token.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let botname = botname.map(percent_decode).filter(|name| !name.is_empty());
+    Some((
+        format!("https://discord.com/api/webhooks/{id}/{token}"),
+        botname,
+    ))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = bytes
+            .get(index + 1..index + 3)
+            .and_then(|pair| std::str::from_utf8(pair).ok())
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match (bytes[index], hex) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Everything after the scheme reduced to its last four characters, for logs and errors.
+pub fn mask_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let chars: Vec<char> = rest.chars().collect();
+            let tail: String = chars[chars.len().saturating_sub(4)..].iter().collect();
+            if chars.len() <= 8 {
+                format!("{scheme}://****")
+            } else {
+                format!("{scheme}://****{tail}")
+            }
+        }
+        None => "****".to_string(),
+    }
+}
+
+pub async fn send_discord_test(url: &str, title: &str, body: &str) -> Result<(), String> {
+    let (endpoint, botname) = discord_endpoint(url)
+        .ok_or_else(|| "Expected discord://webhook_id/webhook_token.".to_string())?;
+    let mut payload = json!({
+        "embeds": [{ "title": title, "description": body, "color": 0x2e7d32 }]
+    });
+    if let Some(name) = botname {
+        payload["username"] = json!(name);
+    }
+    let response = Client::new()
+        .post(&endpoint)
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| format!("Discord could not be reached: {err}"))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    Err(format!(
+        "Discord answered {status}: {}",
+        truncate_for_log(text.trim(), 400)
+    ))
+}
+
 pub async fn send_alert_webhook(
     url: &str,
     alert: &ActiveAlert,
     _dsame_text: &str,
-    _raw_header: &str,
+    protocol_header: Option<&str>,
     recording_path: Option<PathBuf>,
 ) {
     let runtime_config = runtime_config_snapshot();
-    let config_path = runtime_config.apprise_config_path;
+    let config_path = crate::notifications::resolve(&runtime_config.apprise_config_path);
     let apprise_urls_from_config_array: Vec<String> = match fs::File::open(&config_path) {
         Ok(mut file) => {
             let mut contents = String::new();
             if let Err(err) = file.read_to_string(&mut contents) {
                 warn!(
                     "Failed to read AppRise config file at '{}': {}",
-                    config_path, err
+                    config_path.display(),
+                    err
                 );
                 return;
             }
-            contents
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .map(|line| {
-                    line.strip_prefix('-')
-                        .map(str::trim_start)
-                        .unwrap_or(line)
-                        .to_owned()
-                })
-                .collect()
+            crate::notifications::parse(&contents).urls
         }
         Err(err) => {
             warn!(
                 "Failed to open AppRise config file at '{}': {}",
-                config_path, err
+                config_path.display(),
+                err
             );
             return;
         }
@@ -168,9 +255,9 @@ pub async fn send_alert_webhook(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let event_code = &data.event_code;
-    let event_title = determine_event_title(&event_code);
+    let event_title = determine_event_title(event_code);
     let originator_code = &data.originator;
-    let originator = determine_originator_name(&originator_code);
+    let originator = determine_originator_name(originator_code);
     let apprise_title = format!(
         "{} {} has just been issued/received",
         a_or_an(&event_title),
@@ -193,13 +280,13 @@ pub async fn send_alert_webhook(
         None
     };
     let discord_embed_body = build_discord_embed_body(
-        &url,
+        url,
         &event_title,
         event_code,
         &originator,
         &received_timestamp,
         &data.eas_text,
-        &alert.raw_header,
+        protocol_header,
         description,
         instructions,
     );
@@ -208,7 +295,7 @@ pub async fn send_alert_webhook(
         &originator,
         &received_timestamp,
         &data.eas_text,
-        &alert.raw_header,
+        protocol_header,
         description,
         instructions,
     );
@@ -217,7 +304,7 @@ pub async fn send_alert_webhook(
         &originator,
         &received_timestamp,
         &data.eas_text,
-        &alert.raw_header,
+        protocol_header,
         description,
         instructions,
     );
@@ -226,7 +313,7 @@ pub async fn send_alert_webhook(
         &originator,
         &received_timestamp,
         &data.eas_text,
-        &alert.raw_header,
+        protocol_header,
         description,
         instructions,
     );
@@ -234,7 +321,7 @@ pub async fn send_alert_webhook(
     let discord_urls: Vec<&str> = apprise_urls_from_config_array
         .iter()
         .map(|url| url.trim())
-        .filter(|url| url.starts_with("discord://"))
+        .filter(|url| is_native_discord(url))
         .collect();
 
     if !discord_urls.is_empty() {
@@ -262,7 +349,17 @@ pub async fn send_alert_webhook(
             };
 
         for discord_url in discord_urls {
-            let payload_value = json!({ "embeds": [discord_embed_body.clone()] });
+            let Some((url, botname)) = discord_endpoint(discord_url) else {
+                warn!(
+                    "Skipping Discord URL '{}': expected discord://webhook_id/webhook_token",
+                    mask_url(discord_url)
+                );
+                continue;
+            };
+            let mut payload_value = json!({ "embeds": [discord_embed_body.clone()] });
+            if let Some(name) = botname {
+                payload_value["username"] = json!(name);
+            }
             let validation_errors = validate_discord_payload(&payload_value);
             if !validation_errors.is_empty() {
                 warn!(
@@ -294,11 +391,6 @@ pub async fn send_alert_webhook(
                     }
                 }
             }
-
-            let url = format!(
-                "https://discord.com/api/webhooks/{}",
-                discord_url.trim_start_matches("discord://")
-            );
 
             match client.post(&url).multipart(form).send().await {
                 Ok(response) if response.status().is_success() => {}
@@ -348,7 +440,7 @@ pub async fn send_alert_webhook(
     let non_discord_urls: Vec<&str> = apprise_urls_from_config_array
         .iter()
         .map(|u| u.trim())
-        .filter(|u| u.contains("://") && !u.starts_with("discord://"))
+        .filter(|u| !is_native_discord(u))
         .collect();
 
     if non_discord_urls.is_empty() {
@@ -362,7 +454,7 @@ pub async fn send_alert_webhook(
     ];
 
     for (format, body) in attempts.iter() {
-        let mut command = Command::new("apprise");
+        let mut command = Command::new(crate::components::apprise());
         command.arg("--title").arg(&apprise_title);
         command.arg("--body").arg(body);
         command.arg("--input-format").arg(format);
@@ -437,7 +529,7 @@ async fn prepare_discord_attachment(path: &Path, original_bytes: Vec<u8>) -> (Ve
     let compressed_path = compressed_temp.into_temp_path();
     let compressed_path_buf = compressed_path.to_path_buf();
 
-    let mut ffmpeg = Command::new("ffmpeg");
+    let mut ffmpeg = Command::new(crate::components::ffmpeg());
     ffmpeg
         .arg("-nostdin")
         .arg("-hide_banner")
@@ -600,6 +692,10 @@ fn discord_fields_char_count(fields: &[serde_json::Value]) -> usize {
         .sum()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per field Discord's embed schema renders"
+)]
 fn build_discord_embed_body(
     stream_id: &str,
     title: &str,
@@ -607,7 +703,7 @@ fn build_discord_embed_body(
     originator: &str,
     received_timestamp: &str,
     eas_text: &str,
-    raw_header: &str,
+    protocol_header: Option<&str>,
     description: Option<&str>,
     instructions: Option<&str>,
 ) -> serde_json::Value {
@@ -681,12 +777,15 @@ fn build_discord_embed_body(
             "value": discord_codeblock(eas_text.trim_end(), 1024),
             "inline": false
         }),
-        json!({
-            "name": "EAS Protocol Data:",
-            "value": discord_codeblock(raw_header.trim_end(), 1024),
-            "inline": false
-        }),
     ];
+
+    if let Some(header) = protocol_header {
+        fields.push(json!({
+            "name": "EAS Protocol Data:",
+            "value": discord_codeblock(header.trim_end(), 1024),
+            "inline": false
+        }));
+    }
 
     if let Some(value) = description {
         fields.push(json!({
@@ -733,7 +832,7 @@ fn build_discord_embed_body(
         "fields": fields
     });
 
-    return embed;
+    embed
 }
 
 fn build_markdown_body(
@@ -741,11 +840,15 @@ fn build_markdown_body(
     originator: &str,
     received_timestamp: &str,
     eas_text: &str,
-    raw_header: &str,
+    protocol_header: Option<&str>,
     description: Option<&str>,
     instructions: Option<&str>,
 ) -> String {
     let runtime_config = runtime_config_snapshot();
+    let protocol_section = match protocol_header {
+        Some(value) => format!("\n\n**EAS Protocol Data:**\n```\n{}\n```", value.trim_end()),
+        None => String::new(),
+    };
     let description_section = match description {
         Some(value) => format!("\n\n**CAP Description:**\n```\n{}\n```", value),
         None => String::new(),
@@ -756,14 +859,14 @@ fn build_markdown_body(
     };
 
     format!(
-        "**{} - Software ENDEC Logs**\n\n**{} {}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```\n\n**EAS Protocol Data:**\n```\n{}\n```{}{}\n\nPowered by [Wags' Software ENDEC]({})",
+        "**{} - Software ENDEC Logs**\n\n**{} {}** has just been received from: {}\n\n**Received:** {}\n\n**EAS Text Data:**\n```\n{}\n```{}{}{}\n\nPowered by [Wags' Software ENDEC]({})",
         runtime_config.station_name,
         a_or_an(title),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
-        raw_header.trim_end(),
+        protocol_section,
         description_section,
         instructions_section,
         github_url.as_str()
@@ -895,11 +998,18 @@ fn build_html_body(
     originator: &str,
     received_timestamp: &str,
     eas_text: &str,
-    raw_header: &str,
+    protocol_header: Option<&str>,
     description: Option<&str>,
     instructions: Option<&str>,
 ) -> String {
     let runtime_config = runtime_config_snapshot();
+    let protocol_section = match protocol_header {
+        Some(value) => format!(
+            "<p><strong>EAS Protocol Data:</strong></p><pre>{}</pre>",
+            html_escape(value.trim_end())
+        ),
+        None => String::new(),
+    };
     let description_section = match description {
         Some(value) => format!(
             "<p><strong>CAP Description:</strong></p><pre>{}</pre>",
@@ -921,9 +1031,7 @@ fn build_html_body(
          <p><strong>Received:</strong> {}</p>\
          <p><strong>EAS Text Data:</strong></p>\
          <pre>{}</pre>\
-         <p><strong>EAS Protocol Data:</strong></p>\
-         <pre>{}</pre>\
-         {}{}\
+         {}{}{}\
          <p>Powered by <a href=\"{}\">Wags' Software ENDEC</a></p>",
         html_escape(&runtime_config.station_name),
         html_escape(a_or_an(title)),
@@ -931,7 +1039,7 @@ fn build_html_body(
         html_escape(originator),
         html_escape(received_timestamp),
         html_escape(eas_text.trim_end()),
-        html_escape(raw_header.trim_end()),
+        protocol_section,
         description_section,
         instructions_section,
         github_url.as_str()
@@ -943,11 +1051,15 @@ fn build_plain_body(
     originator: &str,
     received_timestamp: &str,
     eas_text: &str,
-    raw_header: &str,
+    protocol_header: Option<&str>,
     description: Option<&str>,
     instructions: Option<&str>,
 ) -> String {
     let runtime_config = runtime_config_snapshot();
+    let protocol_section = match protocol_header {
+        Some(value) => format!("\n\nEAS Protocol Data:\n{}", value.trim_end()),
+        None => String::new(),
+    };
     let description_section = match description {
         Some(value) => format!("\n\nCAP Description:\n{}", value),
         None => String::new(),
@@ -958,14 +1070,14 @@ fn build_plain_body(
     };
 
     format!(
-        "{} - Software ENDEC Logs\n\n{} {} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}\n\nEAS Protocol Data:\n{}{}{}\n\nPowered by Wags' Software ENDEC ({})",
+        "{} - Software ENDEC Logs\n\n{} {} has just been received from: {}\nReceived: {}\n\nEAS Text Data:\n{}{}{}{}\n\nPowered by Wags' Software ENDEC ({})",
         runtime_config.station_name,
         a_or_an(title),
         title,
         originator,
         received_timestamp,
         eas_text.trim_end(),
-        raw_header.trim_end(),
+        protocol_section,
         description_section,
         instructions_section,
         github_url.as_str()
@@ -1010,6 +1122,30 @@ mod tests {
     }
 
     #[test]
+    fn discord_urls_map_to_their_webhook_with_or_without_a_bot_name() {
+        let endpoint = "https://discord.com/api/webhooks/123/abc-DEF".to_string();
+        assert_eq!(
+            discord_endpoint("discord://123/abc-DEF"),
+            Some((endpoint.clone(), None))
+        );
+        assert_eq!(
+            discord_endpoint("discord://EAS%20Bot@123/abc-DEF/?avatar=no"),
+            Some((endpoint, Some("EAS Bot".to_string())))
+        );
+        assert_eq!(discord_endpoint("discord://123"), None);
+        assert_eq!(discord_endpoint("discord://1/2/3"), None);
+        assert!(is_native_discord(" discord://1/2"));
+        assert!(!is_native_discord("https://discord.com/api/webhooks/1/2"));
+    }
+
+    #[test]
+    fn masked_urls_keep_only_the_scheme_and_the_last_characters() {
+        assert_eq!(mask_url("tgram://123456:secret/9876"), "tgram://****9876");
+        assert_eq!(mask_url("json://host"), "json://****");
+        assert_eq!(mask_url("no scheme"), "****");
+    }
+
+    #[test]
     fn truncate_for_log_preserves_char_boundaries() {
         let input = "éééé";
         let clipped = truncate_for_log(input, 3);
@@ -1030,7 +1166,7 @@ mod tests {
             "The National Weather Service",
             "2026-03-06 10:00:00 PM",
             "Sample EAS text",
-            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-",
+            Some("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-"),
             Some("CAP Description"),
             Some("CAP Instructions"),
         );
@@ -1062,7 +1198,7 @@ mod tests {
             "The National Weather Service",
             "2026-03-06 10:00:00 PM",
             "Sample EAS text",
-            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-",
+            Some("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-"),
             Some("CAP Description"),
             Some("Take shelter now."),
         );
@@ -1078,7 +1214,7 @@ mod tests {
             "The National Weather Service",
             "2026-03-06 10:00:00 PM",
             "Sample EAS text",
-            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-",
+            Some("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-"),
             Some("CAP Description"),
             Some(oversized_instructions.as_str()),
         );
@@ -1095,7 +1231,7 @@ mod tests {
             "The National Weather Service",
             "2026-03-06 10:00:00 PM",
             "Text",
-            "Header",
+            Some("Header"),
             Some("CAP details"),
             Some("CAP steps"),
         );
@@ -1107,11 +1243,78 @@ mod tests {
             "The National Weather Service",
             "2026-03-06 10:00:00 PM",
             "Text",
-            "Header",
+            Some("Header"),
             Some("CAP details"),
             None,
         );
         assert!(plain.contains("CAP Description"));
         assert!(!plain.contains("CAP Instructions"));
+    }
+
+    /// An alert that went out as Alert Ready rather than SAME publishes no SAME header, in any of
+    /// the four shapes a webhook can take; one that went out as SAME keeps it in all four.
+    #[test]
+    fn every_body_carries_the_protocol_header_only_when_given_one() {
+        let header = "ZCZC-CIV-TOR-043100+0030-2611800-NAADSCAP-";
+
+        for protocol_header in [Some(header), None] {
+            let expected = protocol_header.is_some();
+
+            let markdown = build_markdown_body(
+                "Tornado Warning",
+                "Environment Canada",
+                "2026-09-18 01:00:00 PM",
+                "Text",
+                protocol_header,
+                Some("CAP details"),
+                None,
+            );
+            let html = build_html_body(
+                "Tornado Warning",
+                "Environment Canada",
+                "2026-09-18 01:00:00 PM",
+                "Text",
+                protocol_header,
+                Some("CAP details"),
+                None,
+            );
+            let plain = build_plain_body(
+                "Tornado Warning",
+                "Environment Canada",
+                "2026-09-18 01:00:00 PM",
+                "Text",
+                protocol_header,
+                Some("CAP details"),
+                None,
+            );
+            let embed = build_discord_embed_body(
+                "unknown-stream",
+                "Tornado Warning",
+                "TOR",
+                "Environment Canada",
+                "2026-09-18 01:00:00 PM",
+                "Text",
+                protocol_header,
+                Some("CAP details"),
+                None,
+            );
+
+            for (shape, body) in [
+                ("markdown", markdown),
+                ("html", html),
+                ("plain", plain),
+                ("discord", embed.to_string()),
+            ] {
+                assert_eq!(
+                    body.contains("EAS Protocol Data"),
+                    expected,
+                    "{shape}: {body}"
+                );
+                assert_eq!(body.contains(header), expected, "{shape}: {body}");
+                // Everything else survives either way.
+                assert!(body.contains("CAP details"), "{shape}: {body}");
+            }
+            assert!(validate_discord_payload(&json!({ "embeds": [embed] })).is_empty());
+        }
     }
 }

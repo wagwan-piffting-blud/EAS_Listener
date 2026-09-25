@@ -1,12 +1,40 @@
 # EAS Listener Changelog
 
-## v0.34.0: Released 2026-09-06
+## v0.40.0: Released 2026-09-25
+
+- **This change reworks EAS_Listener from the ground up.** A bunch of changes have been made to the codebase, including a complete rewrite of a fair share of the core functionality of the Rust backend, with the following cherry picked highlights for this release due to the sheer volume of changes made:
+
+  - **PHP is GONE.** The entire frontend has been rewritten to use Rust Axum, which is faster, more efficient, and more secure than relying on PHP code. This change also removes the need for a web server, as the Rust backend can serve the dashboard directly via pure HTML/JS/CSS.
+
+  - **The ability to run EAS_Listener standalone is now possible.** This means that EAS_Listener can now be run without the need for Docker, which previously was the only supported way to run the software. This change makes it easier for users to run EAS_Listener on their own systems, without the need for an entire containerization platform/virtualization support just to receive alerts.
+
+  - **Windows and macOS users now have a tray icon, and all platforms now contain service persistence.** This means that EAS_Listener can now run in the background on Windows, Linux, and macOS, and users can access it from the system tray on Windows and macOS. The service persistence feature ensures that EAS_Listener will start automatically when the system boots up, making it more convenient for users to receive alerts without having to manually start the application on boot. Docker users can still use the Docker container, just like before (it will remain updated as well), but now you have the option to run EAS_Listener natively on the three major operating system platforms.
+
+  - **CAP-CP (Common Alerting Protocol - Canadian Profile) is now supported, alongside Canadian SAME/GeoToCLC locale codes.** This means that EAS_Listener can now receive and fully process alerts from Canadian sources, such as NAAD/Alert Ready. This change expands the reach of EAS_Listener to a wider audience, and allows users in Canada to receive alerts from their own local authorities. NOTE: By default, only "immediate broadcast" alerts are processed (so only those disseminated on TV and radio), but this can be changed in the configuration file to allow for any and all alerts to be processed by using the `CAPCP_REQUIRE_IMMEDIATE` configuration option in your config file. Credit to [ApatheticDELL and QDEC](https://github.com/ApatheticDELL/QDEC) for the GeoToCLC CSV file, which was borrowed verbatim.
+
+  - **More TTS engines now work with EAS_Listener.** EAS_Listener now supports more TTS engines, meaning you can now use any of the following for CAP text to speech fallback capability:
+
+    - **Speechify - any voice** (Tom is the default for both Speechify and EAS_Listener overall, you can find a full list of every voice available [here](https://github.com/wagwan-piffting-blud/Speechify/releases/tag/voices))
+    - **Piper**
+    - **espeak-ng**
+    - **Cepstral - any voice** (new)
+    - **Loquendo Dave - ENDEC version** (new)
+
+  - **Full E2T-NG ENDEC profile support/customization.** Previously, EAS_Listener only had the "default"/custom, verbose ENDEC profile, but now it supports all of the E2T-NG ENDEC profiles as a configuration option, which means that users can now choose from a wider range of output text styles for received alert texts. See [E2T-NG](https://github.com/wagwan-piffting-blud/E2T-NG) for more information on the various ENDEC profiles and what they look like in practice.
+
+  - **A new setup and management experience that guides you.** This is a new feature that guides users through the setup process from the first time you run the listener, making it easier to get started with EAS_Listener. The setup experience will walk you through a majority of the configuration options and help you set up your system for receiving alerts. This is a lot simpler than having to manually edit the configuration file, and it will help users get up and running with EAS_Listener more quickly and easily.
+
+That is **most** of the changes for this release! If I left something out, that is my error and I apologize for any possible oversight, but this is 90% of the bulk of the changes made this release. As a personal aside, I want to thank everyone who has supported my development of EAS_Listener and all of my other personal projects over the last few months. I have been working on this and a number of other projects for a fair bit of time now, especially within the EAS community, and it remains a labor of love to those who can't afford things like hardware ENDECs or want to run their own alerting system without relying on a third party or expensive hardware bought second-hand. I hope that this release makes EAS_Listener even more accessible and useful to a wider audience, and I look forward to continuing to improve the software in the future.
+
+---
+
+## v0.34.0/v.0.35.0: Released 2026-09-06
 
 - **Fix URL parsing for Speechify TTS in CAP descriptions and instructions.** A new URL normalization step has been added to CAP parsing, which ensures that URLs in the `<description>` and `<instruction>` elements are properly formatted for TTS reading. This prevents issues where URLs were being read incorrectly (especially in Speechify). As a result, some spfy/Speechify changes have been made upstream to augment this.
 
 - **The build tracks the latest Speechify release instead of a hard-coded one.** `SPFY_VERSION` now defaults to `latest` and is resolved against the GitHub release feed at build time, and each asset's SHA-256 comes from the release metadata rather than three checksums pasted into the Dockerfile -- the `sha256:` prefix GitHub prints on the release page is stripped automatically, so a version bump is no longer an edit at all. The `SPFY_ASSET_SHA256_*` build args survive as overrides for builds that cannot reach the API, and accept the prefixed or bare form interchangeably. Architecture support is now gated on `SPFY_ASSET_SLUG_*` alone, making a new arch a one-line change. CI resolves the release tag once in the `setup` job and passes it to every matrix leg, which keeps all three architectures on the same release and invalidates the registry buildcache exactly when a new release lands.
 
-- **Update unit tests.** The unit tests have been updated this commit to fix a failed test.
+- **Update unit tests.** The unit tests have been updated this commit to fix a failed test. This also contained a version number bump in Cargo.toml.
 
 ---
 

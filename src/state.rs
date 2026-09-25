@@ -23,17 +23,13 @@ pub struct EasAlertData {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AlertRecordingState {
+    #[default]
     Pending,
     Recording,
     Ready,
     Missing,
-}
-
-impl Default for AlertRecordingState {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -92,9 +88,13 @@ impl ActiveAlert {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CapRuntimeStatus {
+    /// Either feed is on; the panel shows whenever this is true.
     pub enabled: bool,
+    pub ipaws_enabled: bool,
     pub endpoint_count: usize,
     pub endpoints: Vec<CapEndpoint>,
+    pub capcp_enabled: bool,
+    pub capcp_endpoints: Vec<String>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub last_poll_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
@@ -204,20 +204,29 @@ mod tests {
 
     #[test]
     fn app_state_update_filters_refreshes_global_filters() {
-        let initial_filters = filter::parse_filters(&json!({
-            "FILTERS": [
-                { "name": "Initial", "event_codes": ["*"], "action": "relay" }
-            ]
-        }));
+        let _guard = filter::GLOBAL_FILTER_TEST_LOCK
+            .lock()
+            .expect("global filter lock");
+        let initial_filters = filter::parse_filters(
+            &json!({
+                "FILTERS": [
+                    { "name": "Initial", "event_codes": ["*"], "action": "relay" }
+                ]
+            }),
+            None,
+        );
         let mut state = AppState::new(initial_filters);
         assert_eq!(filter::determine_filter_name("TOR"), "Initial");
 
-        let updated = filter::parse_filters(&json!({
-            "FILTERS": [
-                { "name": "Block TOR", "event_codes": ["TOR"], "action": "ignore" },
-                { "name": "Fallback", "event_codes": ["*"], "action": "relay" }
-            ]
-        }));
+        let updated = filter::parse_filters(
+            &json!({
+                "FILTERS": [
+                    { "name": "Block TOR", "event_codes": ["TOR"], "action": "ignore" },
+                    { "name": "Fallback", "event_codes": ["*"], "action": "relay" }
+                ]
+            }),
+            None,
+        );
         state.update_filters(updated.clone());
 
         let cloned = state.cloned_filters();
@@ -227,6 +236,9 @@ mod tests {
 
     #[test]
     fn app_state_updates_alert_recording_metadata() {
+        let _guard = filter::GLOBAL_FILTER_TEST_LOCK
+            .lock()
+            .expect("global filter lock");
         let mut state = AppState::new(Vec::new());
         let alert = ActiveAlert::new(
             sample_data(),

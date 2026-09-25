@@ -1,7 +1,7 @@
 {
-    "Pottawattamie": "\\![.1pa.0tx.0wa.0tu.0mi]",
+    "Pottawattamie": "Pot-a-wat-a-mee",
     "IPAWSWEA": "i paws w e a.",
-    "Ebony": "\\![.1E.0b.0x.0n.0i]",
+    "Ebony": "Eb-oh-nee",
     "911": "nine one one",
     "9-1-1": "nine one one",
     "211": "two one one",
@@ -143,7 +143,6 @@
     "CDC": "C D C",
     "USGS": "U S G S",
     "EAS": "E A S",
-    "LA": "Los Angeles",
     "NY": "New York",
     "DC": "Washington, D.C.",
     "SH-": "State Highway ",
@@ -181,5 +180,7 @@
     "alt.": "alternate ",
     "hwy ": "highway ",
     "hwy.": "highway ",
-    "hwy-": "highway "
+    "hwy-": "highway ",
+    "NAADSCAP": "Nads cap",
+    "ca": "c a"
 }

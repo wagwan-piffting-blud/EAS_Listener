@@ -41,14 +41,42 @@
         document.body.removeChild(link);
     }
 
+    function apiUrl(path) {
+        const protocol = window.location.protocol === "https:" ? "https" : "http";
+        return `${protocol}://${window.API_BASE}${path}`;
+    }
+
+    function apiFetch(path, options = {}) {
+        const headers = Object.assign({}, options.headers);
+        if (window.TOKEN) headers.Authorization = `Bearer ${window.TOKEN}`;
+        return fetch(apiUrl(path), Object.assign({}, options, {
+            headers,
+            credentials: "same-origin",
+        }));
+    }
+
+    // An <audio> element cannot send an Authorization header. Same-origin requests carry the
+    // session cookie automatically, so a token is only appended when one is explicitly in play.
+    function apiRecordingUrl(params) {
+        const query = new URLSearchParams(params);
+        if (window.TOKEN) query.set("auth", window.TOKEN);
+        return apiUrl(`/api/recordings?${query.toString()}`);
+    }
+
     const shared = Object.assign(window.shared || {}, {
         formatTimestamp,
         fetchAudioMarkup: fetch_audio,
         downloadAudio,
+        apiUrl,
+        apiFetch,
+        apiRecordingUrl,
     });
 
     window.shared = shared;
     window.formatTimestamp = formatTimestamp;
     window.fetch_audio = fetch_audio;
     window.downloadAudio = downloadAudio;
+    window.apiUrl = apiUrl;
+    window.apiFetch = apiFetch;
+    window.apiRecordingUrl = apiRecordingUrl;
 })();

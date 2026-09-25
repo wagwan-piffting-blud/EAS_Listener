@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>EAS Monitoring Dashboard</title>
+        <link rel="icon" href="/favicon.ico" />
+        <link rel="stylesheet" href="/style.css" />
+    </head>
+    <body>
+        <header>
+            <h1><img src="assets/favicon-96x96.png" alt="EAS Logo" class="logo" />EAS Monitoring Dashboard</h1>
+            <div id="header-right">
+                <span id="wsStatus" class="ws-status">Connecting...</span>
+                <div id="logout-container">
+                    <button id="testAlertButton" class="custom-button button">Send Test Alert</button>
+                    <button id="reloadButton" class="custom-button button">Reload Config/Backend</button>
+                    <button id="logoutButton" class="custom-button button">Logout</button>
+                </div>
+            </div>
+        </header>
+        <div id="notices"></div>
+        <main>
+            <section id="streamSection">
+                <h2>
+                    Streams
+                    <span id="streamCount" class="pill">0 tracked</span>
+                </h2>
+                <div id="streamGrid" class="stream-grid section-scroll"></div>
+            </section>
+            <section id="alertSection">
+                <h2>
+                    Active Alerts
+                    <span id="alertCount" class="pill">None</span>
+                </h2>
+                <p class="smalltext" id="activetext">Alerts are shown in reverse chronological order (newest to oldest, top to bottom) here. <a href="/archive.html">Click here to view all archived alerts.</a></p>
+                <div id="alertList" class="section-scroll"></div>
+            </section>
+            <section id="logSection">
+                <h2>
+                    Recent Logs
+                    <span id="logCount" class="pill">0 entries</span>
+                </h2>
+                <div id="logList" class="logs-container section-scroll"></div>
+            </section>
+            <section id="capStatusSection">
+                <h2>CAP Status</h2>
+                <div id="capStatus" class="cap-status section-scroll"></div>
+            </section>
+        </main>
+        <footer>
+            <span>Powered by <a id="updateLink" data-text="Wags' Rust EAS Listener" href="https://github.com/wagwan-piffting-blud/EAS_Listener" target="_blank">Wags' Rust EAS Listener</a> v<span id="currentVersion"></span> | <a href="/config.html">Edit configuration</a> | <a href="/chargen.html">Enter Character Generator mode</a> | <a href="#" id="vacuumLink" role="button">Vacuum old alerts</a></span>
+        </footer>
+        <script src="shared.js"></script>
+        <script src="bootstrap.js"></script>
+        
+    </body>
+</html>

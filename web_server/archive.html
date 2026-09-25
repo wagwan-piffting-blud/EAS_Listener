@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>EAS Archived Alerts</title>
+        <link rel="stylesheet" href="/style.css" />
+    </head>
+    <body>
+        <header>
+            <h1><img src="assets/favicon-96x96.png" alt="EAS Logo" class="logo" />EAS Archived Alerts</h1>
+            <div id="header-right">
+                <div id="logout-container">
+                    <a class="custom-button" href="/index.html">Back to Dashboard</a>
+                    <a class="custom-button" href="#" id="logoutLink">Logout</a>
+                </div>
+            </div>
+        </header>
+        <main id="oldAlerts">
+            <section id="oldAlertSection">
+                <h2>
+                    <span class="section-title">Archived/Old Alerts</span>
+                    <span id="filterStatus" class="pill">Showing All</span>
+                    <span id="filterOptions" class="pill">
+                        Filter by...
+                    </span>
+                    <span id="fipsFilterToggle" class="pill" role="button" tabindex="0">
+                        Watched FIPS
+                    </span>
+                    <span id="oldAlertCount" class="pill">None</span>
+                    <input id="maxAlertCount" type="text" placeholder="Max. Alerts to Display" pattern="^(\d+|all)$" />
+                </h2>
+                <p class="smalltext">Note: Alerts are shown in chronological order (old to new, top to bottom) on this page.</p>
+                <div id="oldAlertList" class="section-scroll"></div>
+            </section>
+        </main>
+        <script>window.API_BASE = window.location.host;</script>
+        <script src="shared.js"></script>
+        <script src="archive.js"></script>
+        <script>
+            document.getElementById("logoutLink").addEventListener("click", async (event) => {
+                event.preventDefault();
+                try {
+                    await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+                } catch (err) {
+                    console.warn("Logout request failed:", err);
+                }
+                window.location.href = "/login.html";
+            });
+        </script>
+    </body>
+</html>

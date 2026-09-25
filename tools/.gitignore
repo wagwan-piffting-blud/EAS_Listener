@@ -1,0 +1,8 @@
+# Fetched binaries and their provenance record. The manifest and the fetch scripts are tracked;
+# what they download is not.
+*
+!.gitignore
+!components.json
+!fetch_components.ps1
+!fetch_components.sh
+!README.md

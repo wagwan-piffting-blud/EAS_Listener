@@ -22,7 +22,11 @@ function isCapAlert(alert) {
         return true;
     }
     const rawZczc = String(alert?.data?.raw_zczc || "");
-    return rawZczc.includes("IPAWSCAP") || rawZczc.includes("IPAWSWEA");
+    return (
+        rawZczc.includes("IPAWSCAP")
+        || rawZczc.includes("IPAWSWEA")
+        || rawZczc.includes("NAADSCAP")
+    );
 }
 
 async function fetchArchivedAlerts() {
@@ -30,14 +34,14 @@ async function fetchArchivedAlerts() {
     let value = maxAlertsInput.value || "50";
     maxAlertsInput.value = value;
 
-    const params = new URLSearchParams({ fetch_alerts: "true", max_alerts: maxAlertsInput.value || "50" });
+    const params = new URLSearchParams({ max_alerts: maxAlertsInput.value || "50" });
 
     if (filterWatchedFips) {
         params.set("filter_alerts", "watched_fips");
     }
 
-    return fetch(`archive.php?${params.toString()}`)
-        .then((response) => response.json())
+    return window.apiFetch(`/api/alerts?${params.toString()}`)
+        .then((response) => (response.ok ? response.json() : []))
         .catch(() => []);
 }
 
@@ -55,10 +59,13 @@ async function renderAlerts() {
     for (const alert of alerts) {
         const card = document.createElement("article");
         const severityClass = alert?.data?.alert_severity ? alert.data.alert_severity.toLowerCase() : "unknown";
-        const recordingMarkup = filterWatchedFips && alert.data.audio_recording
+        const recordingUrl = alert.data.recording_name
+            ? window.apiRecordingUrl({ name: alert.data.recording_name })
+            : "";
+        const recordingMarkup = filterWatchedFips && recordingUrl
             ? `
                 <br>
-                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(alert.data.audio_recording)} <button type="button" class="download" onclick="window.downloadAudio('${alert.data.audio_recording}')">Download</button></div>
+                <div><strong>Recording audio:&ensp;</strong> ${fetch_audio(recordingUrl)} <button type="button" class="download" onclick="window.downloadAudio('${recordingUrl}')">Download</button></div>
             `
             : "";
 

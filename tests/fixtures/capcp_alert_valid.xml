@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>TEST-CAPCP-001</identifier>
+  <sender>cap-pac@canada.ca</sender>
+  <sent>2026-09-09T14:05:00-00:00</sent>
+  <status>Actual</status>
+  <msgType>Alert</msgType>
+  <scope>Public</scope>
+  <code>profile:CAP-CP:0.4</code>
+  <info>
+    <language>en-CA</language>
+    <category>Met</category>
+    <event>Tornado</event>
+    <responseType>Shelter</responseType>
+    <urgency>Immediate</urgency>
+    <severity>Extreme</severity>
+    <certainty>Observed</certainty>
+    <eventCode>
+      <valueName>profile:CAP-CP:Event:0.4</valueName>
+      <value>tornado</value>
+    </eventCode>
+    <effective>2026-09-09T14:05:00-00:00</effective>
+    <expires>2035-09-09T18:00:00-00:00</expires>
+    <senderName>Environment Canada</senderName>
+    <headline>Tornado warning in effect</headline>
+    <description>A tornado has been sighted near the city.</description>
+    <instruction>Take shelter immediately.</instruction>
+    <parameter>
+      <valueName>layer:SOREM:1.0:Broadcast_Immediately</valueName>
+      <value>Yes</value>
+    </parameter>
+    <parameter>
+      <valueName>layer:SOREM:1.0:Broadcast_Text</valueName>
+      <value>A tornado warning is in effect for southern Ontario. Take shelter immediately.</value>
+    </parameter>
+    <parameter>
+      <valueName>layer:EC-MSC-SMC:1.1:Newly_Active_Areas</valueName>
+      <value>043100,046100</value>
+    </parameter>
+    <resource>
+      <resourceDesc>Broadcast audio</resourceDesc>
+      <mimeType>audio/mpeg</mimeType>
+      <uri>https://alerts.example.ca/audio/capcp.mp3</uri>
+    </resource>
+    <area>
+      <areaDesc>City of Toronto</areaDesc>
+      <geocode>
+        <valueName>profile:CAP-CP:Location:0.3</valueName>
+        <value>3520005</value>
+      </geocode>
+    </area>
+  </info>
+  <info>
+    <language>fr-CA</language>
+    <category>Met</category>
+    <event>Tornade</event>
+    <urgency>Immediate</urgency>
+    <severity>Extreme</severity>
+    <certainty>Observed</certainty>
+    <eventCode>
+      <valueName>profile:CAP-CP:Event:0.4</valueName>
+      <value>tornado</value>
+    </eventCode>
+    <effective>2026-09-09T14:05:00-00:00</effective>
+    <expires>2035-09-09T18:00:00-00:00</expires>
+    <senderName>Environnement Canada</senderName>
+    <headline>Avertissement de tornade en vigueur</headline>
+    <description>Une tornade a ete apercue pres de la ville.</description>
+    <instruction>Mettez-vous a l'abri immediatement.</instruction>
+    <parameter>
+      <valueName>layer:SOREM:1.0:Broadcast_Immediately</valueName>
+      <value>Yes</value>
+    </parameter>
+    <parameter>
+      <valueName>layer:SOREM:1.0:Broadcast_Text</valueName>
+      <value>Un avertissement de tornade est en vigueur pour le sud de l'Ontario.</value>
+    </parameter>
+    <parameter>
+      <valueName>layer:EC-MSC-SMC:1.1:Newly_Active_Areas</valueName>
+      <value>043100,046100</value>
+    </parameter>
+    <area>
+      <areaDesc>Ville de Toronto</areaDesc>
+      <geocode>
+        <valueName>profile:CAP-CP:Location:0.3</valueName>
+        <value>3520005</value>
+      </geocode>
+    </area>
+  </info>
+</alert>

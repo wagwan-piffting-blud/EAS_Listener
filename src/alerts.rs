@@ -27,7 +27,6 @@ const SEVERE_DAY_FILE: &str = "severe_day.txt";
 const ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 const ALERT_DEDUP_WINDOW: Duration = Duration::from_secs(15 * 60);
 const ALERT_DEDUP_PRUNE_INTERVAL: usize = 256;
-const CAP_HEADER_SOURCE_MARKER: &str = "IPAWS";
 
 #[inline]
 fn is_severe_alert_event_code(event_code: &str) -> bool {
@@ -162,7 +161,7 @@ fn cap_alert_has_dedup_key(active_alerts: &[ActiveAlert], dedup_key: &str) -> bo
     let now = Utc::now();
     active_alerts.iter().any(|alert| {
         alert.expires_at > now
-            && alert.raw_header.contains(CAP_HEADER_SOURCE_MARKER)
+            && crate::cap::is_cap_raw_header(&alert.raw_header)
             && dedup_key_from_raw_header(&alert.raw_header).as_deref() == Some(dedup_key)
     })
 }
@@ -271,6 +270,10 @@ async fn restore_active_alert_state(
     Ok(None)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "task entry point: every argument is a distinct channel or shared handle, wired up once by main"
+)]
 pub async fn run_alert_manager(
     mut config: Config,
     state: Arc<Mutex<AppState>>,
@@ -343,12 +346,19 @@ pub async fn run_alert_manager(
             prune_dedup_cache(&mut dedup_cache, dedup_now);
         }
 
-        if !should_process_alert(
-            &mut dedup_cache,
-            &raw_header,
-            &config.preferred_senderid,
-            dedup_now,
-        ) {
+        // Test alerts bypass the duplicate check entirely, in both directions. Their header is only
+        // unique to the minute, and re-testing straight after a configuration change is what they
+        // are for; and recording one in the cache would let it suppress a real national RWT that
+        // happened to go out in the same minute.
+        let is_test_alert = stream_id == crate::TEST_ALERT_STREAM_ID;
+        if !is_test_alert
+            && !should_process_alert(
+                &mut dedup_cache,
+                &raw_header,
+                &config.preferred_senderid,
+                dedup_now,
+            )
+        {
             info!(
                 "Skipping duplicate alert within dedup window: {}",
                 &raw_header
@@ -359,7 +369,7 @@ pub async fn run_alert_manager(
         if let Some(dedup_key) = dedup_key_from_raw_header(&raw_header) {
             if cap_dedup_key_is_active(&state, &dedup_key).await {
                 info!(
-                    "Skipping EAS alert because matching CAP/IPAWS alert is already active (dedupe key={}): {}",
+                    "Skipping EAS alert because a matching CAP alert is already active (dedupe key={}): {}",
                     dedup_key, &raw_header
                 );
                 continue;
@@ -427,11 +437,17 @@ pub async fn run_alert_manager(
 
                 app_state_guard.active_alerts.clone()
             };
-            monitoring.broadcast_alerts(
-                active_snapshot,
-                Some(stream_id.as_str()),
-                Some(alert.data.event_code.as_str()),
-            );
+            // A test alert's stream ID is a label, not a monitored stream; crediting it would add
+            // a "Manual Test Alert" card to the dashboard's stream list.
+            if is_test_alert {
+                monitoring.broadcast_alerts(active_snapshot, None, None);
+            } else {
+                monitoring.broadcast_alerts(
+                    active_snapshot,
+                    Some(stream_id.as_str()),
+                    Some(alert.data.event_code.as_str()),
+                );
+            }
 
             let dsame_text = match dsame_result {
                 Ok(data) => data.eas_text,
@@ -498,6 +514,10 @@ async fn update_alert_recording_metadata(
     monitoring.broadcast_alerts(active_snapshot, None, None);
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "carries one alert's full context plus the shared handles it needs; grouping them would only move the list"
+)]
 async fn handle_recording_and_webhook(
     config: Config,
     state: Arc<Mutex<AppState>>,
@@ -628,7 +648,7 @@ async fn handle_recording_and_webhook(
     }
 
     if let Some((ref recording_path, _)) = recorded_state {
-        crate::icecast::enqueue_alert_audio(recording_path.clone());
+        crate::alert_stream::enqueue_alert_audio(recording_path.clone());
     }
 
     if filter::should_forward_action(action) {
@@ -638,7 +658,7 @@ async fn handle_recording_and_webhook(
             &stream_id,
             &alert,
             &dsame_text,
-            &raw_header,
+            Some(&raw_header),
             recording_path_for_webhook,
         )
         .await;
@@ -730,7 +750,11 @@ async fn get_eas_details_and_log(
     let parsed_header: ParsedEasSerialized = serde_json::from_str(&parsed_json)
         .map_err(|err| anyhow!("Failed to decode parsed EAS header JSON: {}", err))?;
 
-    let eas_text = crate::e2t_ng::E2T(raw_header, "", false, Some(timezone.as_str()));
+    use crate::config::Config;
+    let the_config = Config::get();
+    let strslice = the_config.endec_mode.as_str();
+
+    let eas_text = crate::e2t_ng::E2T(raw_header, strslice, false, Some(timezone.as_str()));
 
     if eas_text == "Invalid EAS header format" {
         anyhow::bail!("Invalid EAS header format: {}", raw_header);
@@ -935,22 +959,28 @@ mod tests {
     }
 
     #[test]
-    fn cap_alert_has_dedup_key_only_matches_ipaws_source_alerts() {
+    fn cap_alert_has_dedup_key_matches_every_cap_feed_and_nothing_off_air() {
         let dedup_key = dedup_key_from_raw_header("ZCZC-WXR-TOR-031055+0030-1231645-KWO35-")
             .expect("dedup key");
-        let cap_alert = ActiveAlert::new(
-            sample_alert_data("TOR", &["031055"]),
-            "ZCZC-WXR-TOR-031055+0030-1231645-IPAWSCAP-".to_string(),
-            Duration::from_secs(120),
-        );
-        let eas_alert = ActiveAlert::new(
-            sample_alert_data("TOR", &["031055"]),
-            "ZCZC-WXR-TOR-031055+0030-1231645-KWO35-".to_string(),
-            Duration::from_secs(120),
-        );
+        let active = |sender: &str| {
+            ActiveAlert::new(
+                sample_alert_data("TOR", &["031055"]),
+                format!("ZCZC-WXR-TOR-031055+0030-1231645-{sender}-"),
+                Duration::from_secs(120),
+            )
+        };
 
-        assert!(cap_alert_has_dedup_key(&[cap_alert], dedup_key.as_str()));
-        assert!(!cap_alert_has_dedup_key(&[eas_alert], dedup_key.as_str()));
+        // CAP-CP used to be missed here: the check looked for "IPAWS" alone.
+        for cap_sender in ["IPAWSCAP", "IPAWSWEA", "NAADSCAP"] {
+            assert!(
+                cap_alert_has_dedup_key(&[active(cap_sender)], dedup_key.as_str()),
+                "{cap_sender}"
+            );
+        }
+        assert!(!cap_alert_has_dedup_key(
+            &[active("KWO35")],
+            dedup_key.as_str()
+        ));
     }
 
     #[test]

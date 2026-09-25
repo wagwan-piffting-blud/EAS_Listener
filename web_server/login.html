@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+    <html lang="en">
+
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>EAS Dashboard - Login</title>
+        <link rel="icon" href="/favicon.ico" />
+        <style>
+            :root {
+                color-scheme: dark light;
+                --bg: #11161f;
+                --fg: #f3f5f9;
+                --panel: #1c2330;
+                --accent: #4f9dff;
+                --accent-soft: rgba(79, 157, 255, 0.2);
+                --success: #3dd068;
+                --warn: #ffb347;
+                --error: #ff6b6b;
+                --muted: rgba(243, 245, 249, 0.65);
+                --border: rgba(243, 245, 249, 0.12);
+                font-family: "Segoe UI", "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif;
+                background: radial-gradient(circle at top, rgba(79, 157, 255, 0.12), transparent) no-repeat,
+                    var(--bg);
+                color: var(--fg);
+            }
+
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                overflow-x: hidden;
+            }
+
+            .container {
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                text-align: center;
+                padding: 1rem;
+            }
+
+            h1 {
+                font-size: 2rem;
+                margin-bottom: 1rem;
+            }
+
+            input {
+                font-size: 24px;
+                color: #bbb;
+            }
+
+            .login-error {
+                color: #ff6b6b;
+                margin: 0 0 1.25rem;
+                padding: 0.6rem 0.9rem;
+                border-radius: 8px;
+                background: rgba(160, 45, 45, 0.22);
+                border: 1px solid rgba(235, 100, 100, 0.5);
+                font-size: 0.95rem;
+                max-width: 32rem;
+            }
+
+            .login-error[hidden] {
+                display: none;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="container">
+            <h1>Please login to view the EAS Monitoring Dashboard.</h1>
+            <p id="loginError" class="login-error" role="alert" hidden></p>
+            <form id="loginForm" method="POST" action="/api/login">
+                <input type="text" name="username" placeholder="Username" required autofocus /><br /><br />
+                <input type="password" name="password" placeholder="Password" required /><br /><br />
+                <button type="submit">Login</button>
+            </form>
+        </div>
+        <script src="login.js"></script>
+    </body>
+</html>

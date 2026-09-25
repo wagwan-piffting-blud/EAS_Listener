@@ -8,3 +8,10 @@ docker-compose-local.yml
 dashboard.png
 web_server/image_info.json
 web_server/web_config.json
+tts_voices/cep6/voices/
+tts_voices/**/*.7z
+# Whatever fetch_components put here locally (ffmpeg alone is 260 MB on Windows); the image needs
+# only the manifest and the fetcher.
+tools/*
+!tools/components.json
+!tools/fetch_components.sh

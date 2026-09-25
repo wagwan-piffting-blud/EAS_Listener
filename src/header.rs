@@ -109,15 +109,15 @@ fn validate_amplitude(amp: f64) -> Result<(), HeaderError> {
 fn byte_to_bits_msb_first(b: u8) -> [u8; 8] {
     let mut bits = [0u8; 8];
     for j in (0..8).rev() {
-        bits[7 - j] = ((b >> j) & 1) as u8;
+        bits[7 - j] = (b >> j) & 1;
     }
     bits
 }
 
 fn byte_to_bits_lsb_first(b: u8) -> [u8; 8] {
     let mut bits = [0u8; 8];
-    for i in 0..8 {
-        bits[i] = ((b >> i) & 1) as u8;
+    for (i, bit) in bits.iter_mut().enumerate() {
+        *bit = (b >> i) & 1;
     }
     bits
 }

@@ -43,6 +43,15 @@
     const defaultText = (root.dataset.defaultText || "EAS DETAILS CHANNEL").trim() || "EAS DETAILS CHANNEL";
     const token = (root.dataset.token || "").trim();
     const apiBase = (root.dataset.apiBase || window.location.host).trim();
+
+    function apiRecordingUrl(params) {
+        // An <audio> element cannot send an Authorization header, so the recording endpoint
+        // also accepts the token in the query string, the same way /ws does.
+        const scheme = window.location.protocol === "https:" ? "https" : "http";
+        const query = new URLSearchParams(params);
+        if (token) query.set("auth", token);
+        return `${scheme}://${apiBase}/api/recordings?${query.toString()}`;
+    }
     const streamUrl = (root.dataset.streamUrl || "").trim();
     const liveMode = streamUrl !== "";
 
@@ -449,14 +458,14 @@
     async function fetchLatestRecordingId() {
         try {
             const headers = token ? { Authorization: `Bearer ${token}` } : {};
-            const response = await fetch("archive.php?latest_id=true", {
+            const scheme = window.location.protocol === "https:" ? "https" : "http";
+            const response = await fetch(`${scheme}://${apiBase}/api/alerts/latest-recording-id`, {
                 method: "GET",
                 headers,
                 cache: "no-store",
             });
             if (!response.ok) return null;
-            const text = await response.text();
-            const id = Number.parseInt(text.trim(), 10);
+            const id = Number.parseInt(await response.json(), 10);
             return Number.isInteger(id) && id >= 0 ? id : null;
         } catch (_error) {
             return null;
@@ -467,7 +476,7 @@
         if (!Number.isInteger(recordingId) || recordingId < 0) return false;
         try {
             const headers = token ? { Authorization: `Bearer ${token}` } : {};
-            const response = await fetch(`archive.php?recording_id=${recordingId}`, {
+            const response = await fetch(apiRecordingUrl({ id: recordingId }), {
                 method: "HEAD",
                 headers,
                 cache: "no-store",
@@ -531,7 +540,7 @@
             return;
         }
 
-        const src = `archive.php?recording_id=${latestRecordingId}`;
+        const src = apiRecordingUrl({ id: latestRecordingId });
         if (src !== state.currentAudioSrc) {
             audio.src = src;
             audio.load();
@@ -668,7 +677,9 @@
 
     function connectWebSocket() {
         const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const wsUrl = `${protocol}://${apiBase}/ws?auth=${encodeURIComponent(token)}`;
+        const wsUrl = token
+            ? `${protocol}://${apiBase}/ws?auth=${encodeURIComponent(token)}`
+            : `${protocol}://${apiBase}/ws`;
 
         try {
             state.ws = new WebSocket(wsUrl);

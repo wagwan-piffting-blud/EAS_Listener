@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="referrer" content="no-referrer" />
+        <title>EAS Listener Setup</title>
+        <link rel="icon" href="/favicon.ico" />
+        <link rel="stylesheet" href="/style.css" />
+        <link rel="stylesheet" href="/config-form.css" />
+    </head>
+    <body>
+        <header>
+            <h1><img src="assets/favicon-96x96.png" alt="EAS Logo" class="logo" />EAS Listener Setup</h1>
+        </header>
+        <main class="cfg-page setup-page">
+            <section class="setup-card" aria-live="polite">
+                <ol class="setup-steps" id="setupSteps" hidden></ol>
+                <div id="setupBody">
+                    <p class="setup-lede">Checking the listener...</p>
+                </div>
+                <div id="setupStatus" class="config-status" role="status" hidden></div>
+                <div class="setup-actions" id="setupActions" hidden>
+                    <button type="button" class="custom-button" id="backButton">Back</button>
+                    <button type="button" class="custom-button cfg-primary" id="nextButton">Next</button>
+                </div>
+            </section>
+        </main>
+        <script src="config-form.js"></script>
+        <script src="notifications.js"></script>
+        <script src="setup.js"></script>
+    </body>
+</html>

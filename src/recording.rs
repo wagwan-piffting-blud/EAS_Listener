@@ -140,12 +140,40 @@ pub fn start_encoding_task_with_timestamp(
         None
     };
 
-    let header_samples =
-        header::generate_same_header_samples(header_text, TARGET_SAMPLE_RATE, HEADER_AMPLITUDE)?;
+    let header_samples = if !config.emit_header_tones {
+        Vec::new()
+    } else if let Some(custom) = config.header_audio_override() {
+        match decode_audio_file_to_i16(custom) {
+            Ok(samples) => {
+                info!(
+                    "Opening the recording with custom header audio ({} samples) from {:?}",
+                    samples.len(),
+                    custom
+                );
+                samples
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load custom header audio from {:?}: {}; using the SAME header",
+                    custom, e
+                );
+                header::generate_same_header_samples(
+                    header_text,
+                    TARGET_SAMPLE_RATE,
+                    HEADER_AMPLITUDE,
+                )?
+            }
+        }
+    } else {
+        header::generate_same_header_samples(header_text, TARGET_SAMPLE_RATE, HEADER_AMPLITUDE)?
+    };
     let header_sample_count = header_samples.len();
 
+    // Generated even when it is not written: the trailing-NNNN detector sizes its search from the
+    // real burst, so the off-air NNNN still gets trimmed out of the captured audio.
     let nnnn_samples =
         header::generate_same_header_samples("NNNN", TARGET_SAMPLE_RATE, HEADER_AMPLITUDE)?;
+    let write_nnnn = config.emit_header_tones;
     let nnnn_sample_count = nnnn_samples.len();
     let nnnn_burst_cycle_samples = nnnn_sample_count / 3;
     let nnnn_tail_buffer_samples = TARGET_SAMPLE_RATE as usize * NNNN_TAIL_BUFFER_SECONDS;
@@ -232,17 +260,19 @@ pub fn start_encoding_task_with_timestamp(
             }
             samples_written += trailing_len;
 
-            let silence_samples_before_nnnn = TARGET_SAMPLE_RATE as usize;
-            for _ in 0..silence_samples_before_nnnn {
-                blocking_writer.write_sample(0i16)?;
-            }
-            samples_written += silence_samples_before_nnnn;
+            if write_nnnn {
+                let silence_samples_before_nnnn = TARGET_SAMPLE_RATE as usize;
+                for _ in 0..silence_samples_before_nnnn {
+                    blocking_writer.write_sample(0i16)?;
+                }
+                samples_written += silence_samples_before_nnnn;
 
-            for &sample in &nnnn_samples {
-                blocking_writer.write_sample(sample)?;
-            }
+                for &sample in &nnnn_samples {
+                    blocking_writer.write_sample(sample)?;
+                }
 
-            samples_written += nnnn_sample_count;
+                samples_written += nnnn_sample_count;
+            }
 
             if let Some(ref outro) = outro_samples {
                 let silence_before_outro = TARGET_SAMPLE_RATE as usize;
@@ -524,16 +554,16 @@ fn build_nnnn_expected_bits() -> Vec<u8> {
 
 fn byte_to_bits_msb_first(byte: u8) -> [u8; 8] {
     let mut bits = [0u8; 8];
-    for bit in 0..8 {
-        bits[bit] = ((byte >> (7 - bit)) & 1) as u8;
+    for (index, bit) in bits.iter_mut().enumerate() {
+        *bit = (byte >> (7 - index)) & 1;
     }
     bits
 }
 
 fn byte_to_bits_lsb_first(byte: u8) -> [u8; 8] {
     let mut bits = [0u8; 8];
-    for bit in 0..8 {
-        bits[bit] = ((byte >> bit) & 1) as u8;
+    for (index, bit) in bits.iter_mut().enumerate() {
+        *bit = (byte >> index) & 1;
     }
     bits
 }
@@ -584,7 +614,7 @@ async fn transcode_wav(wav_path: &Path, out_path: &Path, codec_args: &[&str]) ->
     partial.push(".partial");
     let partial_path = PathBuf::from(partial);
 
-    let mut command = tokio::process::Command::new("ffmpeg");
+    let mut command = tokio::process::Command::new(crate::components::ffmpeg());
     command
         .arg("-nostdin")
         .arg("-hide_banner")
@@ -728,6 +758,18 @@ fn decode_audio_file_to_i16(path: &Path) -> Result<Vec<i16>> {
         .collect())
 }
 
+/// Converts 16-bit PCM at any rate into what a recording's `audio_tx` takes: float samples at the
+/// recording rate, scaled the way the encoder scales them back.
+pub fn pcm_for_recording(samples: &[i16], sample_rate: u32) -> Result<Vec<f32>> {
+    let amplitude = i16::MAX as f32;
+    let floats: Vec<f32> = samples.iter().map(|&s| s as f32 / amplitude).collect();
+    if sample_rate == TARGET_SAMPLE_RATE {
+        Ok(floats)
+    } else {
+        resample_f32(&floats, sample_rate)
+    }
+}
+
 fn resample_f32(samples: &[f32], input_rate: u32) -> Result<Vec<f32>> {
     let ratio = TARGET_SAMPLE_RATE as f64 / input_rate as f64;
     let chunk_size = 1024usize;
@@ -787,5 +829,39 @@ fn sanitize_filename_label(label: &str) -> String {
         "UNKNOWN".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pcm_for_recording_keeps_the_encoder_scale_and_reaches_48k() {
+        let samples: Vec<i16> = vec![0, i16::MAX, -i16::MAX, 16_384, -1_234];
+        let passthrough = pcm_for_recording(&samples, TARGET_SAMPLE_RATE).expect("passthrough");
+        assert_eq!(passthrough.len(), samples.len());
+        assert_eq!(passthrough[1], 1.0);
+        assert_eq!(passthrough[2], -1.0);
+
+        // The encoder multiplies by i16::MAX and truncates, so the round trip is exact to within
+        // the one LSB that truncation can cost.
+        for (&original, &float) in samples.iter().zip(&passthrough) {
+            let back = (float * i16::MAX as f32) as i16;
+            assert!(
+                (back as i32 - original as i32).abs() <= 1,
+                "{original} came back as {back}"
+            );
+        }
+
+        // One second at another rate has to stay one second.
+        let second_at_16k = vec![1_000i16; 16_000];
+        let resampled = pcm_for_recording(&second_at_16k, 16_000).expect("resample");
+        let expected = TARGET_SAMPLE_RATE as usize;
+        assert!(
+            resampled.len().abs_diff(expected) <= expected / 100,
+            "got {} samples for one second",
+            resampled.len()
+        );
     }
 }
