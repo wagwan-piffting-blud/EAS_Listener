@@ -1,8 +1,13 @@
 name: Release
 
+# Bumping `version` in Cargo.toml and pushing to main is a release: when no tag exists for that
+# version, the run builds, signs and publishes it, tags the commit and takes the notes from that
+# version's section of CHANGES.md. Pushing a v* tag by hand still works the same way.
+#
 # A tag run can only restore a cache made on its own tag or on main, so without runs on main every
 # release compiled every dependency from scratch. Pushes to main that change the dependencies (or
-# this file) build without publishing, and only those runs save the cache the tag runs restore.
+# this file) without a new version build without publishing, and runs on main save the cache that
+# tag runs restore.
 # GitHub drops a cache nobody has used for 7 days; after a quiet spell, run this workflow on main
 # by hand (Run workflow, branch main, with no tag) before tagging, and the release builds warm.
 on:
@@ -41,21 +46,43 @@ jobs:
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
-      # False for a build of a branch, which only warms the cache: nothing is signed or published.
+      # What every job checks out: the tag, or on main the pushed commit, which a release made from
+      # main has no tag on until publish creates it.
+      ref: ${{ steps.resolve.outputs.ref }}
+      # False for a build that only warms the cache: nothing is signed or published.
       release: ${{ steps.resolve.outputs.release }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      # A push to main releases when Cargo.toml names a version with no tag yet: bumping the
+      # version is the release. Any other push to main only warms the cache.
       - name: Resolve the tag and version
         id: resolve
         run: |
           TAG='${{ github.event.inputs.tag || github.ref_name }}'
+          REF="$TAG"
           RELEASE='${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') }}'
+          if [ '${{ github.event_name }}' = push ] && [ '${{ github.ref }}' = refs/heads/main ]; then
+            REF='${{ github.sha }}'
+            CRATE_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            if git ls-remote --exit-code --tags origin "refs/tags/v${CRATE_VERSION}" > /dev/null; then
+              echo "v${CRATE_VERSION} is already tagged."
+            else
+              TAG="v${CRATE_VERSION}"
+              RELEASE=true
+            fi
+          fi
           {
             echo "tag=${TAG}"
             echo "version=${TAG#v}"
+            echo "ref=${REF}"
             echo "release=${RELEASE}"
           } >> "$GITHUB_OUTPUT"
           if [ "$RELEASE" = true ]; then
-            echo "Building release ${TAG}"
+            echo "Building release ${TAG} from ${REF}"
           else
             echo "Building ${TAG} to refresh the build cache; nothing will be published"
           fi
@@ -68,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -108,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -217,7 +244,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -377,7 +404,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.meta.outputs.tag }}
+          ref: ${{ needs.meta.outputs.ref }}
 
       - name: Download the archives
         uses: actions/download-artifact@v4
@@ -414,6 +441,9 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: ${{ needs.meta.outputs.tag }}
+          # A release from main creates its tag here, on the commit that was built. A tag made
+          # with GITHUB_TOKEN starts no workflow, so this does not trigger a second release run.
+          target_commitish: ${{ needs.meta.outputs.ref }}
           body_path: ${{ steps.notes.outputs.generate == 'false' && 'release-notes.md' || '' }}
           generate_release_notes: ${{ steps.notes.outputs.generate == 'true' }}
           draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft == 'true' }}

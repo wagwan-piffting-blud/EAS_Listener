@@ -26,6 +26,8 @@
 
 That is **most** of the changes for this release! If I left something out, that is my error and I apologize for any possible oversight, but this is 90% of the bulk of the changes made this release. As a personal aside, I want to thank everyone who has supported my development of EAS_Listener and all of my other personal projects over the last few months. I have been working on this and a number of other projects for a fair bit of time now, especially within the EAS community, and it remains a labor of love to those who can't afford things like hardware ENDECs or want to run their own alerting system without relying on a third party or expensive hardware bought second-hand. I hope that this release makes EAS_Listener even more accessible and useful to a wider audience, and I look forward to continuing to improve the software in the future.
 
+- **Minor workflow updates.**
+
 ---
 
 ## v0.34.0/v.0.35.0: Released 2026-09-06
