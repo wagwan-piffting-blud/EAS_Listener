@@ -6,6 +6,8 @@
 #
 # Voices already present are left alone, so this is safe to run on every boot.
 set -eu
+# Readable by every listener on the machine, whichever account fetched the voices.
+umask 022
 
 ARCHIVE_NAME="DASDEC_Cepstral_Voices.7z"
 DEFAULT_URL="https://uploads.wagspuzzle.space/${ARCHIVE_NAME}"
@@ -159,6 +161,7 @@ for voice in $WANTED; do
         || die "${voice} came out of the archive incomplete."
     rm -rf "${TARGET_DIR}/${voice}"
     mv "${STAGE_DIR}/${voice}" "${TARGET_DIR}/${voice}"
+    chmod -R a+rX "${TARGET_DIR}/${voice}"
     log "installed ${voice} in ${TARGET_DIR}/${voice}"
 done
 

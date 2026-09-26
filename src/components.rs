@@ -145,7 +145,7 @@ static LAST_PROBE: RwLock<Option<Vec<ComponentStatus>>> = RwLock::new(None);
 fn resolve_in(
     spec: &ComponentSpec,
     configured: Option<&str>,
-    tools_dir: &Path,
+    tools_dirs: &[PathBuf],
 ) -> (PathBuf, ResolvedFrom) {
     if let Some(value) = configured {
         let trimmed = value.trim();
@@ -156,12 +156,14 @@ fn resolve_in(
 
     let file = format!("{}{}", spec.binary, std::env::consts::EXE_SUFFIX);
     // A program installed with its own folder -- Piper, with its libraries -- is one level down.
-    for bundled in [
-        tools_dir.join(&file),
-        tools_dir.join(spec.manifest).join(&file),
-    ] {
-        if bundled.is_file() {
-            return (bundled, ResolvedFrom::Bundled);
+    for tools_dir in tools_dirs {
+        for bundled in [
+            tools_dir.join(&file),
+            tools_dir.join(spec.manifest).join(&file),
+        ] {
+            if bundled.is_file() {
+                return (bundled, ResolvedFrom::Bundled);
+            }
         }
     }
 
@@ -189,7 +191,22 @@ fn exists(path: &Path) -> bool {
 }
 
 fn resolve(spec: &ComponentSpec, configured: Option<&str>) -> (PathBuf, ResolvedFrom) {
-    resolve_in(spec, configured, &crate::paths::tools_dir())
+    resolve_in(spec, configured, &crate::paths::tools_dirs())
+}
+
+/// The fetch script's arguments for one component, installing into `paths::assets_root` --
+/// beside the script unless this account cannot write there.
+fn fetch_args(manifest: &str) -> Vec<String> {
+    let root = crate::paths::assets_root().display().to_string();
+    let args: [&str; 4] = if cfg!(windows) {
+        ["-InstallRoot", &root, "-Component", manifest]
+    } else {
+        ["-d", &root, manifest, ""]
+    };
+    args.iter()
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| arg.to_string())
+        .collect()
 }
 
 pub fn apply_runtime_config(config: &Config) {
@@ -460,12 +477,7 @@ pub async fn ensure(spec: &ComponentSpec) -> Result<PathBuf, String> {
         script.display()
     );
     let manifest = spec.manifest;
-    let args: &[&str] = if cfg!(windows) {
-        &["-Component", manifest]
-    } else {
-        &[manifest]
-    };
-    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    let args = fetch_args(manifest);
     let wanted = *spec;
     let present = move || exists(&resolve(&wanted, None).0);
     fetch_once(format!("component:{manifest}"), announce, present, async move {
@@ -511,13 +523,10 @@ pub async fn refetch(
         spec.key,
         script.display()
     );
+    let args = fetch_args(manifest);
     fetch_once(format!("component:{manifest}"), announce, present, async move {
-        let args: &[&str] = if cfg!(windows) {
-            &["-Component", manifest]
-        } else {
-            &[manifest]
-        };
-        run_script(&script, args).await
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_script(&script, &args).await
     })
     .await
 }
@@ -530,7 +539,7 @@ pub async fn ensure_cepstral_voice(
     present: impl Fn() -> bool + Send + 'static,
 ) -> Result<(), String> {
     let script = script(
-        &crate::paths::in_app_root("tts_voices").join("cep6"),
+        &crate::paths::in_install_root("tts_voices").join("cep6"),
         "fetch_voices",
     );
     let announce = format!(
@@ -630,7 +639,7 @@ mod tests {
     #[test]
     fn a_configured_path_wins_over_everything_else() {
         let tools = tools_dir_containing(&FFMPEG);
-        let (path, source) = resolve_in(&FFMPEG, Some("  C:/tools/ffmpeg.exe  "), tools.path());
+        let (path, source) = resolve_in(&FFMPEG, Some("  C:/tools/ffmpeg.exe  "), &[tools.path().to_path_buf()]);
         assert_eq!(path, PathBuf::from("C:/tools/ffmpeg.exe"));
         assert_eq!(source, ResolvedFrom::Configured);
     }
@@ -638,7 +647,7 @@ mod tests {
     #[test]
     fn a_bundled_binary_is_preferred_over_the_system_path() {
         let tools = tools_dir_containing(&FFMPEG);
-        let (path, source) = resolve_in(&FFMPEG, None, tools.path());
+        let (path, source) = resolve_in(&FFMPEG, None, &[tools.path().to_path_buf()]);
         assert_eq!(
             path,
             tools
@@ -651,7 +660,7 @@ mod tests {
     #[test]
     fn a_blank_configured_path_is_ignored() {
         let tools = tools_dir_containing(&FFMPEG);
-        let (path, source) = resolve_in(&FFMPEG, Some("   "), tools.path());
+        let (path, source) = resolve_in(&FFMPEG, Some("   "), &[tools.path().to_path_buf()]);
         assert_eq!(
             path,
             tools
@@ -664,9 +673,19 @@ mod tests {
     #[test]
     fn an_unbundled_component_falls_through_to_the_system_path() {
         let empty = tempfile::tempdir().expect("temp dir");
-        let (path, source) = resolve_in(&APPRISE, None, empty.path());
+        let (path, source) = resolve_in(&APPRISE, None, &[empty.path().to_path_buf()]);
         assert_eq!(path, PathBuf::from("apprise"));
         assert_eq!(source, ResolvedFrom::SystemPath);
+    }
+
+    #[test]
+    fn an_instance_that_fetched_into_its_own_tools_finds_them_after_the_shared_ones() {
+        let shared = tempfile::tempdir().expect("temp dir");
+        let own = tools_dir_containing(&FFMPEG);
+        let dirs = [shared.path().to_path_buf(), own.path().to_path_buf()];
+        let (path, source) = resolve_in(&FFMPEG, None, &dirs);
+        assert!(path.starts_with(own.path()), "{}", path.display());
+        assert_eq!(source, ResolvedFrom::Bundled);
     }
 
     #[test]
@@ -726,7 +745,7 @@ mod tests {
         let exe = folder.join(format!("piper{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&exe, b"").expect("write");
         assert_eq!(
-            resolve_in(&PIPER, None, dir.path()),
+            resolve_in(&PIPER, None, &[dir.path().to_path_buf()]),
             (exe, ResolvedFrom::Bundled)
         );
     }

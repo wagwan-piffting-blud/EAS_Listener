@@ -75,6 +75,7 @@ struct TrayApp {
     menu: Option<Menu>,
     open_id: MenuId,
     logs_id: MenuId,
+    uninstall_id: MenuId,
     quit_id: MenuId,
     /// Created once the event loop is running, which macOS requires; held from then on, since
     /// dropping it removes the icon.
@@ -87,7 +88,10 @@ impl TrayApp {
         let menu = self.menu.take().context("The tray menu was already used")?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip(format!("EAS Listener - {}", self.dashboard_url))
+            .with_tooltip(match crate::paths::instance() {
+                Some(name) => format!("EAS Listener ({name}) - {}", self.dashboard_url),
+                None => format!("EAS Listener - {}", self.dashboard_url),
+            })
             .with_icon(load_icon()?)
             .build()
             .context("Failed to create the tray icon")?;
@@ -128,6 +132,21 @@ impl ApplicationHandler<TrayEvent> for TrayApp {
                     tracing::warn!("Could not open {}: {}", self.log_dir.display(), err);
                 }
             }
+            // The configuration page's Uninstall section, which says what goes and asks first.
+            // While setup is still running there is no dashboard yet, so setup opens instead.
+            TrayEvent::Menu(event) if event.id == self.uninstall_id => {
+                let url = if self.dashboard_url.contains("/setup.html") {
+                    self.dashboard_url.clone()
+                } else {
+                    format!(
+                        "{}/config.html#cfg-group-uninstall",
+                        self.dashboard_url.trim_end_matches('/')
+                    )
+                };
+                if let Err(err) = open::that_detached(&url) {
+                    tracing::warn!("Could not open {}: {}", url, err);
+                }
+            }
             TrayEvent::Menu(event) if event.id == self.quit_id => {
                 tracing::info!("Quit selected from the tray; shutting down.");
                 event_loop.exit();
@@ -152,10 +171,12 @@ pub fn run(
     let menu = Menu::new();
     let open_item = MenuItem::new("Open Dashboard", true, None);
     let logs_item = MenuItem::new("Open Log Folder", true, None);
+    let uninstall_item = MenuItem::new("Uninstall…", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     menu.append(&open_item)?;
     menu.append(&logs_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&uninstall_item)?;
     menu.append(&quit_item)?;
 
     let mut builder = EventLoop::<TrayEvent>::with_user_event();
@@ -184,6 +205,7 @@ pub fn run(
         menu: Some(menu),
         open_id: open_item.id().clone(),
         logs_id: logs_item.id().clone(),
+        uninstall_id: uninstall_item.id().clone(),
         quit_id: quit_item.id().clone(),
         tray: None,
         failure: None,

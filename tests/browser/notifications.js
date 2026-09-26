@@ -61,8 +61,8 @@ function captureServer() {
         await page.waitForLoadState("networkidle");
 
         const before = await api("/api/notifications");
-        check("GET /api/notifications answers", before.status === 200 && Array.isArray(before.body.urls), JSON.stringify(before));
-        const startCount = before.body.urls.length;
+        check("GET /api/notifications answers", before.status === 200 && Array.isArray(before.body.targets), JSON.stringify(before));
+        const startCount = before.body.targets.length;
 
         console.log("=== the section ===");
         await page.goto(`${BASE}/config.html`, { waitUntil: "networkidle" });
@@ -138,8 +138,8 @@ function captureServer() {
         check("the save reports the notification list", /notification list/.test(saveText), saveText);
         const after = await api("/api/notifications");
         check("the file holds the new URL",
-            after.body.urls.length === startCount + 1 && after.body.urls.some((url) => url.startsWith(`json://127.0.0.1:${capture.port}`)),
-            JSON.stringify(after.body.urls));
+            after.body.targets.length === startCount + 1 && after.body.targets.some(({ url }) => url.startsWith(`json://127.0.0.1:${capture.port}`)),
+            JSON.stringify(after.body.targets));
         check("nothing is left unsaved", /No unsaved changes/.test(await page.locator("#cfgDirty").textContent()));
 
         console.log("=== a saved row ===");
@@ -150,12 +150,39 @@ function captureServer() {
         await row.getByRole("button", { name: "Send a test" }).click();
         await row.locator(".ntf-result.is-ok, .ntf-result.is-bad").waitFor({ timeout: 60000 });
         check("can be tested on its own", capture.received.length === 1, `${capture.received.length} requests`);
+        check("an unrouted URL gets every alert", (await row.locator(".ntf-route-summary").textContent()) === "Every alert");
 
-        await row.getByRole("button", { name: /^Remove/ }).click();
+        console.log("=== routing it ===");
+        await row.getByRole("button", { name: "Route" }).click();
+        const route = row.locator(".ntf-route");
+        await route.waitFor();
+        check("every source starts ticked", (await route.locator('input[type="checkbox"]:checked').count()) === 4);
+        for (const key of ["offair", "ipaws", "wea"]) await route.locator(`input[value="${key}"]`).uncheck();
+        await route.locator('input[value="naad"]').click();
+        check("the last source cannot be unticked", await route.locator('input[value="naad"]').isChecked());
+        const events = route.locator('input[aria-label^="Event codes"]');
+        await events.fill("tor, TORNADO");
+        check("a code that is not one is flagged", /TORNADO/.test(await route.locator(".ntf-result.is-bad").textContent()));
+        await events.fill("tor, svr");
+        await row.getByRole("button", { name: "Done" }).click();
+        const summary = (await row.locator(".ntf-route-summary").textContent()).trim();
+        check("the row sums the route up", summary === "NAAD (Alert Ready) · TOR, SVR", summary);
+        check("the route is an unsaved change", /unsaved change/.test(await page.locator("#cfgDirty").textContent()));
+        await page.click("#saveButton");
+        await page.waitForFunction(() => /No unsaved changes/.test(document.getElementById("cfgDirty").textContent));
+        const routed = (await api("/api/notifications")).body.targets.find(({ url }) => url.startsWith(`json://127.0.0.1:${capture.port}`));
+        check("the file keeps the route",
+            routed && JSON.stringify(routed.sources) === '["naad"]' && JSON.stringify(routed.events) === '["TOR","SVR"]',
+            JSON.stringify(routed));
+        await page.reload({ waitUntil: "networkidle" });
+        const reloaded = page.locator("#cfg-group-notifications .ntf-row").last();
+        check("and shows it after a reload", (await reloaded.locator(".ntf-route-summary").textContent()).trim() === summary);
+
+        await reloaded.getByRole("button", { name: /^Remove/ }).click();
         await page.click("#saveButton");
         await page.waitForFunction(() => /No unsaved changes/.test(document.getElementById("cfgDirty").textContent));
         const restored = await api("/api/notifications");
-        check("removing and saving puts the list back", restored.body.urls.length === startCount, JSON.stringify(restored.body.urls));
+        check("removing and saving puts the list back", restored.body.targets.length === startCount, JSON.stringify(restored.body.targets));
 
         console.log("=== diagnostics ===");
         check("no console errors", consoleErrors.length === 0, consoleErrors.join(" | "));

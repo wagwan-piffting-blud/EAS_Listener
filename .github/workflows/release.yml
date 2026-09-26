@@ -206,12 +206,14 @@ jobs:
 
       - name: Pack (tar.gz)
         if: runner.os != 'Windows'
-        run: tar -czf 'dist/${{ steps.stage.outputs.stage }}.tar.gz' -C dist '${{ steps.stage.outputs.stage }}'
+        # The files at the archive's top level, not in a folder named after it. Not `-C dir .`: a
+        # `./` entry makes tar reset the permissions of whatever folder it is extracted into.
+        run: cd 'dist/${{ steps.stage.outputs.stage }}' && tar -czf '../${{ steps.stage.outputs.stage }}.tar.gz' -- *
 
       - name: Pack (zip)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "dist/${{ steps.stage.outputs.stage }}" -DestinationPath "dist/${{ steps.stage.outputs.stage }}.zip"
+        run: Compress-Archive -Path "dist/${{ steps.stage.outputs.stage }}/*" -DestinationPath "dist/${{ steps.stage.outputs.stage }}.zip"
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4
@@ -338,7 +340,7 @@ jobs:
              cap_tts_replacement_config.example.json example.env "dist/${STAGE}/"
           cp tools/components.json tools/fetch_components.sh tools/README.md "dist/${STAGE}/tools/"
           echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
-          tar -czf "dist/${STAGE}.tar.gz" -C dist "$STAGE"
+          (cd "dist/${STAGE}" && tar -czf "../${STAGE}.tar.gz" -- *)
           if [ "$SIGNING" != 'true' ] && [ '${{ needs.meta.outputs.release }}' = 'true' ]; then
             echo "::warning::The macOS build is unsigned: set the signing secrets listed in release.yml to sign and notarize it."
           fi

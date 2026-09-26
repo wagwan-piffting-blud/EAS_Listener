@@ -9,6 +9,7 @@
 
 use crate::autostart::{self, Availability};
 use crate::backend;
+use crate::Config;
 use anyhow::{Context, Result};
 use axum::extract::{ConnectInfo, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
@@ -177,8 +178,41 @@ pub enum Handover {
     Service,
 }
 
+/// The ports setup offers as defaults: the one it is serving on, and one for the alert stream.
+static OFFERED_PORTS: OnceLock<(u16, u16)> = OnceLock::new();
+
+/// Moves setup off a port another instance on this machine has claimed or is using, so a second
+/// instance's setup comes up instead of waiting on the first's port -- and offers that port, and a
+/// free alert-stream port, as the defaults it saves. A port the environment sets is kept, and so
+/// is everything inside the image, whose ports are published by the compose file.
+fn choose_ports(bind_addr: SocketAddr) -> SocketAddr {
+    let defaults = Config::safe_internal_defaults();
+    let in_image = std::env::var_os("EAS_IMAGE_VARIANT").is_some();
+    let forced = |key: &str| Config::environment_setting(key).is_some();
+    let taken = if in_image {
+        Vec::new()
+    } else {
+        crate::instances::ports_taken_by_others()
+    };
+
+    let mut addr = bind_addr;
+    if !in_image && !forced("MONITORING_BIND_PORT") && !forced("MONITORING_BIND_ADDR") {
+        addr.set_port(crate::instances::free_port(bind_addr.port(), &taken));
+    }
+    let mut stream_taken = taken;
+    stream_taken.push(addr.port());
+    let stream = if in_image || forced("ICECAST_ALERT_PORT") {
+        defaults.icecast_alert_port
+    } else {
+        crate::instances::free_port(defaults.icecast_alert_port, &stream_taken)
+    };
+    let _ = OFFERED_PORTS.set((addr.port(), stream));
+    addr
+}
+
 /// Serves the setup page on `bind_addr` until a configuration has been saved.
 pub async fn run(bind_addr: SocketAddr) -> Result<Handover> {
+    let bind_addr = choose_ports(bind_addr);
     let state = SetupState {
         done: Arc::new(Notify::new()),
         saving: Arc::new(Mutex::new(())),
@@ -200,7 +234,14 @@ pub async fn run(bind_addr: SocketAddr) -> Result<Handover> {
 
     let rule = "=".repeat(78);
     println!("{rule}");
-    println!("EAS Listener has no configuration yet, so it is waiting to be set up.");
+    match crate::paths::instance() {
+        Some(name) => println!(
+            "EAS Listener instance '{name}' has no configuration yet, so it is waiting to be set \
+             up. It will be saved in {}.",
+            crate::paths::app_root().display()
+        ),
+        None => println!("EAS Listener has no configuration yet, so it is waiting to be set up."),
+    }
     println!("Finish setting it up in a browser:");
     println!();
     println!("    {}", setup_url(bind_addr));
@@ -310,7 +351,33 @@ async fn status_handler() -> Json<Value> {
 }
 
 async fn schema_handler() -> Json<Value> {
-    Json(crate::config_schema::payload())
+    let mut payload = crate::config_schema::payload();
+    if let Some((dashboard, stream)) = OFFERED_PORTS.get().copied() {
+        offer_ports(&mut payload, dashboard, stream);
+    }
+    Json(payload)
+}
+
+/// Makes the ports setup chose the defaults the page shows and saves.
+fn offer_ports(payload: &mut Value, dashboard: u16, stream: u16) {
+    let Some(fields) = payload["fields"].as_array_mut() else {
+        return;
+    };
+    for field in fields {
+        match field["key"].as_str() {
+            Some("MONITORING_BIND_PORT") => field["default"] = json!(dashboard),
+            Some("ICECAST_ALERT_PORT") => field["default"] = json!(stream),
+            Some("MONITORING_BIND_ADDR") => {
+                if let Some(addr) = field["default"]
+                    .as_str()
+                    .and_then(|addr| addr.parse::<SocketAddr>().ok())
+                {
+                    field["default"] = json!(SocketAddr::new(addr.ip(), dashboard).to_string());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn same_us_handler() -> Json<Value> {
@@ -456,7 +523,7 @@ async fn notifications_put_handler(
         );
     }
     let path = crate::notifications::resolve(body.path.as_deref().unwrap_or_default());
-    crate::notifications::api::save(&path, &body.urls)
+    crate::notifications::api::save(&path, &body.targets())
 }
 
 async fn notifications_test_handler(

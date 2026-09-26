@@ -56,7 +56,10 @@ pub fn availability(client_is_local: bool) -> Availability {
 fn platform(client_is_local: bool) -> Availability {
     use crate::service;
     if service::is_installed() {
-        return unavailable("The EASListener service is already installed.");
+        return unavailable(&format!(
+            "The {} service is already installed.",
+            service::service_name()
+        ));
     }
     if service::is_elevated() {
         return Availability::Automatic {
@@ -72,7 +75,11 @@ fn platform(client_is_local: bool) -> Availability {
     }
     Availability::Manual {
         kind: "windows_service",
-        command: format!("\"{}\" --install-service", exe_display()),
+        command: format!(
+            "\"{}\"{} --install-service",
+            exe_display(),
+            crate::paths::instance_flag()
+        ),
     }
 }
 
@@ -86,7 +93,7 @@ fn platform(_client_is_local: bool) -> Availability {
         return unavailable("It was already started by systemd.");
     }
     if systemd::is_installed() {
-        return unavailable("eas-listener.service is already installed.");
+        return unavailable(&format!("{} is already installed.", systemd::unit_name()));
     }
     if systemd::is_root() {
         return Availability::Automatic {
@@ -96,7 +103,7 @@ fn platform(_client_is_local: bool) -> Availability {
     }
     Availability::Manual {
         kind: "systemd",
-        command: format!("sudo \"{}\" --install-service", exe_display()),
+        command: systemd::sudo_command("--install-service"),
     }
 }
 
@@ -126,7 +133,7 @@ fn platform(_client_is_local: bool) -> Availability {
     unavailable("This build cannot install itself as a service.")
 }
 
-#[cfg(any(all(windows, feature = "service"), target_os = "linux"))]
+#[cfg(all(windows, feature = "service"))]
 fn exe_display() -> String {
     std::env::current_exe()
         .map(|exe| exe.display().to_string())

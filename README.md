@@ -90,15 +90,66 @@ amd64 now uses the native `x86_64` build rather than the legacy 32-bit one, so t
 
 The listener serves the dashboard itself, and the dashboard is built into the binary, so the
 executable on its own is a complete install. Drop it somewhere, run it, and the dashboard is on
-`MONITORING_BIND_PORT` (8080 by default); first run writes `config.json` beside it.
+`MONITORING_BIND_PORT` (8080 by default). What belongs to the whole machine stays beside the
+binary; what belongs to one listener -- its configuration, its setup token, its alert archive --
+goes in that listener's own folder, so a root-owned install in `/opt` works for any account:
 
 ```
-eas-listener/
-    eas_listener(.exe)      the binary, dashboard included
-    config.json             your configuration, written by first-run setup
-    tools/                  ffmpeg and friends (see tools/README.md)
-    web_server/             optional: dashboard files to serve instead of the built-in copy
+eas-listener/                   beside the binary, shared
+    eas_listener(.exe)          the binary, dashboard included
+    tools/                      ffmpeg and friends (see tools/README.md)
+    tts_voices/                 the TTS engines' voices and fetch scripts
+    web_server/                 optional: dashboard files to serve instead of the built-in copy
+
+<instances>/default/            this listener's own folder
+    config.json                 its configuration, written by first-run setup
+    apprise.yml                 where its alerts are announced
+    data/                       its alert database, recordings and logs
 ```
+
+| | `<instances>` is |
+| --- | --- |
+| Windows | `%ProgramData%\eas-listener` |
+| Linux, as root | `/var/lib/eas-listener` |
+| Linux, anyone else | `~/.local/share/eas-listener` (or `$XDG_DATA_HOME/eas-listener`) |
+| macOS, as root | `/Library/Application Support/eas-listener` |
+| macOS, anyone else | `~/Library/Application Support/eas-listener` |
+
+`--app-root DIR` (or `EAS_APP_ROOT`) puts a listener's folder somewhere else. The Docker image sets
+it to `/app`, so nothing changes there. A copy run from a source checkout with `cargo run` keeps
+using the checkout's own `config.json`.
+
+An install from before this layout kept `config.json` beside the binary. The first time the
+listener starts, it copies that configuration and `apprise.yml` into `<instances>/default`, moves
+the alert archive there with them, and renames the originals to `*.migrated`. While a service is
+still installed from the old layout, the listener keeps using the files beside the binary, so the
+service keeps working. Run `--uninstall-service` and then `--install-service` to move it.
+
+#### Several listeners on one machine
+
+`--instance <name>` runs another listener from the same binary, with its own folder
+(`<instances>/<name>`), configuration, dashboard port and service:
+
+```
+eas_listener --instance north                       # first run: setup, on a port no other instance uses
+eas_listener --instance north --install-service     # its own service, unit or launchd job
+eas_listener --list-instances                       # every instance, its port and its folder
+```
+
+Every instance uses whatever any other instance fetched -- ffmpeg, Apprise, the TTS engines,
+Speechify's Tom, Piper's model and the Cepstral voices -- so each is downloaded once per machine,
+not once per instance. They go beside the binary when the account running the listener can write
+there, and otherwise into `<instances>/tools` and `<instances>/tts_voices`, which all of that
+account's instances share. Whatever is fetched is readable and runnable by every account, even
+from a service with a restrictive umask, so one that root fetched into `/opt` works for everyone.
+The one thing that cannot be shared is a download a normal account made into its own home folder,
+which other accounts cannot see; the listener never falls back to a folder every account can write,
+since a root-run listener executes what is in it.
+
+First-run setup for a new instance skips any port another instance's configuration claims or that
+something is already listening on, and offers the port it came up on as the dashboard's. It does
+the same for the alert stream's port. `EAS_INSTANCE` works in place of `--instance`. Instance names
+are letters, digits, `-` and `_`.
 
 A `web_server/` directory next to the executable wins over the built-in copy whenever it holds an
 `index.html`, so a source checkout and the Docker image both serve the files on disk and an edit
@@ -110,10 +161,10 @@ which it is:
 Serving the dashboard source="built into the binary (26 files)"
 ```
 
-Paths resolve relative to the executable's own directory, or to `EAS_APP_ROOT` when it is set.
 `tools/fetch_components.ps1` (Windows) and `tools/fetch_components.sh` (Linux/macOS) download the
 pinned third-party binaries the listener needs; see [`tools/README.md`](./tools/README.md) for what
-is required, what is optional, and the licensing.
+is required, what is optional, and the licensing. When the account running the listener cannot
+write to `tools/` beside the binary, what it fetches goes into its own folder instead.
 
 ### Prebuilt binaries
 
@@ -134,6 +185,13 @@ carries its notarization ticket for machines that are offline. A release made be
 set up has only an unsigned `.tar.gz`; downloaded in a browser, that needs `xattr -dr
 com.apple.quarantine eas-listener-*` before macOS will run it.
 
+Each archive holds the files themselves at its top level, not a folder named after the archive,
+so make a folder for the listener and unpack into it:
+
+```bash
+mkdir eas-listener && tar -xzf eas-listener-<version>-linux-x86_64.tar.gz -C eas-listener
+```
+
 `SHA256SUMS` is published alongside them:
 
 ```bash
@@ -153,8 +211,8 @@ with a one-time token:
 http://127.0.0.1:8080/setup.html?token=...
 ```
 
-The token is also written to `setup-token.txt` next to `config.json`; in Docker, `docker logs
-eas_listener` shows it. Setup asks for dashboard sign-in details, the streams to monitor, your time
+The token is also written to `setup-token.txt` in the listener's own folder, beside where
+`config.json` will go; in Docker, `docker logs eas_listener` shows it. Setup asks for dashboard sign-in details, the streams to monitor, your time
 zone and locations, whether to poll CAP, and, optionally, where alerts should be announced. Only
 what you fill in is written. Everything else keeps its default without being copied into the file,
 and can be changed later from the dashboard.
@@ -202,12 +260,41 @@ Notifications go to the URLs in `apprise.yml` (next to `config.json`, or whereve
   tokens and passwords are hidden in the list and the preview.
 - **Paste a URL** takes any Apprise URL as is, for anything the form does not cover.
 - **Send a test** sends a short message to one URL, saved or not, and reports what came back.
+- **Route** limits a URL to some alerts: by where they came from and by SAME event code.
 
 Discord webhooks (`discord://`) are sent by the listener itself, with an embed and the recording
-attached, and work without Apprise. Every other service needs Apprise; `tools/fetch_components`
-installs it. A saved list applies from the next alert, with no reload. Saving keeps the previous
-file as `apprise.yml.bak` and writes one URL per line, so YAML keys or tags in a hand-written file
-are dropped; the page says so before you save.
+attached, and work without Apprise. Every other service needs Apprise, which the listener downloads
+itself (apprise-go, into `tools/`) the first time the page lists services, a non-Discord URL is
+saved or tested, or an alert goes to one. A saved list applies from the next alert, with no reload.
+Saving keeps the previous file as `apprise.yml.bak`; YAML keys or tags in a hand-written file that
+are not URLs or routes are dropped, and the page says so before you save.
+
+#### Routing alerts to different services
+
+A URL on its own gets every alert. With a route it gets only the alerts from the sources ticked and,
+if any are listed, with those event codes. Routes mix freely: one URL can take IPAWS and WEA,
+another only NAAD, a third only tornado warnings from anywhere, and an unrouted fourth everything.
+In `apprise.yml` a routed URL is written with `url:`:
+
+```yaml
+- "discord://1234/abcd"                  # every alert
+- url: "tgram://bottoken/chatid"
+  sources: ["ipaws", "wea"]              # IPAWS CAP and IPAWS WEA
+- url: "mailto://user:pass@example.com"
+  sources: ["naad"]                      # CAP-CP / Alert Ready only
+- url: "ntfys://alerts"
+  events: ["TOR", "SVR", "EAN"]          # these events, from any source
+```
+
+| Source | Alerts |
+| --- | --- |
+| `offair` | SAME decoded from a monitored stream, and the 1050 Hz tone |
+| `ipaws` | IPAWS CAP |
+| `wea` | IPAWS WEA |
+| `naad` | CAP-CP from NAAD (Alert Ready / NPAS) |
+
+A route only narrows what the filters already forward: an alert your `FILTERS` do not forward
+reaches no URL, routed or not.
 
 As with `config.json`, if `./apprise.yml` does not exist before the first `docker compose up`,
 Docker mounts a directory in its place, and the list is saved inside it.
@@ -252,8 +339,10 @@ all it takes; the log shows the download. What each platform can fetch:
 | speechify | ✅ the 32-bit engine, with Tom | ✅ | ✅ signed and notarized |
 | espeak-ng | ❌ install the `.msi` | ✅ from the distro | ✅ from Homebrew |
 
-The Cepstral voice is a 337 MB download the first time. An engine that cannot be fetched says why
-in the log and in the test alert's result.
+The Cepstral voice is a 337 MB download the first time, into `tts_voices/cep6` beside the binary,
+where every instance on the machine finds it (a voice an older version put in the listener's
+`data/` folder is still found there). An engine that cannot be fetched says why in the log and in
+the test alert's result.
 
 ### TTS replacements
 
@@ -373,6 +462,13 @@ they are turned on. A file that is missing or unreadable when the alert arrives 
 generated tones are used for that recording. `EMIT_HEADER_TONES` set to `false` wins: nothing
 opens the recording, so the custom audio is not played either.
 
+`CAPCP_CUSTOM_HEADER_AUDIO` does the same for CAP-CP (NAAD / Alert Ready) alerts alone, so a
+listener taking both NAAD and IPAWS can give Canadian alerts their own opening while US alerts keep
+theirs. For a CAP-CP alert it is used in place of `CUSTOM_HEADER_AUDIO`; left empty, CAP-CP alerts
+use `CUSTOM_HEADER_AUDIO` like everything else. Set only `CAPCP_CUSTOM_HEADER_AUDIO` and every
+other alert keeps its generated tones. A CAP-CP file that has gone missing falls back to the
+generated tones, not to `CUSTOM_HEADER_AUDIO`.
+
 ### Starting at boot: a Windows service, a systemd unit or a launchd job
 
 First-run setup asks, on its last page, whether the listener should start with the computer. Say
@@ -393,25 +489,71 @@ sudo ./eas_listener --install-service       # Linux, or macOS for a LaunchDaemon
 
 Each one registers it to start automatically and starts it now; stop a copy you started by hand
 first, since both cannot hold the port. `--uninstall-service` removes it (with `sudo` for a
-LaunchDaemon) and `--service-status` reports its state.
+LaunchDaemon) and `--service-status` reports its state. With `--instance <name>`, each of these acts
+on that instance's own service, so several can be installed side by side.
+
+On Linux, `sudo` runs the listener as root, whose instances live in `/var/lib/eas-listener`. To
+install the one you set up as yourself, the command setup shows passes its folder along:
+`sudo ./eas_listener --app-root ~/.local/share/eas-listener/default --install-service`.
 
 | | Windows | Linux | macOS, with `sudo` | macOS, without |
 | --- | --- | --- | --- | --- |
 | What is installed | the `EASListener` service, automatic start | `/etc/systemd/system/eas-listener.service`, enabled | a LaunchDaemon in `/Library/LaunchDaemons` | a LaunchAgent in `~/Library/LaunchAgents` |
+| For `--instance north` | `EASListener-north`, shown as "EAS Listener (north)" | `eas-listener-north.service` | `io.github.wagwan-piffting-blud.eas-listener.north` | the same label |
 | Starts | at boot | at boot | at boot, before anyone logs in | when you log in |
-| Runs as | LocalSystem | the account that owns the install folder (root only if root owns it) | the account that owns the install folder | you, with the menu bar icon in a `tray` build |
+| Runs as | LocalSystem | the account that owns the listener's folder (root only if root owns it) | the account that owns the listener's folder | you, with the menu bar icon in a `tray` build |
 | Restarts after a crash | after 60 s, 60 s, then every 5 minutes | after 10 s, giving up after 5 failures in 10 minutes | after 10 s | after 10 s |
-| Logs | `service-error.log` beside `config.json` when it stops on its own | `journalctl -u eas-listener -f` | `launchd.log` beside `config.json` | `launchd.log` beside `config.json` |
+| Logs | `service-error.log` in the listener's folder when it stops on its own | `journalctl -u eas-listener -f` | `launchd.log` in the listener's folder | `launchd.log` in the listener's folder |
 | Build | Windows releases include the `service` feature; from source, `--features service` | any build | any build | any build |
 
 The Linux unit and the macOS job are written for the install they came from -- the executable,
-the folder and its owner -- so there is no template to edit. Move the install and run
+the listener's folder and its owner -- so there is no template to edit. Move the install and run
 `--install-service` again to rewrite them. The macOS job also puts Homebrew's folders on its
-`PATH`, so an ffmpeg installed with `brew` is found the same way it is from a terminal. As a
-service, the listener keeps its alert database and recordings in `data/` beside the executable
-unless `SHARED_STATE_DIR` says otherwise, because a service's temporary folder is not yours:
-LocalSystem's on Windows, one that may be cleared at boot on Linux, and one macOS clears after a few
-days.
+`PATH`, so an ffmpeg installed with `brew` is found the same way it is from a terminal. The
+listener keeps its alert database and recordings in `data/` in its own folder unless
+`SHARED_STATE_DIR` says otherwise, whether it runs as a service or by hand.
+
+### Uninstalling
+
+```
+eas_listener --uninstall                        # this instance; its alert archive is kept
+eas_listener --instance north --uninstall       # a named one
+eas_listener --uninstall --with-program         # ...and EAS Listener itself, if no other instance is left
+eas_listener --uninstall --all                  # every instance, the fetched tools, and the program
+eas_listener --uninstall --delete-data          # add to any of these to delete the archives too
+```
+
+`--uninstall` stops and removes the instance's service, unit or launchd job if it has one, then
+deletes what the listener wrote for it: `config.json`, `apprise.yml`, their backups, the setup
+token and its logs. **Its alert archive and recordings are kept**, in its `data/` folder, so
+nothing it recorded has to be backed up first; the command says where they are, and setting up an
+instance under the same name again picks them back up. `--delete-data` deletes them too. It asks
+you to type the instance's name first; `--yes` skips that, for scripts. It refuses while the
+instance is still running by hand or from the tray, since its files are in use. A
+`SHARED_STATE_DIR` outside the instance's folder is never touched, and neither is anything in the
+folder the listener did not write.
+
+`--with-program` goes on, once no other instance is left, to remove everything that was fetched --
+ffmpeg, Apprise, the TTS engines, their voices -- and then EAS Listener itself: the binary and the
+files the release archive held beside it, and the folder once that leaves it empty. Only those
+files are deleted by name, so a folder that holds anything else stays. On Windows the running
+program cannot delete itself, so they go a few seconds after it exits. `--uninstall --all` does all
+of this for every instance on the machine. From a source checkout the program's files are always
+left alone.
+
+The same is on the dashboard: **Uninstall**, the last section of the configuration page (the tray
+icon's **Uninstall…** opens it). It lists what goes and what is kept, asks for the instance's name,
+and offers the same two choices, both off by default: delete the alert archive too, and remove EAS
+Listener itself. The listener hands the work to a process of its own and stops, since it cannot
+delete files it has open; that process writes what it removed to
+`eas-listener-uninstall-<name>.log` in the temporary folder of the account the listener runs as.
+Where the listener lacks the rights to remove its own service -- a Linux unit that runs as a normal
+account, a macOS LaunchDaemon -- the section shows the command to run instead.
+
+Removing a service needs the same rights as installing one. On Windows, `--uninstall` asks for
+administrator permission itself. On Linux, and for a macOS LaunchDaemon, it stops and prints the
+`sudo` command to run instead. In Docker, remove the container, and its volumes with
+`docker compose down -v` if the alert archive should go too.
 
 ### Desktop tray icon
 

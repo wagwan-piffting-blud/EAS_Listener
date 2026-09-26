@@ -13,7 +13,19 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const LABEL: &str = "io.github.wagwan-piffting-blud.eas-listener";
+const LABEL: &str = "io.github.wagwan-piffting-blud.eas-listener";
+
+/// The job's label, and its plist's name: `<LABEL>.<name>` for a named instance.
+pub fn label() -> String {
+    label_for(crate::paths::instance())
+}
+
+fn label_for(instance: Option<&str>) -> String {
+    match instance {
+        Some(name) => format!("{LABEL}.{name}"),
+        None => LABEL.to_string(),
+    }
+}
 const DAEMON_DIR: &str = "/Library/LaunchDaemons";
 /// launchd starts jobs with only the system's own directories on PATH. Homebrew's are added so
 /// the ffmpeg and espeak-ng it installs are found the same way they are from a terminal.
@@ -28,7 +40,7 @@ pub enum Kind {
 }
 
 pub fn daemon_path() -> PathBuf {
-    Path::new(DAEMON_DIR).join(format!("{LABEL}.plist"))
+    Path::new(DAEMON_DIR).join(format!("{}.plist", label()))
 }
 
 pub fn agent_path() -> Option<PathBuf> {
@@ -37,7 +49,7 @@ pub fn agent_path() -> Option<PathBuf> {
         .map(|home| {
             PathBuf::from(home)
                 .join("Library/LaunchAgents")
-                .join(format!("{LABEL}.plist"))
+                .join(format!("{}.plist", label()))
         })
 }
 
@@ -86,8 +98,22 @@ fn string(value: &str) -> String {
 }
 
 /// `user` is the account a daemon runs as; an agent always runs as whoever logs in.
-pub fn render_plist(exe: &Path, app_root: &Path, kind: Kind, user: Option<&str>) -> String {
+pub fn render_plist(
+    exe: &Path,
+    app_root: &Path,
+    kind: Kind,
+    user: Option<&str>,
+    instance: Option<&str>,
+) -> String {
     let root = app_root.display().to_string();
+    let instance_args = instance
+        .map(|name| {
+            format!(
+                "\x20       <string>--instance</string>\n\x20       {}\n",
+                string(name)
+            )
+        })
+        .unwrap_or_default();
     let log = format!("{}/launchd.log", root.trim_end_matches('/'));
     let user_entry = match (kind, user) {
         (Kind::Daemon, Some(name)) => {
@@ -112,6 +138,7 @@ pub fn render_plist(exe: &Path, app_root: &Path, kind: Kind, user: Option<&str>)
          \x20   <array>\n\
          \x20       {exe}\n\
          \x20       <string>--service</string>\n\
+         {instance_args}\
          \x20       <string>--app-root</string>\n\
          \x20       {root}\n\
          \x20   </array>\n\
@@ -141,7 +168,7 @@ pub fn render_plist(exe: &Path, app_root: &Path, kind: Kind, user: Option<&str>)
          </plist>\n",
         // A comment cannot contain "--", which a path can.
         root_comment = xml_escape(&root).replace("--", "- -"),
-        label = string(LABEL),
+        label = string(&label_for(instance)),
         exe = string(&exe.display().to_string()),
         root = string(&root),
         path = string(JOB_PATH),
@@ -219,11 +246,18 @@ pub fn install() -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Could not create {}", parent.display()))?;
     }
-    std::fs::write(&path, render_plist(&exe, &app_root, kind, user.as_deref()))
+    let plist = render_plist(
+        &exe,
+        &app_root,
+        kind,
+        user.as_deref(),
+        crate::paths::instance(),
+    );
+    std::fs::write(&path, plist)
         .with_context(|| format!("Could not write {}", path.display()))?;
 
     let domain = domain(kind);
-    let target = format!("{domain}/{LABEL}");
+    let target = format!("{domain}/{}", label());
     // A job already loaded from an earlier install has to go before the new one can load.
     let _ = launchctl(&["bootout", &target]);
     let path_text = path.display().to_string();
@@ -263,13 +297,14 @@ pub fn install() -> Result<()> {
     );
     let sudo = if kind == Kind::Daemon { "sudo " } else { "" };
     println!(
-        "Remove it with:  {sudo}\"{}\" --uninstall-service",
-        exe.display()
+        "Remove it with:  {sudo}\"{}\"{} --uninstall-service",
+        exe.display(),
+        crate::paths::instance_flag()
     );
     if kind == Kind::Agent {
         println!(
-            "To start at boot instead, before anyone logs in: sudo \"{}\" --install-service",
-            exe.display()
+            "To start at boot instead, before anyone logs in: {}",
+            crate::systemd::sudo_command("--install-service")
         );
     }
     Ok(())
@@ -285,18 +320,20 @@ pub fn uninstall() -> Result<()> {
         ),
         None => bail!(
             "No LaunchAgent is installed for this account. A LaunchDaemon is removed with: \
-             sudo \"{}\" --uninstall-service",
-            exe_display()
+             sudo \"{}\"{} --uninstall-service",
+            exe_display(),
+            crate::paths::instance_flag()
         ),
     };
     if kind == Kind::Daemon && !crate::paths::is_root() {
         bail!(
-            "The LaunchDaemon needs root to remove. Run: sudo \"{}\" --uninstall-service",
-            exe_display()
+            "The LaunchDaemon needs root to remove. Run: sudo \"{}\"{} --uninstall-service",
+            exe_display(),
+            crate::paths::instance_flag()
         );
     }
     // A job that is not loaded is not a reason to stop.
-    if let Err(err) = launchctl(&["bootout", &format!("{}/{LABEL}", domain(kind))]) {
+    if let Err(err) = launchctl(&["bootout", &format!("{}/{}", domain(kind), label())]) {
         eprintln!("Note: {err:#}");
     }
     let path = job_path(kind)?;
@@ -313,7 +350,7 @@ pub fn status() -> Result<()> {
     println!("{}", job_path(kind)?.display());
     // `print` exits non-zero for a job that is not loaded, which is an answer, not a failure.
     let output = Command::new("launchctl")
-        .args(["print", &format!("{}/{LABEL}", domain(kind))])
+        .args(["print", &format!("{}/{}", domain(kind), label())])
         .output()
         .context("Failed to run launchctl")?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -357,6 +394,7 @@ mod tests {
             Path::new("/Users/wags/EAS Listener"),
             Kind::Daemon,
             Some("wags"),
+            None,
         );
         assert!(plist.contains("<string>/Users/wags/EAS Listener/eas_listener</string>"));
         assert!(plist.contains(
@@ -375,6 +413,7 @@ mod tests {
             Path::new("/Applications/eas"),
             Kind::Agent,
             Some("wags"),
+            None,
         );
         assert!(!plist.contains("UserName"));
         assert!(plist.contains("LaunchAgent: starts at login"));
@@ -387,6 +426,7 @@ mod tests {
             Path::new("/srv/a&b <x> --odd"),
             Kind::Daemon,
             None,
+            None,
         );
         assert!(plist.contains("<string>/srv/a&amp;b &lt;x&gt; --odd/eas_listener</string>"));
         assert!(!plist.contains("<x>"));
@@ -394,5 +434,23 @@ mod tests {
             let body = comment.split("-->").next().unwrap_or_default();
             assert!(!body.contains("--"), "{body}");
         }
+    }
+
+    #[test]
+    fn a_named_instance_gets_a_job_of_its_own() {
+        assert_eq!(label_for(None), LABEL);
+        assert_eq!(label_for(Some("north")), format!("{LABEL}.north"));
+        let plist = render_plist(
+            Path::new("/Applications/eas/eas_listener"),
+            Path::new("/Users/w/Library/Application Support/eas-listener/north"),
+            Kind::Agent,
+            None,
+            Some("north"),
+        );
+        assert!(plist.contains(&format!("<string>{LABEL}.north</string>")));
+        assert!(plist.contains(
+            "<string>--service</string>\n        <string>--instance</string>\n        \
+             <string>north</string>\n        <string>--app-root</string>"
+        ));
     }
 }

@@ -221,6 +221,7 @@ pub async fn send_alert_webhook(
 ) {
     let runtime_config = runtime_config_snapshot();
     let config_path = crate::notifications::resolve(&runtime_config.apprise_config_path);
+    let source = crate::notifications::Source::of_raw_header(&alert.raw_header);
     let apprise_urls_from_config_array: Vec<String> = match fs::File::open(&config_path) {
         Ok(mut file) => {
             let mut contents = String::new();
@@ -232,7 +233,22 @@ pub async fn send_alert_webhook(
                 );
                 return;
             }
-            crate::notifications::parse(&contents).urls
+            let targets = crate::notifications::parse(&contents).targets;
+            let routed: Vec<String> = targets
+                .iter()
+                .filter(|target| target.accepts(source, &alert.data.event_code))
+                .map(|target| target.url.clone())
+                .collect();
+            if routed.len() < targets.len() {
+                info!(
+                    "Alert {} from {} goes to {} of {} notification target(s) by their routes",
+                    alert.data.event_code,
+                    source.key(),
+                    routed.len(),
+                    targets.len()
+                );
+            }
+            routed
         }
         Err(err) => {
             warn!(
@@ -444,6 +460,14 @@ pub async fn send_alert_webhook(
         .collect();
 
     if non_discord_urls.is_empty() {
+        return;
+    }
+    if let Err(err) = crate::notifications::ensure_apprise().await {
+        warn!(
+            "Not sending to {} Apprise target(s): {}",
+            non_discord_urls.len(),
+            err
+        );
         return;
     }
 

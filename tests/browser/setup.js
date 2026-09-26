@@ -139,7 +139,7 @@ function line(label, value) {
         check("config.json holds exactly the plan", JSON.stringify(saved) === JSON.stringify(planned));
         const apprise = path.join(path.dirname(CONFIG), "apprise.yml");
         const written = fs.existsSync(apprise) ? fs.readFileSync(apprise, "utf8") : "";
-        check("apprise.yml holds the pasted URL", written.includes(`- ${SETUP_URL}`), apprise);
+        check("apprise.yml holds the pasted URL", written.includes(`- "${SETUP_URL}"`), apprise);
     }
 
     await page.fill('input[name="username"]', USER);

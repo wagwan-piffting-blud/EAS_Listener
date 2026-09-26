@@ -1,6 +1,6 @@
 [package]
 name = "eas_listener"
-version = "0.40.1"
+version = "0.41.0"
 edition = "2021"
 
 [features]
@@ -52,6 +52,7 @@ open = "5.4"
 tray-icon = { version = "0.25", optional = true }
 winit = { version = "0.30", optional = true }
 png = { version = "0.18", optional = true }
+serde_norway = "0.9.42"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = { version = "0.8", optional = true }

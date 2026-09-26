@@ -52,6 +52,24 @@ EAS_BASE=http://127.0.0.1:8080 EAS_USER=admin2 EAS_PASS=hunter2 node tests/brows
 
 It writes `notifications.png` to the screenshot directory.
 
+It also routes the URL it added -- NAAD only, two event codes -- and checks the route is saved and
+shown again after a reload.
+
+## Uninstall
+
+`uninstall.js` drives the configuration page's Uninstall section: that it is the last section and
+in the navigation, that it names the instance's folder, that the button waits for the typed name,
+and that uninstalling hands off and says so. **It really uninstalls the listener it runs against**,
+so start a scratch instance for it (`--instance` with its own `--app-root` or `ProgramData`) and
+check afterwards that the process exited and the folder is gone.
+
+```bash
+EAS_BASE=http://127.0.0.1:18151 EAS_EXPECT_INSTANCE=north \
+    EAS_EXPECT_FOLDER='C:\tmp\eas-gui\programdata\eas-listener\north' node tests/browser/uninstall.js
+```
+
+It writes `uninstall.png` to the screenshot directory.
+
 ## Requirements
 
 Playwright and a Chromium build:

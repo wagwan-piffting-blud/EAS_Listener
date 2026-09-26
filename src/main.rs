@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use monitoring::{MonitoringHub, MonitoringLayer};
 use recording::RecordingState;
 use std::collections::HashMap;
@@ -32,6 +32,7 @@ mod e2t_ng;
 mod filter;
 mod header;
 mod hellotts;
+mod instances;
 mod launchd;
 mod monitoring;
 mod notifications;
@@ -47,6 +48,7 @@ mod systemd;
 mod tone;
 #[cfg(feature = "tray")]
 mod tray;
+mod uninstall;
 mod web_assets;
 mod webhook;
 
@@ -267,11 +269,15 @@ fn sync_web_runtime_config(config: &Config) {
         }
     };
 
+    // The copy beside the dashboard's files only where they are served from disk -- a checkout,
+    // the image. A release has no web_server/, and one made for this file would be a write into
+    // the install that every instance shares.
+    let mut targets = vec![paths::web_runtime_config()];
+    if paths::web_root().join("index.html").is_file() {
+        targets.push(paths::web_runtime_config_fallback());
+    }
     let mut wrote_any = false;
-    for path in [
-        paths::web_runtime_config(),
-        paths::web_runtime_config_fallback(),
-    ] {
+    for path in targets {
         match write_atomic_text_file(&path, &serialized) {
             Ok(_) => {
                 wrote_any = true;
@@ -309,11 +315,25 @@ USAGE:
     eas_listener [OPTIONS]
 
 OPTIONS:
-    --app-root <DIR>       Where config.json and the dashboard live. Same as EAS_APP_ROOT.
+    --instance <NAME>      Run one of several listeners from this binary. Each instance has its
+                           own configuration, data, dashboard port and service. Same as
+                           EAS_INSTANCE. Without it, this is the instance named `default`.
+    --list-instances       Show every instance on this machine and where it keeps its files.
+    --app-root <DIR>       Keep this instance's config.json and data in DIR instead of its
+                           instance directory. Same as EAS_APP_ROOT.
     --install-service      Start automatically from now on, and start now: a Windows service, a
                            systemd unit on Linux (both need admin/root), or on macOS a
                            LaunchDaemon with sudo (at boot) or a LaunchAgent without (at login).
+                           With --instance, that instance's own service.
     --uninstall-service    Remove that service, unit or job.
+    --uninstall            Remove this instance: its service, configuration and notification
+                           list. Its alert archive and recordings are kept unless --delete-data
+                           is given. With --with-program, when no other instance is left, the
+                           fetched tools and voices and the program itself go too. Asks first;
+                           --yes skips the question. The dashboard's configuration page can do
+                           the same.
+    --uninstall --all      Remove every instance, the tools and voices they fetched, and the
+                           program itself. Alert archives are kept unless --delete-data is given.
     --service-status       Show the service's current state.
     --service              Run as the service itself. The Service Control Manager, the systemd
                            unit and the launchd job pass this; it is not useful from a terminal.
@@ -322,20 +342,74 @@ OPTIONS:
     -h, --help             Show this message.
 ";
 
-/// Applies the arguments that have to take effect before anything reads configuration, and
-/// returns whatever the caller still has to act on.
-fn take_app_root_arg(args: &mut Vec<String>) {
-    if let Some(index) = args.iter().position(|arg| arg == "--app-root") {
-        if let Some(value) = args.get(index + 1) {
-            std::env::set_var("EAS_APP_ROOT", value);
+fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
+    match args.iter().position(|arg| arg == flag) {
+        Some(index) => {
+            args.remove(index);
+            true
         }
-        args.drain(index..=(index + 1).min(args.len() - 1));
+        None => false,
+    }
+}
+
+/// Removes `flag` and the value after it, returning the value.
+fn take_valued_arg(args: &mut Vec<String>, flag: &str) -> Result<Option<String>> {
+    let Some(index) = args.iter().position(|arg| arg == flag) else {
+        return Ok(None);
+    };
+    let Some(value) = args.get(index + 1).cloned() else {
+        anyhow::bail!("{flag} needs a value.\n\n{USAGE}");
+    };
+    args.drain(index..=index + 1);
+    Ok(Some(value))
+}
+
+/// Applies the arguments that have to take effect before anything resolves a path: the instance
+/// and its directory.
+fn take_instance_args(args: &mut Vec<String>) -> Result<()> {
+    if let Some(root) = take_valued_arg(args, "--app-root")? {
+        std::env::set_var("EAS_APP_ROOT", root);
+    }
+    let instance = match take_valued_arg(args, "--instance")? {
+        Some(raw) => paths::parse_instance_name(&raw).map_err(anyhow::Error::msg)?,
+        None => match std::env::var("EAS_INSTANCE") {
+            Ok(raw) if !raw.trim().is_empty() => {
+                paths::parse_instance_name(&raw).map_err(anyhow::Error::msg)?
+            }
+            _ => None,
+        },
+    };
+    paths::set_instance(instance).map_err(anyhow::Error::msg)
+}
+
+/// Whether the default instance is installed as a service -- from before instances, so one that
+/// runs from beside the binary and would lose its configuration if it moved.
+fn default_service_installed() -> bool {
+    #[cfg(all(windows, feature = "service"))]
+    {
+        service::is_installed()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemd::is_installed()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        launchd::installed().is_some()
+    }
+    #[cfg(not(any(
+        all(windows, feature = "service"),
+        target_os = "linux",
+        target_os = "macos"
+    )))]
+    {
+        false
     }
 }
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    take_app_root_arg(&mut args);
+    take_instance_args(&mut args)?;
     if let Some(index) = args.iter().position(|arg| arg == "--no-browser") {
         args.remove(index);
         setup::disable_browser_launch();
@@ -344,6 +418,41 @@ fn main() -> Result<()> {
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         print!("{USAGE}");
         return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--list-instances") {
+        return instances::print_list();
+    }
+
+    // Before anything reads configuration: this instance's directory, and moving the default
+    // instance's files out from beside the binary the first time -- never on the way out.
+    let uninstalling = args
+        .iter()
+        .any(|arg| arg == "--uninstall-service" || arg == "--uninstall");
+    let prepared = paths::prepare_instance(|| uninstalling || default_service_installed());
+    for note in &prepared.notes {
+        println!("{note}");
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--uninstall") {
+        args.remove(index);
+        // The dashboard's helper starts with no console of its own and writes here instead.
+        if let Some(log) = take_valued_arg(&mut args, "--log")? {
+            uninstall::log_to(std::path::Path::new(&log))?;
+        }
+        let options = uninstall::Options {
+            all: take_flag(&mut args, "--all"),
+            yes: take_flag(&mut args, "--yes"),
+            delete_data: take_flag(&mut args, "--delete-data"),
+            with_program: take_flag(&mut args, "--with-program"),
+            wait: take_flag(&mut args, "--wait"),
+        };
+        if let Some(extra) = args.first() {
+            anyhow::bail!(
+                "--uninstall takes --all, --delete-data, --with-program and --yes, not \
+                 {extra}.\n\n{USAGE}"
+            );
+        }
+        return uninstall::run(options);
     }
 
     #[cfg(all(windows, feature = "service"))]
@@ -479,6 +588,12 @@ fn main() -> Result<()> {
 
 /// Starts the listener and blocks until one of its tasks exits.
 async fn run_listener() -> Result<()> {
+    paths::create_app_root().with_context(|| {
+        format!(
+            "Could not create this listener's folder, {}",
+            paths::app_root().display()
+        )
+    })?;
     let config_path = paths::config_json();
 
     // Logging is configured by config.json, so setup reports to the console and nothing else.
@@ -558,8 +673,10 @@ async fn run_listener() -> Result<()> {
         );
     }
     info!(
-        "Application root resolved to {}",
-        paths::app_root().display()
+        "Instance '{}' keeps its files in {}; shared tools and voices are in {}",
+        paths::instance_label(),
+        paths::app_root().display(),
+        paths::assets_root().display()
     );
 
     webhook::apply_runtime_config(&config);

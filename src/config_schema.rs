@@ -533,6 +533,17 @@ pub fn fields() -> Vec<Field> {
             json!(d.capcp_use_alert_ready_tone),
         )
         .requires("PROCESS_CAPCP_ALERTS"),
+        Field::new(
+            "CAPCP_CUSTOM_HEADER_AUDIO",
+            "capcp",
+            "Custom header audio for these alerts",
+            "Opens CAP-CP alerts only, in place of their SAME header and attention tone or the \
+             Alert Ready tone. IPAWS and off-air alerts are unaffected. Empty uses the custom \
+             header audio under Storage, if any.",
+            path("/app/alert_ready.mp3"),
+            path_value(&d.capcp_custom_header_audio),
+        )
+        .requires("PROCESS_CAPCP_ALERTS"),
         // Text-to-speech
         Field::new(
             "TTS_ENGINE",
@@ -579,8 +590,9 @@ pub fn fields() -> Vec<Field> {
             "CEP6_VOICE_DIR",
             "tts",
             "Cepstral voice folder",
-            "Where Cepstral voices are installed. Docker downloads the chosen voice here the \
-             first time the engine is selected.",
+            "Where the chosen Cepstral voice is downloaded the first time the engine is \
+             selected: tts_voices/cep6 beside the binary, shared by every instance, or the /data \
+             volume in Docker. A voice another instance already fetched is used wherever it is.",
             path(d.cep6_voice_dir.display().to_string()),
             path_value(&d.cep6_voice_dir),
         ),
@@ -751,8 +763,8 @@ pub fn fields() -> Vec<Field> {
             "SHARED_STATE_DIR",
             "storage",
             "State folder",
-            "Where logs, recordings and the alert database live. In Docker this is the /data \
-             volume.",
+            "Where logs, recordings and the alert database live: data/ in this listener's own \
+             folder unless set. In Docker this is the /data volume.",
             path(d.shared_state_dir.display().to_string()),
             path_value(&d.shared_state_dir),
         )

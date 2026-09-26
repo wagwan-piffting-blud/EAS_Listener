@@ -137,6 +137,8 @@ config_knobs! {
         capcp_geocode_filter: Vec<String> = string_list("CAPCP_GEOCODE_FILTER"), Vec::new();
         capcp_require_immediate: bool = bool("CAPCP_REQUIRE_IMMEDIATE"), true;
         capcp_use_alert_ready_tone: bool = bool("CAPCP_USE_ALERT_READY_TONE"), false;
+        capcp_custom_header_audio: PathBuf = loose_path("CAPCP_CUSTOM_HEADER_AUDIO"),
+            PathBuf::new();
         should_log_all_alerts: bool = bool("SHOULD_LOG_ALL_ALERTS"), false;
         alert_log_file: String = string("ALERT_LOG_FILE"), "alerts.log".to_string();
         storage_saver_mode: bool = bool("STORAGE_SAVER_MODE"), false;
@@ -162,8 +164,10 @@ config_knobs! {
         dedicated_alert_log_file: PathBuf = shared.join(DEFAULT_DEDICATED_ALERT_LOG_NAME);
         alert_database_file: PathBuf = shared.join(DEFAULT_ALERT_DATABASE_NAME);
         recording_dir: PathBuf = shared.join(DEFAULT_RECORDING_DIR_NAME);
-        /// Fetched at runtime rather than shipped in the image, so these live on the state volume.
-        cep6_voice_dir: PathBuf = shared.join("tts_voices").join("cep6");
+        cep6_voice_dir: PathBuf = cep6_voice_default(
+            shared,
+            std::env::var_os("EAS_IMAGE_VARIANT").is_some(),
+        );
         icecast_alert_mount: String = "/stream.ogg".to_string();
         icecast_stream_urls: Vec<String> = vec!["https://wxr.gwes-cdn.net/KIH61".to_string()];
         /// The streams that carry NOAA Weather Radio, and so are the only ones the 1050 Hz tone
@@ -457,18 +461,22 @@ fn read_config_json(config_file: &Path) -> Result<Value> {
         .with_context(|| format!("Failed to parse config file: {}", config_file.display()))
 }
 
-fn default_shared_state_dir() -> PathBuf {
-    state_dir_default(crate::paths::running_as_service())
+/// Cepstral voices are fetched at runtime rather than shipped. In the image they live on the
+/// state volume, which outlives the container; elsewhere beside the other engines' voices, where
+/// every instance on the machine finds them.
+fn cep6_voice_default(state_dir: &Path, in_image: bool) -> PathBuf {
+    if in_image {
+        state_dir.join("tts_voices").join("cep6")
+    } else {
+        crate::paths::cep6_voice_dir()
+    }
 }
 
-/// A service's temp folder is not the user's -- LocalSystem's on Windows, one systemd-tmpfiles
-/// may clear at boot on Linux -- so a service keeps its alert archive beside the install instead.
-fn state_dir_default(service: bool) -> PathBuf {
-    if service {
-        crate::paths::in_app_root("data")
-    } else {
-        std::env::temp_dir().join("eas-listener")
-    }
+/// Each instance keeps its alert archive in its own directory. It used to be the temp folder
+/// outside a service, which every instance on the machine shared -- and which is LocalSystem's
+/// for a Windows service, or cleared at boot by systemd-tmpfiles.
+fn default_shared_state_dir() -> PathBuf {
+    crate::paths::in_app_root("data")
 }
 
 /// Absolute in the sense the alert database path has always used: a POSIX root or a drive letter.
@@ -507,18 +515,30 @@ impl Config {
     /// A path that no longer resolves falls back to the generated tones rather than leaving the
     /// alert with no opening at all.
     pub fn header_audio_override(&self) -> Option<&Path> {
-        if !self.emit_header_tones || self.custom_header_audio.as_os_str().is_empty() {
+        self.readable_header_audio("CUSTOM_HEADER_AUDIO", &self.custom_header_audio)
+    }
+
+    /// `header_audio_override` for a CAP-CP (NAAD) alert: `CAPCP_CUSTOM_HEADER_AUDIO` when it is
+    /// set, so Canadian alerts can open differently from US ones, and otherwise the shared file.
+    pub fn capcp_header_audio_override(&self) -> Option<&Path> {
+        if self.capcp_custom_header_audio.as_os_str().is_empty() {
+            return self.header_audio_override();
+        }
+        self.readable_header_audio("CAPCP_CUSTOM_HEADER_AUDIO", &self.capcp_custom_header_audio)
+    }
+
+    fn readable_header_audio<'a>(&self, key: &str, path: &'a Path) -> Option<&'a Path> {
+        if !self.emit_header_tones || path.as_os_str().is_empty() {
             return None;
         }
-        if !self.custom_header_audio.is_file() {
+        if !path.is_file() {
             tracing::warn!(
-                "CUSTOM_HEADER_AUDIO is set to {:?}, which is not a readable file; using the \
-                 generated tones instead",
-                self.custom_header_audio
+                "{key} is set to {path:?}, which is not a readable file; using the generated \
+                 tones instead"
             );
             return None;
         }
-        Some(&self.custom_header_audio)
+        Some(path)
     }
 
     /// Whether the 1050 Hz NOAA Weather Radio tone is looked for on this stream. With
@@ -846,13 +866,13 @@ mod tests {
     }
 
     #[test]
-    fn tts_voice_paths_follow_the_state_dir_and_env_overrides() {
+    fn tts_voice_paths_are_shared_outside_the_image_and_follow_env_overrides() {
         let cfg = load(json!({}), &[("SHARED_STATE_DIR", "C:/tmp/eas-unit")]).expect("config");
+        assert_eq!(cfg.cep6_voice_dir, crate::paths::cep6_voice_dir());
+        // In the image, on the state volume.
         assert_eq!(
-            cfg.cep6_voice_dir,
-            PathBuf::from("C:/tmp/eas-unit")
-                .join("tts_voices")
-                .join("cep6")
+            cep6_voice_default(Path::new("/data"), true),
+            Path::new("/data").join("tts_voices").join("cep6")
         );
         let app_root = crate::paths::app_root();
         assert_eq!(cfg.loq6_data_dir, PathBuf::new());
@@ -894,12 +914,8 @@ mod tests {
     }
 
     #[test]
-    fn a_service_keeps_its_state_beside_the_install() {
-        assert_eq!(state_dir_default(true), crate::paths::in_app_root("data"));
-        assert_eq!(
-            state_dir_default(false),
-            std::env::temp_dir().join("eas-listener")
-        );
+    fn every_instance_keeps_its_state_in_its_own_directory() {
+        assert_eq!(default_shared_state_dir(), crate::paths::in_app_root("data"));
     }
 
     #[test]
@@ -944,6 +960,36 @@ mod tests {
 
         cfg.emit_header_tones = false;
         assert_eq!(cfg.header_audio_override(), None);
+    }
+
+    #[test]
+    fn capcp_header_audio_applies_to_capcp_alone_and_falls_back_to_the_shared_file() {
+        let mut cfg = load(json!({}), &[]).expect("config");
+        let shared = std::env::current_exe().expect("a real file");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let canadian = dir.path().join("alert_ready.wav");
+        std::fs::write(&canadian, b"RIFF").expect("header file");
+
+        cfg.custom_header_audio = shared.clone();
+        assert_eq!(cfg.capcp_header_audio_override(), Some(shared.as_path()));
+
+        cfg.capcp_custom_header_audio = canadian.clone();
+        assert_eq!(cfg.capcp_header_audio_override(), Some(canadian.as_path()));
+        assert_eq!(cfg.header_audio_override(), Some(shared.as_path()));
+
+        // Only CAP-CP customised: everything else keeps its generated tones.
+        cfg.custom_header_audio = PathBuf::new();
+        assert_eq!(cfg.header_audio_override(), None);
+        assert_eq!(cfg.capcp_header_audio_override(), Some(canadian.as_path()));
+
+        // A CAP-CP file that has gone missing does not borrow the shared one.
+        cfg.custom_header_audio = shared;
+        cfg.capcp_custom_header_audio = dir.path().join("gone.wav");
+        assert_eq!(cfg.capcp_header_audio_override(), None);
+
+        cfg.capcp_custom_header_audio = canadian;
+        cfg.emit_header_tones = false;
+        assert_eq!(cfg.capcp_header_audio_override(), None);
     }
 
     #[test]

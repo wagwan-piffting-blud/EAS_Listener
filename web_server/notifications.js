@@ -49,8 +49,9 @@
         const base = options.basePath;
         const onChange = options.onChange || (() => {});
 
+        // Each target is { url, sources, events }; empty lists mean every alert.
         let saved = [];
-        let urls = [];
+        let targets = [];
         let otherLines = 0;
         let filePath = "";
         let catalog = null;
@@ -73,7 +74,7 @@
                 el("h2", { text: "Notifications" }),
                 el("p", { class: "cfg-group-summary" },
                     "Where each alert is announced, kept in ", pathNote,
-                    ". Discord webhooks are sent by the listener itself, with the recording attached; every other service goes through Apprise. A saved change applies from the next alert.")),
+                    ". Discord webhooks are sent by the listener itself, with the recording attached; every other service goes through Apprise, which the listener installs when one is added. Route a URL to send it only some alerts: IPAWS to one webhook and NAAD to another, say. A saved change applies from the next alert.")),
             el("div", { class: "ntf-body" }, warning, appriseNote, empty, list,
                 el("div", { class: "cfg-list-actions" }, addButton, pasteButton),
                 builder));
@@ -118,24 +119,93 @@
             }
         }
 
+        // ----- routes -----
+
+        const SOURCES = [
+            ["offair", "Off the air"],
+            ["ipaws", "IPAWS"],
+            ["wea", "IPAWS WEA"],
+            ["naad", "NAAD (Alert Ready)"],
+        ];
+        const routing = new Set();
+
+        function routeSummary(target) {
+            const sources = target.sources.length
+                ? target.sources.map((key) => (SOURCES.find(([k]) => k === key) || [key, key])[1]).join(", ")
+                : "Every source";
+            const events = target.events.length ? target.events.join(", ") : "every event";
+            return target.sources.length || target.events.length ? `${sources} · ${events}` : "Every alert";
+        }
+
+        function parseEvents(text) {
+            return [...new Set(text.split(/[\s,]+/).map((code) => code.trim().toUpperCase()).filter(Boolean))];
+        }
+
+        function routeEditor(target, index) {
+            const boxes = SOURCES.map(([key, label]) => {
+                const box = el("input", { type: "checkbox", value: key, checked: target.sources.length === 0 || target.sources.includes(key) });
+                box.addEventListener("change", () => {
+                    const ticked = boxes.filter((b) => b.checked).map((b) => b.value);
+                    // All ticked means no restriction; none ticked would send nothing, so it is refused.
+                    if (ticked.length === 0) {
+                        box.checked = true;
+                        return;
+                    }
+                    target.sources = ticked.length === SOURCES.length ? [] : ticked;
+                    summary.textContent = routeSummary(target);
+                    onChange();
+                });
+                return box;
+            });
+            const events = el("input", {
+                type: "text",
+                class: "cfg-input cfg-mono",
+                placeholder: "Every event, or codes such as TOR, SVR, EAN",
+                spellcheck: "false",
+                autocomplete: "off",
+                "aria-label": `Event codes for URL ${index + 1}`,
+            });
+            events.value = target.events.join(", ");
+            const eventNote = el("p", { class: "ntf-result is-bad", hidden: true });
+            events.addEventListener("input", () => {
+                const codes = parseEvents(events.value);
+                const bad = codes.filter((code) => !/^[A-Z0-9]{3}$/.test(code));
+                eventNote.hidden = bad.length === 0;
+                eventNote.textContent = bad.length ? `Not a SAME event code: ${bad.join(", ")}. They are three letters, such as TOR.` : "";
+                target.events = codes;
+                summary.textContent = routeSummary(target);
+                onChange();
+            });
+            const summary = el("span", { class: "cfg-muted", text: routeSummary(target) });
+            return el("div", { class: "ntf-route" },
+                el("fieldset", { class: "ntf-route-sources" },
+                    el("legend", { text: "Sources" }),
+                    ...SOURCES.map(([key, label], i) => el("label", { class: "ntf-route-source" }, boxes[i], ` ${label}`))),
+                el("label", { class: "ntf-route-events" }, el("span", { text: "Event codes" }), events),
+                eventNote,
+                el("p", { class: "cfg-help" }, "Sent only alerts from a ticked source whose event code is listed. Leave the codes empty for every event. ", summary));
+        }
+
         function renderList() {
-            empty.hidden = urls.length > 0;
-            list.replaceChildren(...urls.map((url, index) => {
+            empty.hidden = targets.length > 0;
+            list.replaceChildren(...targets.map((target, index) => {
+                const url = target.url;
                 const result = el("p", { class: "ntf-result", hidden: true });
                 const isEditing = editing.has(index);
+                const isRouting = routing.has(index);
                 let shown;
                 if (isEditing) {
                     shown = el("input", { type: "text", class: "cfg-input cfg-mono", spellcheck: "false", autocomplete: "off", "aria-label": `URL ${index + 1}` });
                     shown.value = url;
                     shown.addEventListener("input", () => {
-                        urls[index] = shown.value.trim();
+                        targets[index].url = shown.value.trim();
                         onChange();
                     });
                 } else {
                     shown = el("code", { class: "ntf-url", text: maskUrl(url), title: "Hidden, since it holds the service's credentials" });
                 }
                 const test = el("button", { type: "button", class: "cfg-mini", text: "Send a test" });
-                test.addEventListener("click", () => sendTest(urls[index], test, result));
+                test.addEventListener("click", () => sendTest(targets[index].url, test, result));
                 return el("div", { class: "ntf-row" },
                     el("div", { class: "cfg-list-row" },
                         el("span", { class: "ntf-service", text: serviceName(url) }),
@@ -147,7 +217,23 @@
                             onclick: () => {
                                 if (isEditing) editing.delete(index);
                                 else editing.add(index);
-                                urls = urls.filter(Boolean);
+                                if (targets.some((t) => !t.url)) {
+                                    targets = targets.filter((t) => t.url);
+                                    editing.clear();
+                                    routing.clear();
+                                }
+                                changed();
+                            },
+                        }),
+                        el("button", {
+                            type: "button",
+                            class: "cfg-mini",
+                            text: isRouting ? "Done" : "Route",
+                            title: routeSummary(target),
+                            "aria-expanded": isRouting ? "true" : "false",
+                            onclick: () => {
+                                if (isRouting) routing.delete(index);
+                                else routing.add(index);
                                 changed();
                             },
                         }),
@@ -159,19 +245,22 @@
                             "aria-label": `Remove ${serviceName(url)}`,
                             text: "×",
                             onclick: () => {
-                                urls.splice(index, 1);
+                                targets.splice(index, 1);
                                 editing.clear();
+                                routing.clear();
                                 changed();
                             },
                         })),
+                    isRouting ? routeEditor(target, index) : el("p", { class: "ntf-route-summary", text: routeSummary(target) }),
                     result);
             }));
         }
 
         function add(url) {
-            urls.push(url);
+            targets.push({ url, sources: [], events: [] });
             closeBuilder();
             changed();
+            if (schemeOf(url) !== "discord") loadCatalog();
         }
 
         // ----- the builder -----
@@ -207,8 +296,10 @@
                         appriseNote.hidden = true;
                     } catch (err) {
                         catalogError = err.message;
-                        appriseNote.textContent = `${catalogError} Only Discord webhooks can be sent until Apprise is installed; tools/fetch_components installs it. URLs for other services can still be pasted and saved.`;
+                        appriseNote.textContent = `${catalogError} Only Discord webhooks can be sent until Apprise is installed. The listener fetches it itself when a service needs it; URLs for other services can still be pasted and saved.`;
                         appriseNote.hidden = false;
+                        // Asked again next time: the fetch may have finished, or been retried.
+                        catalogPromise = null;
                     }
                     renderList();
                 })();
@@ -562,18 +653,31 @@
             if (!response.ok || !payload) throw new Error(payload && payload.error ? payload.error : `HTTP ${response.status}`);
             filePath = payload.path;
             pathNote.textContent = filePath;
-            saved = payload.urls.slice();
-            urls = payload.urls.slice();
+            saved = copyTargets(payload.targets || []);
+            targets = copyTargets(saved);
             otherLines = payload.other_lines || 0;
-            warning.textContent = `${filePath} also has ${otherLines} ${otherLines === 1 ? "line" : "lines"} that ${otherLines === 1 ? "is" : "are"} not a URL (YAML keys or tags, say). Saving from here keeps only the URLs, one per line.`;
+            warning.textContent = `${filePath} also has ${otherLines} ${otherLines === 1 ? "item" : "items"} that ${otherLines === 1 ? "is" : "are"} not a URL (YAML keys or tags, say). Saving from here keeps only the URLs and their routes.`;
             warning.hidden = otherLines === 0;
             editing.clear();
+            routing.clear();
             renderList();
-            loadCatalog();
+            // The service list needs Apprise, which the listener fetches when asked for it; a
+            // Discord-only setup is not made to download it just by opening the page.
+            if (targets.some((target) => schemeOf(target.url) !== "discord")) loadCatalog();
+        }
+
+        function copyTargets(list) {
+            return list.map((target) => ({
+                url: target.url,
+                sources: (target.sources || []).slice(),
+                events: (target.events || []).slice(),
+            }));
         }
 
         function current() {
-            return urls.map((url) => url.trim()).filter(Boolean);
+            return targets
+                .map((target) => ({ url: target.url.trim(), sources: target.sources.slice(), events: target.events.slice() }))
+                .filter((target) => target.url);
         }
 
         function dirty() {
@@ -585,24 +689,26 @@
             const response = await request(base, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(Object.assign({ urls: current() }, extra || {})),
+                body: JSON.stringify(Object.assign({ targets: current() }, extra || {})),
             });
             const result = await response.json().catch(() => null);
             if (!response.ok || !result || !result.ok) {
                 return { ok: false, error: result && result.error ? result.error : `HTTP ${response.status}` };
             }
             saved = current();
-            urls = saved.slice();
+            targets = copyTargets(saved);
             otherLines = 0;
             warning.hidden = true;
             editing.clear();
+            routing.clear();
             renderList();
             return result;
         }
 
         function revert() {
-            urls = saved.slice();
+            targets = copyTargets(saved);
             editing.clear();
+            routing.clear();
             closeBuilder();
             renderList();
         }
@@ -610,13 +716,18 @@
         function change() {
             if (!dirty()) return null;
             const count = (n) => `${n} ${n === 1 ? "URL" : "URLs"}`;
-            return { key: "apprise.yml", before: count(saved.length), after: count(current().length) };
+            const routed = (list) => list.filter((t) => t.sources.length || t.events.length).length;
+            const describe = (list) => {
+                const n = routed(list);
+                return n ? `${count(list.length)}, ${n} routed` : count(list.length);
+            };
+            return { key: "apprise.yml", before: describe(saved), after: describe(current()) };
         }
 
         function setFilter(filter) {
             const query = (filter.query || "").trim().toLowerCase();
-            const haystack = ["notifications apprise discord", ...urls.map(serviceName)].join(" ").toLowerCase();
-            node.hidden = Boolean((query && !haystack.includes(query)) || (filter.onlySet && urls.length === 0));
+            const haystack = ["notifications apprise discord route routing ipaws naad wea", ...targets.map((t) => serviceName(t.url))].join(" ").toLowerCase();
+            node.hidden = Boolean((query && !haystack.includes(query)) || (filter.onlySet && targets.length === 0));
         }
 
         renderList();

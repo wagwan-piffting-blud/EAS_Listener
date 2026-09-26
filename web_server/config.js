@@ -37,6 +37,8 @@
         onChange: () => updateDirty(),
     });
     let notificationsLoaded = false;
+    const uninstall = window.UninstallPanel.create({ request: window.apiFetch });
+    let uninstallLoaded = false;
 
     function show(kind, message) {
         status.className = `config-status ${kind}`;
@@ -106,6 +108,12 @@
             if (group.id === "relay") appendNotificationsLink();
         }
         if (!navLinks.has("notifications")) appendNotificationsLink();
+        const uninstallLink = document.createElement("a");
+        uninstallLink.href = "#cfg-group-uninstall";
+        uninstallLink.className = "cfg-nav-danger";
+        uninstallLink.append("Uninstall", Object.assign(document.createElement("span"), { className: "cfg-nav-count" }));
+        nav.append(uninstallLink);
+        navLinks.set("uninstall", { link: uninstallLink, count: uninstallLink.lastChild });
 
         markCurrentSection();
     }
@@ -159,7 +167,8 @@
         unknownSection = document.createElement("section");
         unknownSection.className = "cfg-group";
         unknownSection.append(head, list);
-        formHost.append(unknownSection);
+        // Uninstall stays the last section.
+        formHost.insertBefore(unknownSection, uninstall.node.parentNode === formHost ? uninstall.node : null);
     }
 
     async function annotateComponents() {
@@ -193,6 +202,11 @@
             notifications.load().catch((err) => show("bad", `Could not load the notification list: ${err.message}`));
         }
         renderUnknown();
+        formHost.append(uninstall.node);
+        if (!uninstallLoaded) {
+            uninstallLoaded = true;
+            uninstall.load();
+        }
         renderNav();
         applyFilter();
         annotateComponents();
@@ -278,6 +292,7 @@
     function applyFilter() {
         if (form) form.setFilter({ query: search.value, onlySet: onlySet.checked });
         notifications.setFilter({ query: search.value, onlySet: onlySet.checked });
+        uninstall.setFilter({ query: search.value, onlySet: onlySet.checked });
     }
     search.addEventListener("input", applyFilter);
     onlySet.addEventListener("change", applyFilter);

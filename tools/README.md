@@ -9,8 +9,13 @@ Each component resolves independently, in this order:
 
 1. An explicit path in `config.json` (`FFMPEG_PATH`, `APPRISE_PATH`,
    `PIPER_PATH`, `ESPEAK_NG_PATH`, `SPFY_SYNTH_PATH`, `CEP6_PATH`, `LOQDAVE_PATH`).
-2. This directory.
-3. `PATH`.
+2. This directory, which every instance of the listener shares.
+3. `tools/` in the instance's own folder, where the listener fetches instead when the account
+   running it cannot write here (an install in `/opt` that root unpacked, say).
+4. `PATH`.
+
+`fetch_components.sh -d ROOT` and `fetch_components.ps1 -InstallRoot ROOT` install into
+`ROOT/tools` instead of here; that is how the listener points them at an instance's folder.
 
 `PATH` is last so Docker and distro installs keep using their packaged binaries — putting nothing
 here changes nothing about those deployments.

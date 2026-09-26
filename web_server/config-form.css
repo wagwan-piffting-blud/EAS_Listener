@@ -517,6 +517,55 @@
     color: var(--error);
 }
 
+.ntf-route-summary {
+    margin: 0 0 0 9.5rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.ntf-route {
+    display: grid;
+    gap: 0.5rem;
+    margin-left: 9.5rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.ntf-route-sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.ntf-route-sources legend {
+    padding: 0;
+    margin-bottom: 0.3rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.ntf-route-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.85rem;
+}
+
+.ntf-route-events {
+    display: grid;
+    gap: 0.3rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.ntf-route .cfg-help {
+    margin: 0;
+}
+
 .ntf-builder {
     display: grid;
     gap: 0.7rem;
@@ -647,6 +696,63 @@
     font-weight: 600;
 }
 
+/* ----- uninstall ----- */
+
+.unin-body {
+    display: grid;
+    gap: 0.6rem;
+}
+
+.unin-body p {
+    margin: 0;
+}
+
+.unin-list {
+    margin: 0;
+    padding-left: 1.2rem;
+    display: grid;
+    gap: 0.25rem;
+    overflow-wrap: anywhere;
+}
+
+.unin-command {
+    margin: 0;
+    padding: 0.5rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    overflow-x: auto;
+    font-size: 0.8rem;
+}
+
+.unin-option[hidden] {
+    display: none;
+}
+
+.unin-confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+}
+
+.unin-confirm .cfg-input {
+    flex: 0 1 14rem;
+}
+
+.unin-label {
+    font-size: 0.88rem;
+}
+
+.unin-button {
+    border-color: var(--error);
+    color: var(--error);
+    font-weight: 600;
+}
+
+.unin-button:disabled {
+    opacity: 0.5;
+}
+
 @media (max-width: 640px) {
     .ntf-list .cfg-list-row {
         flex-wrap: wrap;
@@ -654,6 +760,11 @@
 
     .ntf-service {
         flex-basis: 100%;
+    }
+
+    .ntf-route,
+    .ntf-route-summary {
+        margin-left: 0;
     }
 }
 
@@ -766,6 +877,11 @@ main.cfg-page {
 .cfg-nav a.is-current {
     background: rgba(255, 255, 255, 0.05);
     color: var(--fg);
+}
+
+.cfg-nav a.cfg-nav-danger {
+    margin-top: 0.5rem;
+    color: var(--error);
 }
 
 .cfg-nav-count {

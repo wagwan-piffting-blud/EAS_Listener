@@ -1,10 +1,12 @@
 //! Where alert notifications go: the URLs in apprise.yml, and what the dashboard needs to edit
 //! them -- the services Apprise can send to, and a test message to a single URL.
 //!
-//! The file is a list of Apprise URLs, one per line, optionally as YAML list items. Discord
+//! The file is a YAML list. An item that is a bare URL gets every alert; an item with `url:` can
+//! also name the `sources:` and SAME `events:` it is sent, so one webhook can take IPAWS and
+//! another NAAD. A file that is not a YAML list is read the old way, a URL per line. Discord
 //! webhooks are sent by the listener itself; every other URL is handed to the `apprise` binary.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -35,15 +37,135 @@ pub fn resolve(configured: &str) -> PathBuf {
     }
 }
 
+/// Where an alert came from, as a route names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Decoded from a monitored stream, the 1050 Hz tone included.
+    OffAir,
+    Ipaws,
+    Wea,
+    /// CAP-CP from NAAD: Alert Ready / NPAS.
+    Naad,
+}
+
+impl Source {
+    pub const ALL: [Source; 4] = [Source::OffAir, Source::Ipaws, Source::Wea, Source::Naad];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Source::OffAir => "offair",
+            Source::Ipaws => "ipaws",
+            Source::Wea => "wea",
+            Source::Naad => "naad",
+        }
+    }
+
+    /// Judged by the sender ID in the alert's header, which every CAP feed sets to its own.
+    pub fn of_raw_header(raw_header: &str) -> Source {
+        use crate::cap::{
+            CAP_HEADER_SOURCE_MARKER_CAP, CAP_HEADER_SOURCE_MARKER_NAAD,
+            CAP_HEADER_SOURCE_MARKER_WEA,
+        };
+        match crate::cap::cap_feed_of_raw_header(raw_header) {
+            Some(CAP_HEADER_SOURCE_MARKER_CAP) => Source::Ipaws,
+            Some(CAP_HEADER_SOURCE_MARKER_WEA) => Source::Wea,
+            Some(CAP_HEADER_SOURCE_MARKER_NAAD) => Source::Naad,
+            _ => Source::OffAir,
+        }
+    }
+}
+
+/// One URL and the alerts it is sent. Empty `sources` or `events` means every one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Target {
+    pub url: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+impl Target {
+    pub fn every_alert(url: impl Into<String>) -> Self {
+        Target {
+            url: url.into(),
+            ..Target::default()
+        }
+    }
+
+    pub fn accepts(&self, source: Source, event_code: &str) -> bool {
+        let event_code = event_code.trim();
+        (self.sources.is_empty() || self.sources.iter().any(|key| key == source.key()))
+            && (self.events.is_empty()
+                || self
+                    .events
+                    .iter()
+                    .any(|code| code.eq_ignore_ascii_case(event_code)))
+    }
+
+    fn routed(&self) -> bool {
+        !self.sources.is_empty() || !self.events.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct FileContents {
-    pub urls: Vec<String>,
+    pub targets: Vec<Target>,
     /// Lines that are neither URLs nor comments: YAML keys, tags. Saving from the dashboard
     /// drops them, which the page warns about.
     pub other_lines: usize,
 }
 
 pub fn parse(contents: &str) -> FileContents {
+    match serde_norway::from_str::<Value>(contents) {
+        Ok(Value::Array(items)) => parse_items(&items),
+        _ => parse_lines(contents),
+    }
+}
+
+fn parse_items(items: &[Value]) -> FileContents {
+    let mut parsed = FileContents::default();
+    let strings = |value: &Value| -> Vec<String> {
+        match value {
+            Value::String(one) => one
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect(),
+            Value::Array(many) => many
+                .iter()
+                .filter_map(|item| match item {
+                    Value::String(text) => Some(text.trim().to_string()),
+                    Value::Number(number) => Some(number.to_string()),
+                    _ => None,
+                })
+                .filter(|item| !item.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    for item in items {
+        let target = match item {
+            Value::String(url) => Some(Target::every_alert(url.trim())),
+            Value::Object(fields) => fields
+                .get("url")
+                .and_then(Value::as_str)
+                .map(|url| Target {
+                    url: url.trim().to_string(),
+                    sources: fields.get("sources").map(strings).unwrap_or_default(),
+                    events: fields.get("events").map(strings).unwrap_or_default(),
+                }),
+            _ => None,
+        };
+        match target {
+            Some(target) if looks_like_url(&target.url) => parsed.targets.push(target),
+            _ => parsed.other_lines += 1,
+        }
+    }
+    parsed
+}
+
+fn parse_lines(contents: &str) -> FileContents {
     let mut parsed = FileContents::default();
     for line in contents.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
@@ -51,13 +173,17 @@ pub fn parse(contents: &str) -> FileContents {
         }
         let item = line.strip_prefix('-').map(str::trim_start).unwrap_or(line);
         let item = unquote(item);
-        if item.contains("://") && !item.chars().any(char::is_whitespace) {
-            parsed.urls.push(item.to_string());
+        if looks_like_url(item) {
+            parsed.targets.push(Target::every_alert(item));
         } else {
             parsed.other_lines += 1;
         }
     }
     parsed
+}
+
+fn looks_like_url(item: &str) -> bool {
+    item.contains("://") && !item.chars().any(char::is_whitespace)
 }
 
 fn unquote(item: &str) -> &str {
@@ -81,56 +207,133 @@ pub fn read(path: &Path) -> std::io::Result<FileContents> {
     }
 }
 
-pub fn render(urls: &[String]) -> String {
+/// JSON strings and arrays are valid YAML, which spares quoting rules of its own.
+pub fn render(targets: &[Target]) -> String {
     let mut text = String::from(
-        "# Where alert notifications are sent: one Apprise URL per line.\n\
+        "# Where alert notifications are sent: one Apprise URL per item.\n\
+         # A bare URL gets every alert. To send one only some alerts, give it as\n\
+         #   - url: \"service://...\"\n\
+         #     sources: [\"ipaws\", \"wea\", \"naad\", \"offair\"]   # any of these; omit for all\n\
+         #     events: [\"TOR\", \"SVR\"]                          # SAME event codes; omit for all\n\
          # Discord webhooks (discord://) are sent by the listener itself; everything else goes\n\
-         # through Apprise. Edited from the dashboard, which keeps only the URLs.\n",
+         # through Apprise. Edited from the dashboard, which keeps only the URLs and routes.\n",
     );
-    for url in urls {
-        text.push_str("- ");
-        text.push_str(url);
-        text.push('\n');
+    for target in targets {
+        let url = Value::String(target.url.clone());
+        if !target.routed() {
+            text.push_str(&format!("- {url}\n"));
+            continue;
+        }
+        text.push_str(&format!("- url: {url}\n"));
+        if !target.sources.is_empty() {
+            text.push_str(&format!("  sources: {}\n", json!(target.sources)));
+        }
+        if !target.events.is_empty() {
+            text.push_str(&format!("  events: {}\n", json!(target.events)));
+        }
     }
     text
 }
 
-/// Trims the URLs and refuses anything that could not have come back out of the file intact.
-pub fn clean(urls: &[String]) -> Result<Vec<String>, String> {
-    let mut cleaned = Vec::with_capacity(urls.len());
-    for (index, url) in urls.iter().enumerate() {
-        let url = url.trim();
+/// Trims every target and refuses anything that could not have come back out of the file
+/// intact: a URL that is not one, a source the listener does not know, an event code that is not
+/// three letters or digits.
+pub fn clean(targets: &[Target]) -> Result<Vec<Target>, String> {
+    let mut cleaned = Vec::with_capacity(targets.len());
+    for (index, target) in targets.iter().enumerate() {
+        let url = clean_url(index, &target.url)?;
         if url.is_empty() {
             continue;
         }
-        if url.chars().any(char::is_whitespace) {
-            return Err(format!(
-                "URL {} contains a space or line break. Encode it as %20.",
-                index + 1
-            ));
-        }
-        match url.split_once("://") {
-            Some((scheme, rest))
-                if !scheme.is_empty()
-                    && !rest.is_empty()
-                    && scheme
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) => {}
-            _ => {
+        let mut sources = Vec::new();
+        for source in &target.sources {
+            let source = source.trim().to_ascii_lowercase();
+            if !Source::ALL.iter().any(|known| known.key() == source) {
                 return Err(format!(
-                    "URL {} is not an Apprise URL (service://...): {}",
-                    index + 1,
-                    crate::webhook::mask_url(url)
-                ))
+                    "URL {} is routed to an unknown source '{source}'. The sources are offair, \
+                     ipaws, wea and naad.",
+                    index + 1
+                ));
+            }
+            if !sources.contains(&source) {
+                sources.push(source);
             }
         }
-        cleaned.push(url.to_string());
+        let mut events = Vec::new();
+        for code in &target.events {
+            let code = code.trim().to_ascii_uppercase();
+            if code.is_empty() {
+                continue;
+            }
+            if code.len() != 3 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(format!(
+                    "URL {} lists '{code}', which is not a SAME event code (three letters, such \
+                     as TOR).",
+                    index + 1
+                ));
+            }
+            if !events.contains(&code) {
+                events.push(code);
+            }
+        }
+        // Every source listed is the same as none listed, and reads more plainly as none.
+        if sources.len() == Source::ALL.len() {
+            sources.clear();
+        }
+        cleaned.push(Target {
+            url,
+            sources,
+            events,
+        });
     }
     Ok(cleaned)
 }
 
+fn clean_url(index: usize, url: &str) -> Result<String, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(String::new());
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "URL {} contains a space or line break. Encode it as %20.",
+            index + 1
+        ));
+    }
+    match url.split_once("://") {
+        Some((scheme, rest))
+            if !scheme.is_empty()
+                && !rest.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+        {
+            Ok(url.to_string())
+        }
+        _ => Err(format!(
+            "URL {} is not an Apprise URL (service://...): {}",
+            index + 1,
+            crate::webhook::mask_url(url)
+        )),
+    }
+}
+
+/// Fetches Apprise when a URL needs it and it is missing, so a service added from the dashboard
+/// works from the next alert without anyone running the fetch script.
+pub async fn ensure_apprise() -> Result<(), String> {
+    crate::components::ensure(&crate::components::APPRISE)
+        .await
+        .map(|_| ())
+}
+
+pub fn needs_apprise(targets: &[Target]) -> bool {
+    targets
+        .iter()
+        .any(|target| !crate::webhook::is_native_discord(&target.url))
+}
+
 /// Replaces the file, keeping the outgoing one as apprise.yml.bak.
-pub fn write(path: &Path, urls: &[String]) -> Result<(), String> {
+pub fn write(path: &Path, targets: &[Target]) -> Result<(), String> {
     if path.exists() {
         let mut backup = path.as_os_str().to_os_string();
         backup.push(".bak");
@@ -145,11 +348,11 @@ pub fn write(path: &Path, urls: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Could not create {}: {err}", parent.display()))?;
     }
-    crate::backend::write_atomic(path, render(urls).as_bytes())
+    crate::backend::write_atomic(path, render(targets).as_bytes())
         .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
     info!(
         "Saved {} notification target(s) to {}",
-        urls.len(),
+        targets.len(),
         path.display()
     );
     Ok(())
@@ -159,7 +362,10 @@ static SERVICES: Mutex<Option<(PathBuf, Arc<Value>)>> = Mutex::const_new(None);
 
 /// Every service the installed Apprise can send to, trimmed to what the dashboard's URL builder
 /// uses. Cached per binary, since `--schema` takes a moment and does not change while it runs.
+/// Asking for the list is how the dashboard starts adding a service, so a missing Apprise is
+/// fetched first.
 pub async fn services() -> Result<Arc<Value>, String> {
+    ensure_apprise().await?;
     let binary = crate::components::apprise();
     let mut cache = SERVICES.lock().await;
     if let Some((cached_for, services)) = cache.as_ref() {
@@ -306,7 +512,7 @@ pub struct TestOutcome {
 /// Sends one short message to one URL, the same way an alert would reach it.
 pub async fn send_test(url: &str, station: &str) -> TestOutcome {
     let url = url.trim();
-    if let Err(err) = clean(&[url.to_string()]) {
+    if let Err(err) = clean_url(0, url) {
         return TestOutcome {
             ok: false,
             message: err,
@@ -335,6 +541,12 @@ pub async fn send_test(url: &str, station: &str) -> TestOutcome {
         };
     }
 
+    if let Err(err) = ensure_apprise().await {
+        return TestOutcome {
+            ok: false,
+            message: format!("{err}. Discord webhooks work without Apprise."),
+        };
+    }
     let binary = crate::components::apprise();
     let mut command = Command::new(&binary);
     command
@@ -393,10 +605,22 @@ pub mod api {
 
     #[derive(Debug, Deserialize)]
     pub struct SaveBody {
+        #[serde(default)]
+        pub targets: Vec<Target>,
+        /// A page from before routes: every URL gets every alert.
+        #[serde(default)]
         pub urls: Vec<String>,
         /// Setup only: APPRISE_CONFIG_PATH from the configuration being written alongside.
         #[serde(default)]
         pub path: Option<String>,
+    }
+
+    impl SaveBody {
+        pub fn targets(&self) -> Vec<Target> {
+            let mut targets = self.targets.clone();
+            targets.extend(self.urls.iter().map(Target::every_alert));
+            targets
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -412,7 +636,7 @@ pub mod api {
         match read(path) {
             Ok(contents) => Json(json!({
                 "path": path.display().to_string(),
-                "urls": contents.urls,
+                "targets": contents.targets,
                 "other_lines": contents.other_lines,
             }))
             .into_response(),
@@ -423,18 +647,29 @@ pub mod api {
         }
     }
 
-    pub fn save(path: &Path, urls: &[String]) -> Response {
-        let urls = match clean(urls) {
-            Ok(urls) => urls,
+    /// A save that adds a service Apprise sends to starts fetching Apprise, so the next alert
+    /// reaches it; the page does not wait for the download.
+    pub fn save(path: &Path, targets: &[Target]) -> Response {
+        let targets = match clean(targets) {
+            Ok(targets) => targets,
             Err(err) => return failed(StatusCode::BAD_REQUEST, err),
         };
-        match write(path, &urls) {
-            Ok(()) => Json(json!({
-                "ok": true,
-                "path": path.display().to_string(),
-                "count": urls.len(),
-            }))
-            .into_response(),
+        match write(path, &targets) {
+            Ok(()) => {
+                if needs_apprise(&targets) {
+                    tokio::spawn(async {
+                        if let Err(err) = ensure_apprise().await {
+                            warn!("Notifications other than Discord will not be sent: {err}");
+                        }
+                    });
+                }
+                Json(json!({
+                    "ok": true,
+                    "path": path.display().to_string(),
+                    "count": targets.len(),
+                }))
+                .into_response()
+            }
             Err(err) => failed(StatusCode::INTERNAL_SERVER_ERROR, err),
         }
     }
@@ -457,6 +692,18 @@ pub mod api {
 mod tests {
     use super::*;
 
+    fn urls(parsed: &FileContents) -> Vec<&str> {
+        parsed
+            .targets
+            .iter()
+            .map(|target| target.url.as_str())
+            .collect()
+    }
+
+    fn every(urls: &[&str]) -> Vec<Target> {
+        urls.iter().map(|url| Target::every_alert(*url)).collect()
+    }
+
     #[test]
     fn the_file_is_read_as_urls_with_everything_else_counted() {
         let parsed = parse(
@@ -469,32 +716,126 @@ mod tests {
              \n",
         );
         assert_eq!(
-            parsed.urls,
+            urls(&parsed),
             vec!["discord://123/abc", "tgram://bot/chat", "ntfys://topic"]
         );
         assert_eq!(parsed.other_lines, 2);
     }
 
     #[test]
+    fn a_yaml_list_carries_routes_and_counts_what_is_not_a_target() {
+        let parsed = parse(
+            "# comment\n\
+             - discord://1/everything\n\
+             - url: tgram://bot/chat\n\
+             \x20 sources: [ipaws, wea]\n\
+             \x20 events: [TOR, svr]\n\
+             - url: \"json://host/?a=b&c=d\"\n\
+             \x20 sources: naad, offair\n\
+             - tag: ops\n\
+             - not a url\n",
+        );
+        assert_eq!(
+            parsed.targets,
+            vec![
+                Target::every_alert("discord://1/everything"),
+                Target {
+                    url: "tgram://bot/chat".into(),
+                    sources: vec!["ipaws".into(), "wea".into()],
+                    events: vec!["TOR".into(), "svr".into()],
+                },
+                Target {
+                    url: "json://host/?a=b&c=d".into(),
+                    sources: vec!["naad".into(), "offair".into()],
+                    events: vec![],
+                },
+            ]
+        );
+        assert_eq!(parsed.other_lines, 2);
+    }
+
+    #[test]
     fn what_is_written_reads_back_the_same() {
-        let urls = vec![
-            "discord://1/two".to_string(),
-            "pover://user@token/%23group".to_string(),
+        let targets = vec![
+            Target::every_alert("discord://1/two"),
+            Target::every_alert("pover://user@token/%23group"),
+            Target {
+                url: "json://host/path?x=1&y=#frag".into(),
+                sources: vec!["naad".into()],
+                events: vec![],
+            },
+            Target {
+                url: "mailto://user:p%40ss@example.com".into(),
+                sources: vec![],
+                events: vec!["TOR".into(), "EAN".into()],
+            },
         ];
-        let parsed = parse(&render(&urls));
-        assert_eq!(parsed.urls, urls);
+        let parsed = parse(&render(&targets));
+        assert_eq!(parsed.targets, targets);
         assert_eq!(parsed.other_lines, 0);
     }
 
     #[test]
     fn cleaning_drops_blanks_and_refuses_what_is_not_a_url() {
         assert_eq!(
-            clean(&[" json://host/ ".to_string(), "".to_string()]).unwrap(),
-            vec!["json://host/"]
+            clean(&every(&[" json://host/ ", ""])).unwrap(),
+            every(&["json://host/"])
         );
-        assert!(clean(&["just text".to_string()]).is_err());
-        assert!(clean(&["://nothing".to_string()]).is_err());
-        assert!(clean(&["mailto://a b".to_string()]).is_err());
+        assert!(clean(&every(&["just text"])).is_err());
+        assert!(clean(&every(&["://nothing"])).is_err());
+        assert!(clean(&every(&["mailto://a b"])).is_err());
+    }
+
+    #[test]
+    fn cleaning_normalises_routes_and_refuses_unknown_ones() {
+        let target = |sources: &[&str], events: &[&str]| Target {
+            url: "json://host/".into(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            events: events.iter().map(|e| e.to_string()).collect(),
+        };
+        assert_eq!(
+            clean(&[target(&[" IPAWS ", "ipaws"], &["tor", " SVR", ""])]).unwrap(),
+            vec![target(&["ipaws"], &["TOR", "SVR"])]
+        );
+        // All four sources is no restriction, and is saved as none.
+        assert_eq!(
+            clean(&[target(&["offair", "ipaws", "wea", "naad"], &[])]).unwrap(),
+            vec![target(&[], &[])]
+        );
+        assert!(clean(&[target(&["npas"], &[])]).is_err());
+        assert!(clean(&[target(&[], &["TORNADO"])]).is_err());
+    }
+
+    #[test]
+    fn a_route_takes_only_its_sources_and_events() {
+        let naad_only = Target {
+            url: "json://ca/".into(),
+            sources: vec!["naad".into()],
+            events: vec![],
+        };
+        assert!(naad_only.accepts(Source::Naad, "TOR"));
+        assert!(!naad_only.accepts(Source::Ipaws, "TOR"));
+        assert!(!naad_only.accepts(Source::OffAir, "RWT"));
+
+        let tornadoes = Target {
+            url: "json://us/".into(),
+            sources: vec!["ipaws".into(), "offair".into()],
+            events: vec!["TOR".into()],
+        };
+        assert!(tornadoes.accepts(Source::OffAir, "tor"));
+        assert!(!tornadoes.accepts(Source::OffAir, "SVR"));
+        assert!(!tornadoes.accepts(Source::Wea, "TOR"));
+
+        assert!(Target::every_alert("json://all/").accepts(Source::Wea, "RMT"));
+    }
+
+    #[test]
+    fn the_source_comes_from_the_header_sender() {
+        let header = |sender: &str| format!("ZCZC-CIV-TOR-031055+0030-2681200-{sender}-");
+        assert_eq!(Source::of_raw_header(&header("IPAWSCAP")), Source::Ipaws);
+        assert_eq!(Source::of_raw_header(&header("IPAWSWEA")), Source::Wea);
+        assert_eq!(Source::of_raw_header(&header("NAADSCAP")), Source::Naad);
+        assert_eq!(Source::of_raw_header(&header("KOAX/NWS")), Source::OffAir);
     }
 
     #[test]
@@ -514,11 +855,11 @@ mod tests {
     fn a_save_keeps_the_previous_file() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("apprise.yml");
-        write(&path, &["json://one/".to_string()]).expect("first write");
-        write(&path, &["json://two/".to_string()]).expect("second write");
-        assert_eq!(read(&path).unwrap().urls, vec!["json://two/"]);
+        write(&path, &every(&["json://one/"])).expect("first write");
+        write(&path, &every(&["json://two/"])).expect("second write");
+        assert_eq!(urls(&read(&path).unwrap()), vec!["json://two/"]);
         let backup = dir.path().join("apprise.yml.bak");
-        assert_eq!(read(&backup).unwrap().urls, vec!["json://one/"]);
+        assert_eq!(urls(&read(&backup).unwrap()), vec!["json://one/"]);
         assert_eq!(
             read(&dir.path().join("absent.yml")).unwrap(),
             FileContents::default()

@@ -14,6 +14,9 @@
 # Downloads are verified against the SHA-256 digests published by each upstream. Nothing is
 # redistributed by this project; the files come from their own projects' servers.
 set -eu
+# Every listener on the machine runs what this installs, whichever account fetched it -- a
+# service's umask of 077 would otherwise leave it usable by that account alone.
+umask 022
 
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="${TOOLS_DIR}/components.json"

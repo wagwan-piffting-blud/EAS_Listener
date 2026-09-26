@@ -1,5 +1,34 @@
 # EAS Listener Changelog
 
+## v0.41.0: Released 2026-09-26
+
+- **Add per-webhook routing based on origin and event code.** This allows users to configure different webhooks for different alert sources and event codes, providing more granular control over how alerts are handled and where they are sent. This feature is particularly useful for users who want to route specific types of alerts to different endpoints or services, without using more than one instance of EAS_Listener. The Listener also now downloads Apprise (specifically a Golang port by the Unraid team, called [apprise-go](https://github.com/unraid/apprise-go), so Python and its suite of dependencies is not dragged in) for non-Discord webhooks, if any are added or used.
+
+- **Add support for multiple EAS Listener instances on one machine.** This allows users to run multiple instances of EAS_Listener on the same machine, each with its own configuration and alert handling. This is useful for users who want to separate different alert sources or event codes into different instances, or for users who want to run multiple instances for testing or development purposes. _NOTE: This will MIGRATE your existing installed data to a new location, specifically, from beside the executable into `<data folder>/eas-listener/default`. The migration will rename your existing files to ".migrated" extensions to prevent confusion._ `<data folder>` is `%ProgramData%` on Windows, `~/.local/share` or `/var/lib` on Linux depending on the user and permissions, and `~/Library/Application Support` or `/Library/Application Support` on macOS depending on root. A service already installed from the old folder keeps using the files beside the executable until it's uninstalled and reinstalled (for example, by running `--uninstall-service` then `--install-service` immediately afterwards).
+
+- **Add the ability to customize ONLY CAP-CP alert tones.** This allows users to configure different opening audio for just CAP-CP alerts, providing more flexibility in how alerts are presented to you/webhooks. The relevant configuration option is `CAPCP_CUSTOM_HEADER_AUDIO`.
+
+- **Support uninstalling EAS_Listener directly from the tray icon and web dashboard.** This allows users to easily uninstall EAS_Listener without having to manually remove files or configurations. The uninstall process will remove that instance's service, config.json, apprise.yml, backups, and logs. The data itself (recorded alerts) are not removed by default, but you do have the option to delete the data as well. If no other instance is left, you can also choose to remove EAS_Listener itself, along with the tools and voices it fetched (TTS engines, apprise-go, etc.). There is a shortcut to the dashboard to perform the uninstall from the tray icon.
+
+- **Change the default archive nesting for EAS_Listener releases.** This means you will simply see the files you need at the top level of the download, rather than inside a nested folder. This change makes it easier to extract EAS_Listener and get started with it, without having to open or extract an extra, unnecessary folder. Inside eas-listener-<version>-<platform>.ARCHIVE-FORMAT (with <version> being the version number and <platform> being the platform, and ARCHIVE-FORMAT being either .tar.gz or .zip), you will find the following files and folders at the top level:
+
+```text
+.
+├── eas_listener.exe            (or just "eas_listener" on Linux/macOS)
+├── README.md
+├── CHANGES.md
+├── LICENSE
+├── config.example.json
+├── cap_tts_replacement_config.example.json
+├── example.env
+├── tools/
+└── tts_voices/
+```
+
+- **Fix some minor issues and bugs related to the rewrite (v0.40.0 below).**
+
+---
+
 ## v0.40.0: Released 2026-09-25
 
 - **This change reworks EAS_Listener from the ground up.** A bunch of changes have been made to the codebase, including a complete rewrite of a fair share of the core functionality of the Rust backend, with the following cherry picked highlights for this release due to the sheer volume of changes made:

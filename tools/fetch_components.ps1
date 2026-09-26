@@ -15,20 +15,27 @@ redistributed by this project; the files come from their own projects' servers.
 .\fetch_components.ps1 -Component ffmpeg -Force
 .EXAMPLE
 .\fetch_components.ps1 -Component cep6
+.EXAMPLE
+.\fetch_components.ps1 -InstallRoot C:\ProgramData\eas-listener\north -Component ffmpeg
 #>
 [CmdletBinding()]
 param(
     [string]$Component = "",
     [switch]$Force,
-    [switch]$List
+    [switch]$List,
+    # Installs into <InstallRoot>\tools (and data under <InstallRoot>) instead of beside this
+    # script: what the listener passes when it cannot write here.
+    [string]$InstallRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
-$ToolsDir = $PSScriptRoot
+$ScriptDir = $PSScriptRoot
 # Data a component needs beside its binaries (a voice, say) is laid out from the install root,
 # the directory above this one, the same way the listener resolves it.
-$InstallRoot = Split-Path $ToolsDir -Parent
-$ManifestPath = Join-Path $ToolsDir "components.json"
+if (-not $InstallRoot) { $InstallRoot = Split-Path $ScriptDir -Parent }
+$ToolsDir = Join-Path $InstallRoot "tools"
+New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
+$ManifestPath = Join-Path $ScriptDir "components.json"
 
 function Write-Step  { param($m) Write-Host "components: $m" }
 function Write-Warn  { param($m) Write-Host "components: $m" -ForegroundColor Yellow }

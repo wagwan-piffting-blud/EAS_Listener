@@ -57,9 +57,9 @@ const _: () = assert!(CAP_TTS_MIN_CHUNK_CHARS < CAP_TTS_MAX_CHUNK_CHARS);
 const _: () = assert!(CAP_TTS_MAX_CHUNK_CHARS < 2_794);
 const CAP_ACTIVE_ALERTS_FILE: &str = "active_alerts.json";
 pub(crate) const DEFAULT_NO_DESCRIPTION: &str = "No CAP description provided.";
-const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
-const CAP_HEADER_SOURCE_MARKER_WEA: &str = "IPAWSWEA";
-const CAP_HEADER_SOURCE_MARKER_NAAD: &str = "NAADSCAP";
+pub(crate) const CAP_HEADER_SOURCE_MARKER_CAP: &str = "IPAWSCAP";
+pub(crate) const CAP_HEADER_SOURCE_MARKER_WEA: &str = "IPAWSWEA";
+pub(crate) const CAP_HEADER_SOURCE_MARKER_NAAD: &str = "NAADSCAP";
 /// The Canadian Alerting Attention Signal Alert Ready broadcasts open with. Compiled in, so a
 /// standalone binary and the container image both have it without shipping `include/`.
 const ALERT_READY_TONE_WAV: &[u8] = include_bytes!("../include/pelmorex.wav");
@@ -2250,12 +2250,16 @@ fn speechify_voice_dir_candidates(config: &Config) -> Vec<PathBuf> {
     }
 
     if model.contains(['/', '\\']) {
-        // A relative path is anchored to the application root, like config.json's other paths,
-        // with the working directory kept as a fallback.
-        return vec![
+        // A relative path is anchored to the instance's directory, like config.json's other
+        // paths, then to where the shared voices are, with the working directory kept last.
+        let mut candidates = vec![
             crate::paths::in_app_root(model_path),
+            crate::paths::assets_root().join(model_path),
+            crate::paths::in_install_root(model_path),
             model_path.to_path_buf(),
         ];
+        candidates.dedup();
+        return candidates;
     }
 
     let mut candidates = vec![config.spfy_voice_dir.join(model)];
@@ -2337,6 +2341,16 @@ fn speechify_voice(config: &Config) -> Result<SpeechifyVoice> {
     ))
 }
 
+/// The machine's shared voice folders; a test sees none, so a checkout that has voices of its own
+/// does not answer for it.
+fn shared_cep6_roots() -> Vec<PathBuf> {
+    if cfg!(test) {
+        Vec::new()
+    } else {
+        crate::paths::cep6_voice_roots()
+    }
+}
+
 fn cepstral_voice_dir(config: &Config) -> Result<PathBuf> {
     let voice = config
         .tts_model
@@ -2353,18 +2367,25 @@ fn cepstral_voice_dir(config: &Config) -> Result<PathBuf> {
         ));
     }
 
-    let voice_dir = config.cep6_voice_dir.join(voice);
-    if !voice_dir.join("voice.idx").is_file() {
-        return Err(anyhow!(
-            "Cepstral voice '{}' is not installed in {}. Run: tts_voices/cep6/fetch_voices.sh -d {} {}",
-            voice,
-            config.cep6_voice_dir.display(),
-            config.cep6_voice_dir.display(),
-            voice
-        ));
+    // Where this listener fetches voices first, then wherever another instance has -- and the
+    // state folder, where they were kept before they were shared.
+    let mut roots = vec![config.cep6_voice_dir.clone()];
+    roots.extend(shared_cep6_roots());
+    roots.push(config.shared_state_dir.join("tts_voices").join("cep6"));
+    if let Some(found) = roots
+        .iter()
+        .map(|root| root.join(voice))
+        .find(|dir| dir.join("voice.idx").is_file())
+    {
+        return Ok(found);
     }
-
-    Ok(voice_dir)
+    Err(anyhow!(
+        "Cepstral voice '{}' is not installed in {}. Run: tts_voices/cep6/fetch_voices.sh -d {} {}",
+        voice,
+        config.cep6_voice_dir.display(),
+        config.cep6_voice_dir.display(),
+        voice
+    ))
 }
 
 /// Text as loqdave reads it: one Latin-1 byte per character. The punctuation NWS and CAP-CP text
@@ -2984,18 +3005,20 @@ fn recording_framing(config: &Config, alert: &CapAlert) -> RecordingFraming {
 /// its synthesised header carries. The one place that knows the full set; checking for "IPAWS"
 /// alone is how CAP-CP alerts used to fall through.
 pub(crate) fn is_cap_raw_header(raw_header: &str) -> bool {
-    raw_header
-        .trim()
-        .trim_end_matches('-')
-        .rsplit_once('-')
-        .is_some_and(|(_, sender)| {
-            [
-                CAP_HEADER_SOURCE_MARKER_CAP,
-                CAP_HEADER_SOURCE_MARKER_WEA,
-                CAP_HEADER_SOURCE_MARKER_NAAD,
-            ]
-            .contains(&sender.trim())
-        })
+    cap_feed_of_raw_header(raw_header).is_some()
+}
+
+/// Which CAP feed a header was synthesised for, by its sender ID: `IPAWSCAP`, `IPAWSWEA` or
+/// `NAADSCAP`. `None` is a header decoded off the air.
+pub(crate) fn cap_feed_of_raw_header(raw_header: &str) -> Option<&'static str> {
+    let (_, sender) = raw_header.trim().trim_end_matches('-').rsplit_once('-')?;
+    [
+        CAP_HEADER_SOURCE_MARKER_CAP,
+        CAP_HEADER_SOURCE_MARKER_WEA,
+        CAP_HEADER_SOURCE_MARKER_NAAD,
+    ]
+    .into_iter()
+    .find(|marker| *marker == sender.trim())
 }
 
 fn cap_header_source_marker(source_hint: &str) -> &'static str {
@@ -3442,9 +3465,20 @@ fn recording_segment_id(event_code: &str) -> String {
     )
 }
 
+/// The custom opening for an alert from the feed `source_marker` names: CAP-CP alerts have their
+/// own, so a config running both NAAD and IPAWS can change one without the other.
+fn header_audio_for(config: &Config, source_marker: &str) -> Option<PathBuf> {
+    let custom = if source_marker == CAP_HEADER_SOURCE_MARKER_NAAD {
+        config.capcp_header_audio_override()
+    } else {
+        config.header_audio_override()
+    };
+    custom.map(Path::to_path_buf)
+}
+
 /// SAME framing: header, attention tone, a second of silence, the message, silence, NNNN. With
-/// `CUSTOM_HEADER_AUDIO` set, that file replaces the header and attention tone; the closing NNNN
-/// stays, since only the opening is replaced.
+/// custom header audio set (`header_audio_for`), that file replaces the header and attention
+/// tone; the closing NNNN stays, since only the opening is replaced.
 async fn build_recording_with_same_header(
     config: &Config,
     raw_header: &str,
@@ -3466,7 +3500,7 @@ async fn build_recording_with_same_header(
         .recording_dir
         .join(format!("cap_nnnn_{}.wav", tmp_id));
 
-    let custom_opening = config.header_audio_override().map(Path::to_path_buf);
+    let custom_opening = header_audio_for(config, source_marker);
 
     let result = async {
         let silence_samples = header::generate_silence_for_duration(CAP_RECORDING_SAMPLE_RATE, 1.0);
@@ -3514,7 +3548,7 @@ async fn build_recording_with_same_header(
 
 /// Alert Ready framing: the attention signal exactly once, a second of silence, then the message.
 /// Unlike SAME there is nothing after the message -- no closing tone, no NNNN.
-/// `CUSTOM_HEADER_AUDIO` replaces the attention signal when it is set.
+/// Custom header audio (`header_audio_for`) replaces the attention signal when it is set.
 async fn build_recording_with_alert_ready_tone(
     config: &Config,
     event_code: &str,
@@ -3529,7 +3563,7 @@ async fn build_recording_with_alert_ready_tone(
         .recording_dir
         .join(format!("cap_silence_{}.wav", tmp_id));
 
-    let custom_opening = config.header_audio_override().map(Path::to_path_buf);
+    let custom_opening = header_audio_for(config, source_marker);
 
     let result = async {
         let opening: &Path = match &custom_opening {
@@ -4077,6 +4111,21 @@ mod tests {
     }
 
     #[test]
+    fn capcp_header_audio_opens_naad_recordings_only() {
+        let mut config = Config::safe_internal_defaults();
+        let canadian = std::env::current_exe().expect("a real file");
+        config.capcp_custom_header_audio = canadian.clone();
+
+        assert_eq!(
+            header_audio_for(&config, CAP_HEADER_SOURCE_MARKER_NAAD),
+            Some(canadian)
+        );
+        for marker in [CAP_HEADER_SOURCE_MARKER_CAP, CAP_HEADER_SOURCE_MARKER_WEA] {
+            assert_eq!(header_audio_for(&config, marker), None, "{marker}");
+        }
+    }
+
+    #[test]
     fn the_compiled_in_alert_ready_tone_is_the_real_signal() {
         let reader = hound::WavReader::new(std::io::Cursor::new(ALERT_READY_TONE_WAV))
             .expect("pelmorex.wav parses as a WAV");
@@ -4179,7 +4228,22 @@ mod tests {
         config.tts_engine = "cepstral".to_string();
         config.tts_model = model.map(|name| name.to_string());
         config.cep6_voice_dir = voice_root.to_path_buf();
+        config.shared_state_dir = voice_root.join("state");
         config
+    }
+
+    #[test]
+    fn a_cepstral_voice_left_in_the_old_state_folder_is_still_found() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let config = config_with_cepstral_voice(&root.path().join("shared"), Some("David"));
+        let old = config
+            .shared_state_dir
+            .join("tts_voices")
+            .join("cep6")
+            .join("David");
+        std::fs::create_dir_all(&old).expect("voice dir");
+        std::fs::write(old.join("voice.idx"), b"index").expect("voice index");
+        assert_eq!(cepstral_voice_dir(&config).expect("voice resolves"), old);
     }
 
     #[test]

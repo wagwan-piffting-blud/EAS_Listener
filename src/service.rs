@@ -11,8 +11,35 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
-pub const SERVICE_NAME: &str = "EASListener";
+const SERVICE_NAME: &str = "EASListener";
 const DISPLAY_NAME: &str = "EAS Listener";
+
+/// `EASListener` for the default instance, which keeps the name existing installs registered;
+/// `EASListener-<name>` for a named one, so several can be installed side by side.
+pub fn service_name() -> String {
+    match crate::paths::instance() {
+        Some(name) => format!("{SERVICE_NAME}-{name}"),
+        None => SERVICE_NAME.to_string(),
+    }
+}
+
+fn display_name() -> String {
+    match crate::paths::instance() {
+        Some(name) => format!("{DISPLAY_NAME} ({name})"),
+        None => DISPLAY_NAME.to_string(),
+    }
+}
+
+/// What the service is started with, after `--service`: the instance, and its directory pinned
+/// explicitly since a service starts with no working directory of its own.
+fn instance_args(app_root: &std::path::Path) -> String {
+    format!(
+        "{} --app-root \"{}\"",
+        crate::paths::instance_flag(),
+        app_root.display()
+    )
+}
+
 const DESCRIPTION: &str =
     "Listens to broadcast audio streams, decodes EAS/SAME messages and serves the monitoring dashboard.";
 
@@ -34,13 +61,22 @@ fn run_sc(args: &[&str]) -> Result<String> {
 }
 
 pub fn is_installed() -> bool {
-    run_sc(&["query", SERVICE_NAME]).is_ok()
+    run_sc(&["query", &service_name()]).is_ok()
 }
 
 /// Installs from a process that is not elevated, by running this executable's own
 /// `--install-service` elevated. Windows shows its consent prompt on the desktop and this blocks
 /// until it is answered; declining it comes back as an error.
 pub fn install_elevated() -> Result<()> {
+    run_elevated("--install-service", "Installing")
+}
+
+/// Removes the service from a process that is not elevated, the same way.
+pub fn uninstall_elevated() -> Result<()> {
+    run_elevated("--uninstall-service", "Removing")
+}
+
+fn run_elevated(action: &str, doing: &str) -> Result<()> {
     let exe = std::env::current_exe().context("Could not determine this executable's path")?;
     // A trailing backslash would escape the closing quote wrapped around it below.
     let app_root = crate::paths::app_root()
@@ -52,13 +88,20 @@ pub fn install_elevated() -> Result<()> {
     // The paths travel in the environment rather than the command, so nothing in them can be
     // read as PowerShell.
     let script = "$ErrorActionPreference = 'Stop'; \
+        $a = @($env:EAS_ELEVATE_ACTION, '--app-root', ('\"' + $env:EAS_ELEVATE_ROOT + '\"')); \
+        if ($env:EAS_ELEVATE_INSTANCE) { $a += @('--instance', $env:EAS_ELEVATE_INSTANCE) }; \
         $p = Start-Process -FilePath $env:EAS_ELEVATE_EXE -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
-            -ArgumentList @('--install-service', '--app-root', ('\"' + $env:EAS_ELEVATE_ROOT + '\"')); \
+            -ArgumentList $a; \
         exit $p.ExitCode";
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("EAS_ELEVATE_EXE", &exe)
+        .env("EAS_ELEVATE_ACTION", action)
         .env("EAS_ELEVATE_ROOT", app_root)
+        .env(
+            "EAS_ELEVATE_INSTANCE",
+            crate::paths::instance().unwrap_or_default(),
+        )
         .output()
         .context("Failed to run PowerShell to ask for administrator rights")?;
 
@@ -70,7 +113,7 @@ pub fn install_elevated() -> Result<()> {
         bail!("The Windows administrator prompt was declined.");
     }
     bail!(
-        "Installing the service as administrator failed (exit code {:?}). {}",
+        "{doing} the service as administrator failed (exit code {:?}). {}",
         output.status.code(),
         stderr.trim()
     )
@@ -97,45 +140,48 @@ pub fn install() -> Result<()> {
     let exe = std::env::current_exe().context("Could not determine this executable's path")?;
     let app_root = crate::paths::app_root();
 
-    // The service starts with no working directory of its own, so the root is pinned explicitly
-    // rather than left to be inferred.
     let bin_path = format!(
-        "\"{}\" --service --app-root \"{}\"",
+        "\"{}\" --service{}",
         exe.display(),
-        app_root.display()
+        instance_args(app_root)
     );
 
     run_sc(&[
         "create",
-        SERVICE_NAME,
+        &service_name(),
         "binPath=",
         &bin_path,
         "start=",
         "auto",
         "DisplayName=",
-        DISPLAY_NAME,
+        &display_name(),
     ])?;
-    run_sc(&["description", SERVICE_NAME, DESCRIPTION])?;
+    run_sc(&["description", &service_name(), DESCRIPTION])?;
 
     // Restart on failure: 60s, 60s, then every 5 minutes, with the counter resetting daily.
     run_sc(&[
         "failure",
-        SERVICE_NAME,
+        &service_name(),
         "reset=",
         "86400",
         "actions=",
         "restart/60000/restart/60000/restart/300000",
     ])?;
 
-    run_sc(&["start", SERVICE_NAME])?;
+    run_sc(&["start", &service_name()])?;
 
     println!(
-        "Installed and started the '{SERVICE_NAME}' service; it starts at every boot from now on."
+        "Installed and started the '{}' service; it starts at every boot from now on.",
+        service_name()
     );
     println!("  Executable:       {}", exe.display());
     println!("  Application root: {}", app_root.display());
     println!();
-    println!("Remove it with:  {} --uninstall-service", exe.display());
+    println!(
+        "Remove it with:  \"{}\"{} --uninstall-service",
+        exe.display(),
+        crate::paths::instance_flag()
+    );
     Ok(())
 }
 
@@ -147,24 +193,24 @@ pub fn uninstall() -> Result<()> {
     }
 
     // Stopping a service that is not running is not an error worth failing over.
-    if let Err(err) = run_sc(&["stop", SERVICE_NAME]) {
+    if let Err(err) = run_sc(&["stop", &service_name()]) {
         eprintln!("Note: {err}");
     }
 
-    run_sc(&["delete", SERVICE_NAME])?;
-    println!("Removed the '{SERVICE_NAME}' service.");
+    run_sc(&["delete", &service_name()])?;
+    println!("Removed the '{}' service.", service_name());
     Ok(())
 }
 
 pub fn status() -> Result<()> {
-    println!("{}", run_sc(&["query", SERVICE_NAME])?);
+    println!("{}", run_sc(&["query", &service_name()])?);
     Ok(())
 }
 
 /// The service side: hands control to the Service Control Manager, which calls back into
 /// `service_main` on its own thread.
 pub mod host {
-    use super::SERVICE_NAME;
+    use super::service_name;
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
@@ -178,7 +224,7 @@ pub mod host {
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
     pub fn start() -> anyhow::Result<()> {
-        windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+        windows_service::service_dispatcher::start(service_name(), ffi_service_main)
             .map_err(|err| anyhow::anyhow!("Failed to connect to the service dispatcher: {err}"))
     }
 
@@ -211,7 +257,7 @@ pub mod host {
             _ => ServiceControlHandlerResult::NotImplemented,
         };
 
-        let status_handle = service_control_handler::register(SERVICE_NAME, handler)
+        let status_handle = service_control_handler::register(service_name(), handler)
             .map_err(|err| anyhow::anyhow!("Failed to register the service handler: {err}"))?;
 
         let running = |state: ServiceState, controls: ServiceControlAccept| ServiceStatus {

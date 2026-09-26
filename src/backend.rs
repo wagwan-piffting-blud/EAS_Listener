@@ -526,6 +526,10 @@ pub async fn run_server(
             get(notifications_services_handler),
         )
         .route("/api/notifications/test", post(notifications_test_handler))
+        .route(
+            "/api/uninstall",
+            get(uninstall_get_handler).post(uninstall_post_handler),
+        )
         .layer(cors.clone())
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
@@ -1106,7 +1110,7 @@ async fn notifications_put_handler(
     State(state): State<ApiState>,
     Json(body): Json<crate::notifications::api::SaveBody>,
 ) -> Response {
-    crate::notifications::api::save(&notifications_path(&state), &body.urls)
+    crate::notifications::api::save(&notifications_path(&state), &body.targets())
 }
 
 async fn notifications_services_handler() -> Response {
@@ -1118,6 +1122,45 @@ async fn notifications_test_handler(
     Json(body): Json<crate::notifications::api::TestBody>,
 ) -> Response {
     crate::notifications::api::test_response(&body.url, &state.config().eas_relay_name).await
+}
+
+async fn uninstall_get_handler() -> Response {
+    Json(crate::uninstall::plan()).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UninstallBody {
+    confirm: String,
+    #[serde(default)]
+    delete_data: bool,
+    #[serde(default)]
+    with_program: bool,
+}
+
+/// Hands the uninstall to a process of its own and, unless removing the service is what stops
+/// this one, exits once the answer has had time to reach the page.
+async fn uninstall_post_handler(Json(body): Json<UninstallBody>) -> Response {
+    match crate::uninstall::start_from_dashboard(&body.confirm, body.delete_data, body.with_program) {
+        Ok((log, stop_this_process)) => {
+            warn!(
+                "Uninstalling this instance from the dashboard; the helper's output is in {}",
+                log.display()
+            );
+            if stop_this_process {
+                tokio::spawn(async {
+                    time::sleep(Duration::from_secs(1)).await;
+                    std::process::exit(0);
+                });
+            }
+            Json(serde_json::json!({ "ok": true, "log": log.display().to_string() }))
+                .into_response()
+        }
+        Err(error) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        )
+            .into_response(),
+    }
 }
 
 async fn reload_handler(State(state): State<ApiState>) -> Response {
@@ -1173,7 +1216,7 @@ struct DashboardConfig {
 
 /// Runtime image metadata the Docker entrypoint writes on every boot.
 fn image_info() -> serde_json::Value {
-    std::fs::read_to_string(crate::paths::in_app_root("image_info.json"))
+    std::fs::read_to_string(crate::paths::in_install_root("image_info.json"))
         .ok()
         .and_then(|payload| serde_json::from_str(&payload).ok())
         .unwrap_or(serde_json::Value::Null)

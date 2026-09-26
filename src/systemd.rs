@@ -12,11 +12,21 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const UNIT_NAME: &str = "eas-listener.service";
+/// `eas-listener.service` for the default instance, `eas-listener-<name>.service` for a named one.
+pub fn unit_name() -> String {
+    unit_name_for(crate::paths::instance())
+}
+
+fn unit_name_for(instance: Option<&str>) -> String {
+    match instance {
+        Some(name) => format!("eas-listener-{name}.service"),
+        None => "eas-listener.service".to_string(),
+    }
+}
 const UNIT_DIR: &str = "/etc/systemd/system";
 
 pub fn unit_path() -> PathBuf {
-    Path::new(UNIT_DIR).join(UNIT_NAME)
+    Path::new(UNIT_DIR).join(unit_name())
 }
 
 /// systemd is the init system, which is what `sd_booted()` checks for too.
@@ -93,15 +103,24 @@ fn path_setting(value: &str) -> String {
     value.replace('%', "%%")
 }
 
-pub fn render_unit(exe: &Path, app_root: &Path, user: Option<u32>) -> String {
+pub fn render_unit(
+    exe: &Path,
+    app_root: &Path,
+    user: Option<u32>,
+    instance: Option<&str>,
+) -> String {
     let exe = exe.display().to_string();
     let root = app_root.display().to_string();
     let user_line = user.map(|uid| format!("User={uid}\n")).unwrap_or_default();
+    let (description, instance_args) = match instance {
+        Some(name) => (format!("EAS Listener ({name})"), format!(" --instance {name}")),
+        None => ("EAS Listener".to_string(), String::new()),
+    };
     format!(
-        "# Written by `eas_listener --install-service` for the install in {root}.\n\
+        "# Written by `eas_listener{instance_args} --install-service` for the install in {root}.\n\
          # Run that again after moving the install; `--uninstall-service` removes this unit.\n\
          [Unit]\n\
-         Description=EAS Listener\n\
+         Description={description}\n\
          Documentation=https://github.com/wagwan-piffting-blud/EAS_Listener\n\
          Wants=network-online.target\n\
          After=network-online.target\n\
@@ -113,7 +132,7 @@ pub fn render_unit(exe: &Path, app_root: &Path, user: Option<u32>) -> String {
          Type=simple\n\
          {user_line}\
          WorkingDirectory={working}\n\
-         ExecStart={exe_arg} --service --app-root {root_arg}\n\
+         ExecStart={exe_arg} --service{instance_args} --app-root {root_arg}\n\
          Restart=on-failure\n\
          RestartSec=10\n\
          # ffmpeg and the TTS engines are the listener's children; stopping the unit stops them.\n\
@@ -146,10 +165,23 @@ fn require_root(action: &str) -> Result<()> {
     if is_root() {
         return Ok(());
     }
+    bail!(
+        "{action} needs root. Run it with sudo: {}",
+        sudo_command(&format!("--{action}"))
+    )
+}
+
+/// The command to run this as root for this instance. Root's own instances live elsewhere
+/// (/var/lib), so the directory this account's instance is in is passed along explicitly.
+pub(crate) fn sudo_command(flag: &str) -> String {
     let exe = std::env::current_exe()
         .map(|exe| exe.display().to_string())
         .unwrap_or_else(|_| "eas_listener".to_string());
-    bail!("{action} needs root. Run it with sudo: sudo \"{exe}\" --{action}")
+    format!(
+        "sudo \"{exe}\"{} --app-root \"{}\" {flag}",
+        crate::paths::instance_flag(),
+        crate::paths::app_root().display()
+    )
 }
 
 /// Writes the unit, enables it for boot and starts it.
@@ -178,12 +210,18 @@ pub fn install() -> Result<()> {
     }
 
     let path = unit_path();
-    std::fs::write(&path, render_unit(&exe, &app_root, user))
+    std::fs::write(
+        &path,
+        render_unit(&exe, &app_root, user, crate::paths::instance()),
+    )
         .with_context(|| format!("Could not write {}", path.display()))?;
     systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", "--now", UNIT_NAME])?;
+    systemctl(&["enable", "--now", &unit_name()])?;
 
-    println!("Installed and started {UNIT_NAME}; it starts at every boot from now on.");
+    println!(
+        "Installed and started {}; it starts at every boot from now on.",
+        unit_name()
+    );
     println!("  Unit:             {}", path.display());
     println!("  Executable:       {}", exe.display());
     println!("  Application root: {}", app_root.display());
@@ -192,10 +230,11 @@ pub fn install() -> Result<()> {
         None => println!("  Runs as:          root (the application root is owned by root)"),
     }
     println!();
-    println!("Logs:            journalctl -u {UNIT_NAME} -f");
+    println!("Logs:            journalctl -u {} -f", unit_name());
     println!(
-        "Remove it with:  sudo \"{}\" --uninstall-service",
-        exe.display()
+        "Remove it with:  sudo \"{}\"{} --uninstall-service",
+        exe.display(),
+        crate::paths::instance_flag()
     );
     Ok(())
 }
@@ -209,20 +248,20 @@ pub fn uninstall() -> Result<()> {
         );
     }
     // A unit that is not running is not a reason to stop.
-    if let Err(err) = systemctl(&["disable", "--now", UNIT_NAME]) {
+    if let Err(err) = systemctl(&["disable", "--now", &unit_name()]) {
         eprintln!("Note: {err}");
     }
     std::fs::remove_file(unit_path())
         .with_context(|| format!("Could not remove {}", unit_path().display()))?;
     systemctl(&["daemon-reload"])?;
-    println!("Removed {UNIT_NAME}.");
+    println!("Removed {}.", unit_name());
     Ok(())
 }
 
 pub fn status() -> Result<()> {
     // `status` exits non-zero for a stopped unit, which is an answer rather than a failure.
     let output = Command::new("systemctl")
-        .args(["status", "--no-pager", UNIT_NAME])
+        .args(["status", "--no-pager", &unit_name()])
         .output()
         .context("Failed to run systemctl")?;
     print!("{}", String::from_utf8_lossy(&output.stdout));
@@ -240,6 +279,7 @@ mod tests {
             Path::new("/opt/eas listener/eas_listener"),
             Path::new("/opt/eas listener"),
             Some(1000),
+            None,
         );
         assert!(unit.contains("User=1000\n"));
         assert!(unit.contains("WorkingDirectory=/opt/eas listener\n"));
@@ -256,6 +296,7 @@ mod tests {
             Path::new("/opt/eas/eas_listener"),
             Path::new("/opt/eas"),
             None,
+            None,
         );
         assert!(!unit.contains("User="));
     }
@@ -266,8 +307,26 @@ mod tests {
             Path::new("/srv/100%\"odd\"/eas_listener"),
             Path::new("/srv/100%\"odd\""),
             None,
+            None,
         );
         assert!(unit.contains("WorkingDirectory=/srv/100%%\"odd\"\n"));
         assert!(unit.contains("ExecStart=\"/srv/100%%\\\"odd\\\"/eas_listener\""));
+    }
+
+    #[test]
+    fn a_named_instance_gets_a_unit_of_its_own() {
+        assert_eq!(unit_name_for(None), "eas-listener.service");
+        assert_eq!(unit_name_for(Some("north")), "eas-listener-north.service");
+        let unit = render_unit(
+            Path::new("/opt/eas/eas_listener"),
+            Path::new("/var/lib/eas-listener/north"),
+            None,
+            Some("north"),
+        );
+        assert!(unit.contains("Description=EAS Listener (north)\n"));
+        assert!(unit.contains(
+            "ExecStart=\"/opt/eas/eas_listener\" --service --instance north --app-root \
+             \"/var/lib/eas-listener/north\"\n"
+        ));
     }
 }
