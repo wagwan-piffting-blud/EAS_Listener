@@ -480,21 +480,26 @@ pub async fn ensure(spec: &ComponentSpec) -> Result<PathBuf, String> {
     let args = fetch_args(manifest);
     let wanted = *spec;
     let present = move || exists(&resolve(&wanted, None).0);
-    fetch_once(format!("component:{manifest}"), announce, present, async move {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let said = run_script(&script, &args).await?;
-        // The script succeeds without installing anything where there is no build for this
-        // platform; that counts as a failure, so it is not tried again on every alert.
-        if exists(&resolve(&wanted, None).0) {
-            Ok(said)
-        } else {
-            Err(format!(
-                "there is no build for this platform ({said}). Install it yourself, or set {} \
+    fetch_once(
+        format!("component:{manifest}"),
+        announce,
+        present,
+        async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let said = run_script(&script, &args).await?;
+            // The script succeeds without installing anything where there is no build for this
+            // platform; that counts as a failure, so it is not tried again on every alert.
+            if exists(&resolve(&wanted, None).0) {
+                Ok(said)
+            } else {
+                Err(format!(
+                    "there is no build for this platform ({said}). Install it yourself, or set {} \
                  in config.json",
-                wanted.config_key
-            ))
-        }
-    })
+                    wanted.config_key
+                ))
+            }
+        },
+    )
     .await
     .map_err(|why| format!("'{}' could not be fetched: {why}", spec.key))?;
 
@@ -524,10 +529,15 @@ pub async fn refetch(
         script.display()
     );
     let args = fetch_args(manifest);
-    fetch_once(format!("component:{manifest}"), announce, present, async move {
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_script(&script, &args).await
-    })
+    fetch_once(
+        format!("component:{manifest}"),
+        announce,
+        present,
+        async move {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            run_script(&script, &args).await
+        },
+    )
     .await
 }
 
@@ -549,10 +559,15 @@ pub async fn ensure_cepstral_voice(
     );
     let root = voice_root.display().to_string();
     let voice = voice.to_string();
-    fetch_once(format!("cep6-voice:{voice}"), announce, present, async move {
-        let flag = if cfg!(windows) { "-Directory" } else { "-d" };
-        run_script(&script, &[flag, &root, &voice]).await
-    })
+    fetch_once(
+        format!("cep6-voice:{voice}"),
+        announce,
+        present,
+        async move {
+            let flag = if cfg!(windows) { "-Directory" } else { "-d" };
+            run_script(&script, &[flag, &root, &voice]).await
+        },
+    )
     .await
 }
 
@@ -639,7 +654,11 @@ mod tests {
     #[test]
     fn a_configured_path_wins_over_everything_else() {
         let tools = tools_dir_containing(&FFMPEG);
-        let (path, source) = resolve_in(&FFMPEG, Some("  C:/tools/ffmpeg.exe  "), &[tools.path().to_path_buf()]);
+        let (path, source) = resolve_in(
+            &FFMPEG,
+            Some("  C:/tools/ffmpeg.exe  "),
+            &[tools.path().to_path_buf()],
+        );
         assert_eq!(path, PathBuf::from("C:/tools/ffmpeg.exe"));
         assert_eq!(source, ResolvedFrom::Configured);
     }

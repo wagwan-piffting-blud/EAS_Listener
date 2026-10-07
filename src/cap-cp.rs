@@ -1978,6 +1978,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_capcp_alert_skips_image_resources() {
+        let image_resource = "<resource>\n      <resourceDesc>Image</resourceDesc>\n      \
+            <mimeType>image/jpeg</mimeType>\n      <uri>photo.jpg</uri>\n      \
+            <derefUri>/9j/4AAQSkZJRgABAQEAYABgAAD</derefUri>\n    </resource>\n    ";
+        let audio_resource = "<resource>\n      <resourceDesc>Broadcast audio</resourceDesc>";
+
+        let image_first = valid_alert_xml().replacen(
+            audio_resource,
+            &format!("{image_resource}{audio_resource}"),
+            1,
+        );
+        let parsed = parse_capcp_alert(
+            &image_first,
+            "naad://test#TEST-CAPCP-001",
+            &languages(&["en"]),
+        )
+        .expect("parsed alert");
+        assert_eq!(parsed.alert.audio_mime_type.as_deref(), Some("audio/mpeg"));
+        assert!(parsed.alert.audio_deref_uri.is_none());
+
+        let image_only = valid_alert_xml().replacen(
+            "<mimeType>audio/mpeg</mimeType>\n      <uri>https://alerts.example.ca/audio/capcp.mp3</uri>",
+            "<mimeType>image/jpeg</mimeType>\n      <uri>photo.jpg</uri>\n      \
+                <derefUri>/9j/4AAQSkZJRgABAQEAYABgAAD</derefUri>",
+            1,
+        );
+        let parsed = parse_capcp_alert(
+            &image_only,
+            "naad://test#TEST-CAPCP-001",
+            &languages(&["en"]),
+        )
+        .expect("parsed alert");
+        assert!(parsed.alert.audio_uri.is_none());
+        assert!(parsed.alert.audio_deref_uri.is_none());
+        assert!(parsed.alert.audio_mime_type.is_none());
+    }
+
+    #[test]
     fn parse_capcp_alert_prefers_broadcast_text() {
         let parsed = parse_capcp_alert(
             valid_alert_xml(),

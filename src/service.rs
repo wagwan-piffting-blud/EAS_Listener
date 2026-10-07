@@ -140,11 +140,7 @@ pub fn install() -> Result<()> {
     let exe = std::env::current_exe().context("Could not determine this executable's path")?;
     let app_root = crate::paths::app_root();
 
-    let bin_path = format!(
-        "\"{}\" --service{}",
-        exe.display(),
-        instance_args(app_root)
-    );
+    let bin_path = format!("\"{}\" --service{}", exe.display(), instance_args(app_root));
 
     run_sc(&[
         "create",

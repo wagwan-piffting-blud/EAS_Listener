@@ -3319,6 +3319,12 @@ pub(crate) fn is_audio_resource(
         if lower.starts_with("audio/") || lower.contains("audio") {
             return true;
         }
+        // A declared non-audio type (an Amber Alert photo, a PDF) is never the alert audio, even
+        // though NAAD embeds it in a derefUri just like the audio.
+        let lower = lower.trim();
+        if !lower.is_empty() && lower != "application/octet-stream" {
+            return false;
+        }
     }
 
     if let Some(uri_value) = uri {
@@ -3331,7 +3337,12 @@ pub(crate) fn is_audio_resource(
         }
     }
 
-    deref_uri.is_some()
+    deref_uri.is_some_and(|value| match value.trim().split_once(',') {
+        Some((meta, _)) if meta.to_ascii_lowercase().starts_with("data:") => {
+            meta.to_ascii_lowercase().contains("audio")
+        }
+        _ => true,
+    })
 }
 
 async fn fetch_cap_audio_recording(
@@ -4577,6 +4588,26 @@ mod tests {
             Some("text/plain"),
             Some("https://x/y/test.txt"),
             None
+        ));
+        assert!(!is_audio_resource(
+            Some("image/jpeg"),
+            Some("https://x/y/photo.jpg"),
+            Some("/9j/4AAQSkZJRgABAQEAYABgAAD")
+        ));
+        assert!(!is_audio_resource(
+            None,
+            None,
+            Some("data:image/png;base64,iVBORw0KGgo=")
+        ));
+        assert!(is_audio_resource(
+            Some("application/octet-stream"),
+            Some("https://x/y/broadcast.mp3"),
+            None
+        ));
+        assert!(is_audio_resource(
+            None,
+            None,
+            Some("data:audio/mpeg;base64,SGVsbG8=")
         ));
 
         assert_eq!(audio_extension(Some("audio/mpeg"), None), "mp3");

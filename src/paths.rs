@@ -148,7 +148,9 @@ pub fn in_install_root(relative: impl AsRef<Path>) -> PathBuf {
 
 /// This instance's own directory, holding config.json and everything written for it.
 pub fn app_root() -> &'static Path {
-    APP_ROOT.get_or_init(|| instance_root_candidate().0).as_path()
+    APP_ROOT
+        .get_or_init(|| instance_root_candidate().0)
+        .as_path()
 }
 
 pub fn in_app_root(relative: impl AsRef<Path>) -> PathBuf {
@@ -651,7 +653,10 @@ mod tests {
     #[test]
     fn instance_names_are_safe_as_directories_and_service_names() {
         assert_eq!(parse_instance_name("north"), Ok(Some("north".to_string())));
-        assert_eq!(parse_instance_name(" WXR_2 "), Ok(Some("wxr_2".to_string())));
+        assert_eq!(
+            parse_instance_name(" WXR_2 "),
+            Ok(Some("wxr_2".to_string()))
+        );
         assert_eq!(parse_instance_name("Default"), Ok(None));
         for bad in [
             "",

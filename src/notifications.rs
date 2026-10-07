@@ -147,14 +147,11 @@ fn parse_items(items: &[Value]) -> FileContents {
     for item in items {
         let target = match item {
             Value::String(url) => Some(Target::every_alert(url.trim())),
-            Value::Object(fields) => fields
-                .get("url")
-                .and_then(Value::as_str)
-                .map(|url| Target {
-                    url: url.trim().to_string(),
-                    sources: fields.get("sources").map(strings).unwrap_or_default(),
-                    events: fields.get("events").map(strings).unwrap_or_default(),
-                }),
+            Value::Object(fields) => fields.get("url").and_then(Value::as_str).map(|url| Target {
+                url: url.trim().to_string(),
+                sources: fields.get("sources").map(strings).unwrap_or_default(),
+                events: fields.get("events").map(strings).unwrap_or_default(),
+            }),
             _ => None,
         };
         match target {

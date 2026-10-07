@@ -1,0 +1,124 @@
+# Dependabot for tools/components.json: one pull request per component whose upstream has a newer
+# release, kept up to date on the branch components/<name> until it is merged or closed.
+#
+# Pull requests opened with GITHUB_TOKEN start no other workflow, so docker-image.yml does not run
+# on them. Each bump is fetched here instead, exactly as an install would, before its PR is opened.
+name: Component updates
+
+on:
+  schedule:
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+    inputs:
+      component:
+        description: "Only this component (blank for every GitHub-hosted one)"
+        required: false
+        default: ""
+      tag:
+        description: "Pin this release tag instead of the newest (needs a component)"
+        required: false
+        default: ""
+  # An upstream release workflow can ask for its own bump straight away:
+  # POST /repos/wagwan-piffting-blud/EAS_Listener/dispatches
+  # {"event_type": "component-release", "client_payload": {"component": "loqdave", "tag": "..."}}
+  repository_dispatch:
+    types: [component-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: component-updates
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      components: ${{ steps.list.outputs.components }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: list
+        env:
+          ONLY: ${{ github.event.inputs.component || github.event.client_payload.component }}
+        run: |
+          if [ -n "$ONLY" ]; then
+            components="$(jq -cn --arg c "$ONLY" '[$c]')"
+          else
+            components="$(jq -c '[.components | to_entries[]
+                                  | select(.value.github and .value.release_tag) | .key]' \
+                          tools/components.json)"
+          fi
+          echo "components=${components}" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.plan.outputs.components) }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMPONENT: ${{ matrix.component }}
+      TAG: ${{ github.event.inputs.tag || github.event.client_payload.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Bump the pin
+        id: bump
+        run: |
+          python3 tools/update_components.py "$COMPONENT" ${TAG:+--tag "$TAG"} | tee "$RUNNER_TEMP/bump.txt"
+          if git diff --quiet -- tools/components.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$(jq -r --arg c "$COMPONENT" '.components[$c].release_tag' tools/components.json)" >> "$GITHUB_OUTPUT"
+          echo "github=$(jq -r --arg c "$COMPONENT" '.components[$c].github' tools/components.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch it the way an install would
+        if: steps.bump.outputs.changed == 'true'
+        run: bash tools/fetch_components.sh -d "$RUNNER_TEMP/install" "$COMPONENT"
+
+      - name: Write the pull request body
+        env:
+          RELEASE_TAG: ${{ steps.bump.outputs.tag }}
+          REPO: ${{ steps.bump.outputs.github }}
+        run: |
+          {
+            echo "Bumps \`${COMPONENT}\` to [${RELEASE_TAG}](https://github.com/${REPO}/releases/tag/${RELEASE_TAG})."
+            echo
+            echo "Digests are GitHub's own for each release asset. The linux-x86_64 build was"
+            echo "downloaded and verified against them by \`fetch_components.sh\` in this run."
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/bump.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+
+      # Run whether or not the pin moved: with nothing left to change, the action deletes the
+      # branch, which closes a pull request that a manual bump on main has made redundant.
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: components/${{ matrix.component }}
+          delete-branch: true
+          add-paths: tools/components.json
+          commit-message: "Bump ${{ matrix.component }} to ${{ steps.bump.outputs.tag }}"
+          title: "Bump ${{ matrix.component }} to ${{ steps.bump.outputs.tag }}"
+          body-path: ${{ runner.temp }}/body.md
+          labels: dependencies
+
+  # A pinned digest that no longer matches GitHub's means the asset was replaced after it was
+  # pinned. The failed run is what notifies.
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 tools/update_components.py --check

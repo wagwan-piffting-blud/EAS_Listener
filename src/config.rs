@@ -915,7 +915,10 @@ mod tests {
 
     #[test]
     fn every_instance_keeps_its_state_in_its_own_directory() {
-        assert_eq!(default_shared_state_dir(), crate::paths::in_app_root("data"));
+        assert_eq!(
+            default_shared_state_dir(),
+            crate::paths::in_app_root("data")
+        );
     }
 
     #[test]

@@ -286,7 +286,9 @@ pub fn start_from_dashboard(
 ) -> Result<(PathBuf, bool), String> {
     let plan = plan();
     if !plan.allowed {
-        return Err(plan.reason.unwrap_or_else(|| "It cannot be done from here.".into()));
+        return Err(plan
+            .reason
+            .unwrap_or_else(|| "It cannot be done from here.".into()));
     }
     if confirm.trim() != plan.instance {
         return Err(format!(
@@ -294,10 +296,12 @@ pub fn start_from_dashboard(
             plan.instance
         ));
     }
-    let exe = std::env::current_exe().map_err(|err| format!("Could not find this program: {err}"))?;
+    let exe =
+        std::env::current_exe().map_err(|err| format!("Could not find this program: {err}"))?;
     let log = std::env::temp_dir().join(format!("eas-listener-uninstall-{}.log", plan.instance));
 
-    let mut args: Vec<std::ffi::OsString> = vec!["--app-root".into(), crate::paths::app_root().into()];
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["--app-root".into(), crate::paths::app_root().into()];
     if let Some(name) = crate::paths::instance() {
         args.extend(["--instance".into(), name.into()]);
     }
@@ -437,7 +441,10 @@ fn spawn_detached(application: &Path, line: &str, cwd: &Path) -> std::io::Result
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
-    let mut line: Vec<u16> = std::ffi::OsStr::new(line).encode_wide().chain([0]).collect();
+    let mut line: Vec<u16> = std::ffi::OsStr::new(line)
+        .encode_wide()
+        .chain([0])
+        .collect();
     let application: Vec<u16> = application.as_os_str().encode_wide().chain([0]).collect();
     let cwd: Vec<u16> = cwd.as_os_str().encode_wide().chain([0]).collect();
     let startup = StartupInfoW {
@@ -512,7 +519,11 @@ fn quote_arg(arg: &std::ffi::OsStr) -> Vec<u16> {
             backslashes += 1;
             continue;
         }
-        let run = if c == '"' as u16 { backslashes * 2 + 1 } else { backslashes };
+        let run = if c == '"' as u16 {
+            backslashes * 2 + 1
+        } else {
+            backslashes
+        };
         quoted.extend(std::iter::repeat_n('\\' as u16, run));
         backslashes = 0;
         quoted.push(c);
@@ -803,7 +814,13 @@ fn configured_state_dir(root: &Path) -> PathBuf {
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from)
         })
-        .map(|dir| if dir.is_absolute() { dir } else { root.join(dir) })
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir
+            } else {
+                root.join(dir)
+            }
+        })
         .unwrap_or_else(|| root.join("data"))
 }
 
@@ -960,8 +977,16 @@ mod tests {
         for file in SHIPPED
             .iter()
             .copied()
-            .chain(["tools/ffmpeg", "tools/.ffmpeg.sha256", "tools/piper/piper", "tools/SOURCES.txt"])
-            .chain(["tts_voices/cep6/Allison/voice.idx", "tts_voices/spfy/voices/tom/tom.vin"])
+            .chain([
+                "tools/ffmpeg",
+                "tools/.ffmpeg.sha256",
+                "tools/piper/piper",
+                "tools/SOURCES.txt",
+            ])
+            .chain([
+                "tts_voices/cep6/Allison/voice.idx",
+                "tts_voices/spfy/voices/tom/tom.vin",
+            ])
             .chain(["piper/en_US-lessac-medium.onnx"])
         {
             let path = root.join(file);

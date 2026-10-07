@@ -39,7 +39,37 @@ and served from `GET /api/components`.
 ```
 
 Downloads are checked against the SHA-256 digests in `components.json`, which were taken from the
-checksum files each upstream publishes alongside its releases. A mismatch aborts that component.
+digest GitHub reports for each release asset. A mismatch aborts that component.
+
+## Updating a pin
+
+A component hosted on GitHub names its repository (`github`), its `release_tag`, and one `asset`
+per platform; the download URL is implied. `{tag}`, `{version}` (the `release_tag` unless the
+component gives its own) and `{github}` are substituted in any of its strings. Bumping one is a
+single command, never a hand edit:
+
+```
+python tools/update_components.py loqdave                 # newest release with every platform's asset
+python tools/update_components.py loqdave -t 2026.10.06   # that release
+python tools/update_components.py -n --all                # show what bumping everything would change
+python tools/update_components.py --check                 # every pin still matches GitHub?
+```
+
+It rewrites `release_tag`, `version` and each `sha256` from GitHub's asset digests, downloading
+and hashing only what GitHub has no digest for (piper's 2023 assets) and `files` whose URL depends
+on the tag (Speechify's Tom files for Windows). It never uses GitHub's "Latest" marker, which
+ENDEC_Dave keeps on its SAPI zip; "newest" is the most recently published release whose tag
+matches the component's `track` regex, if it has one, and that carries every asset. ffmpeg tracks
+`^autobuild-` and takes its `version` from the asset names. BtbN publishes nothing but autobuilds
+and deletes daily ones after 14 days, keeping the last of each month for two years, so ffmpeg also
+sets `"retained": "month-end"`: only the last build of a finished month is ever pinned.
+`GH_TOKEN` or `GITHUB_TOKEN` is sent when set.
+
+`.github/workflows/components.yml` runs this daily and opens one pull request per component with a
+newer release, on the branch `components/<name>`, after fetching the new linux-x86_64 build with
+`fetch_components.sh` to prove it installs. It can be run by hand for one component and tag, or
+started from an upstream release with a `component-release` repository dispatch. Its `check` job
+fails if any pinned digest stops matching GitHub's.
 
 Each install leaves `.<component>.sha256` beside the binaries, naming the build it came from. When a
 newer `components.json` pins a different build, the next run replaces the old one instead of
@@ -152,8 +182,7 @@ One difference shows with plain-text services (SMS, text email and the like): th
 its markdown body first, and apprise-go strips the markdown syntax for those services where Python
 Apprise passes the asterisks and underscores through as typed.
 
-To move to a newer release, update the version, URLs and digests in `components.json`; GitHub lists
-each asset's SHA-256 on the release page.
+To move to a newer release, run `python tools/update_components.py apprise`.
 
 ## ffprobe and Icecast are no longer needed
 

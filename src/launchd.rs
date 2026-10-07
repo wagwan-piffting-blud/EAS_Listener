@@ -253,8 +253,7 @@ pub fn install() -> Result<()> {
         user.as_deref(),
         crate::paths::instance(),
     );
-    std::fs::write(&path, plist)
-        .with_context(|| format!("Could not write {}", path.display()))?;
+    std::fs::write(&path, plist).with_context(|| format!("Could not write {}", path.display()))?;
 
     let domain = domain(kind);
     let target = format!("{domain}/{}", label());

@@ -46,7 +46,49 @@ if (-not (Test-Path $ManifestPath)) {
     exit 1
 }
 
-$manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+function Expand-Template {
+    param($Node, [hashtable]$Vars)
+    if ($Node -is [string]) {
+        foreach ($key in $Vars.Keys) { $Node = $Node.Replace("{$key}", $Vars[$key]) }
+        return $Node
+    }
+    if ($Node -is [System.Array]) {
+        return ,@($Node | ForEach-Object { Expand-Template $_ $Vars })
+    }
+    if ($Node -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Node.PSObject.Properties) {
+            $property.Value = Expand-Template $property.Value $Vars
+        }
+    }
+    return $Node
+}
+
+# A platform's url is implied by its asset on a GitHub release; {tag}, {version} and {github} are
+# then substituted in every string of the component. fetch_components.sh does the same in
+# RESOLVE_FILTER.
+function Resolve-Manifest {
+    param($Manifest)
+    foreach ($name in $Manifest.components.PSObject.Properties.Name) {
+        $spec = $Manifest.components.$name
+        if (-not $spec.release_tag) { continue }
+        if (-not $spec.version) {
+            $spec | Add-Member -NotePropertyName version -NotePropertyValue $spec.release_tag -Force
+        }
+        $vars = @{ tag = [string]$spec.release_tag; version = [string]$spec.version; github = [string]$spec.github }
+        if ($spec.github -and $spec.platforms) {
+            foreach ($platform in $spec.platforms.PSObject.Properties) {
+                if ($platform.Value.asset -and -not $platform.Value.url) {
+                    $url = "https://github.com/{github}/releases/download/{tag}/" + $platform.Value.asset
+                    $platform.Value | Add-Member -NotePropertyName url -NotePropertyValue $url
+                }
+            }
+        }
+        Expand-Template $spec $vars | Out-Null
+    }
+    return $Manifest
+}
+
+$manifest = Resolve-Manifest (Get-Content $ManifestPath -Raw | ConvertFrom-Json)
 
 # The manifest keys platforms the way rustc names targets, so the same file serves every OS.
 $arch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "x86" }

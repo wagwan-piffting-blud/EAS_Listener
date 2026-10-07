@@ -113,7 +113,10 @@ pub fn render_unit(
     let root = app_root.display().to_string();
     let user_line = user.map(|uid| format!("User={uid}\n")).unwrap_or_default();
     let (description, instance_args) = match instance {
-        Some(name) => (format!("EAS Listener ({name})"), format!(" --instance {name}")),
+        Some(name) => (
+            format!("EAS Listener ({name})"),
+            format!(" --instance {name}"),
+        ),
         None => ("EAS Listener".to_string(), String::new()),
     };
     format!(
@@ -214,7 +217,7 @@ pub fn install() -> Result<()> {
         &path,
         render_unit(&exe, &app_root, user, crate::paths::instance()),
     )
-        .with_context(|| format!("Could not write {}", path.display()))?;
+    .with_context(|| format!("Could not write {}", path.display()))?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", &unit_name()])?;
 

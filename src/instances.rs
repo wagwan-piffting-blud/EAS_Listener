@@ -91,10 +91,7 @@ pub fn all() -> Vec<Instance> {
     if beside_binary.join("config.json").is_file()
         && !found.iter().any(|instance| instance.dir == beside_binary)
     {
-        found.push(read_instance(
-            crate::paths::DEFAULT_INSTANCE,
-            beside_binary,
-        ));
+        found.push(read_instance(crate::paths::DEFAULT_INSTANCE, beside_binary));
     }
     found.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
     found
@@ -129,8 +126,7 @@ fn free_port_by(start: u16, taken: &[u16], in_use: impl Fn(u16) -> bool) -> u16 
 /// them a browser reaches depends on the address it resolved. Anything answering on loopback
 /// counts as in use.
 fn in_use(port: u16) -> bool {
-    std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err()
-        || answers(port)
+    std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err() || answers(port)
 }
 
 /// Something accepts connections on this port on loopback.
@@ -160,7 +156,11 @@ pub fn print_list() -> Result<()> {
         println!(
             "  {:<16} {:<11} dashboard {:<5}{}  {}",
             instance.name,
-            if instance.set_up { "set up" } else { "not set up" },
+            if instance.set_up {
+                "set up"
+            } else {
+                "not set up"
+            },
             instance.dashboard_port,
             stream,
             instance.dir.display()

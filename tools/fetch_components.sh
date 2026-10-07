@@ -30,8 +30,33 @@ warn() { echo "components: $*" >&2; }
 die()  { echo "components: $*" >&2; exit 1; }
 
 # jq.exe under Git Bash opens stdout in text mode and appends carriage returns, which would end up
-# inside filenames. Every read of the manifest goes through here so that cannot happen.
-jqr() { jq -r "$@" "$MANIFEST" | tr -d '\r'; }
+# inside filenames. Every read of the manifest goes through here so that cannot happen. It reads
+# the manifest with its templates already expanded (RESOLVED, below).
+jqr() { printf '%s' "$RESOLVED" | jq -r "$@" | tr -d '\r'; }
+
+# A platform's url is implied by its asset on a GitHub release; {tag}, {version} and {github} are
+# then substituted in every string of the component. Hand-rolled rather than walk(), which jq 1.5
+# lacks. fetch_components.ps1 does the same in Resolve-Manifest.
+RESOLVE_FILTER='
+def subst($v): reduce ($v | to_entries[]) as $e (.; split("{" + $e.key + "}") | join($e.value));
+def expand($v):
+    if type == "string" then subst($v)
+    elif type == "object" then map_values(expand($v))
+    elif type == "array" then map(expand($v))
+    else . end;
+.components |= map_values(
+    if .release_tag then
+        (if .version then . else .version = .release_tag end)
+        | {tag: .release_tag, version: .version, github: (.github // "")} as $v
+        | (if .github and .platforms then
+               .platforms |= map_values(
+                   if .asset and (.url | not) then
+                       .url = "https://github.com/{github}/releases/download/{tag}/" + .asset
+                   else . end)
+           else . end)
+        | expand($v)
+    else . end)
+'
 
 usage() {
     echo "usage: fetch_components.sh [-l] [-f] [-d ROOT] [COMPONENT]"
@@ -60,6 +85,8 @@ BIN_DIR="${INSTALL_ROOT}/tools"
 command -v jq >/dev/null 2>&1 || die "jq is required to read the manifest"
 command -v curl >/dev/null 2>&1 || die "curl is required to download components"
 [ -f "$MANIFEST" ] || die "manifest not found at $MANIFEST"
+RESOLVED="$(jq "$RESOLVE_FILTER" "$MANIFEST")" || die "could not read the manifest at $MANIFEST"
+RESOLVED="${RESOLVED//$'\r'/}"
 
 # The manifest keys platforms the way rustc names targets, so the same file serves every OS.
 case "$(uname -s)" in

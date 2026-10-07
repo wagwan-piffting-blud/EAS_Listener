@@ -1140,7 +1140,8 @@ struct UninstallBody {
 /// Hands the uninstall to a process of its own and, unless removing the service is what stops
 /// this one, exits once the answer has had time to reach the page.
 async fn uninstall_post_handler(Json(body): Json<UninstallBody>) -> Response {
-    match crate::uninstall::start_from_dashboard(&body.confirm, body.delete_data, body.with_program) {
+    match crate::uninstall::start_from_dashboard(&body.confirm, body.delete_data, body.with_program)
+    {
         Ok((log, stop_this_process)) => {
             warn!(
                 "Uninstalling this instance from the dashboard; the helper's output is in {}",
