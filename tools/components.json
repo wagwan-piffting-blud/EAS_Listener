@@ -165,33 +165,33 @@
             "project_url": "https://github.com/wagwan-piffting-blud/cep6-rs",
             "source_url": "https://github.com/wagwan-piffting-blud/cep6-rs",
             "github": "wagwan-piffting-blud/cep6-rs",
-            "release_tag": "2026.10.06",
+            "release_tag": "2026.10.10",
             "install": "binary",
             "feature": "TTS_ENGINE \"cepstral\".",
             "platforms": {
                 "windows-x86_64": {
                     "asset": "cep6-windows-amd64.exe",
-                    "sha256": "5a0784cd7f543a257733725e305949b56247a9cf9248dc90d610b4c729ba85ec"
+                    "sha256": "952011affc8436e1cd0e3f5cd4a5d3e9a5669d0b2159b49269908eeee787d516"
                 },
                 "linux-x86_64": {
                     "asset": "cep6-linux-amd64",
-                    "sha256": "940281f90143748afeb0012e201a8d66b4d49200eb867c42fba7ddae2e5bcca2"
+                    "sha256": "68194a4d9e2333c5131868f177cfbaed817dcde46147a49a483d064467189155"
                 },
                 "linux-aarch64": {
                     "asset": "cep6-linux-arm64",
-                    "sha256": "c05bce67d556d6a702fe1f84e642ef63e3245821b8209be86881b7ebe1174e29"
+                    "sha256": "3e9adebf6d9c8476d8cd4bb4b3968a6c01adf76686cc3f592e217016984a2cb0"
                 },
                 "linux-armv7": {
                     "asset": "cep6-linux-armv7",
-                    "sha256": "c5145d380c89acdc466cd78af64f354d752ea43c2f2758531f63c60fad2ac9d9"
+                    "sha256": "f1e0ef97ce6e3e6495f7e547350119d0ebadf15b5b30060fa16f370a66d2a064"
                 },
                 "macos-aarch64": {
                     "asset": "cep6-macos-universal",
-                    "sha256": "a492c32972626126b873b43783f21c768074c983b11d5503a08101ff4ce9ff82"
+                    "sha256": "eea21109183e8f1681e9418480965b624878dfc8946499b8a9985d083769ffa3"
                 },
                 "macos-x86_64": {
                     "asset": "cep6-macos-universal",
-                    "sha256": "a492c32972626126b873b43783f21c768074c983b11d5503a08101ff4ce9ff82"
+                    "sha256": "eea21109183e8f1681e9418480965b624878dfc8946499b8a9985d083769ffa3"
                 }
             }
         },
