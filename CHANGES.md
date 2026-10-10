@@ -1,10 +1,16 @@
 # EAS Listener Changelog
 
+## v0.43.0: Released 2026-10-10
+
+- **Reduce error/log spam in a short window of time.**
+
+---
+
 ## v0.42.0: Released 2026-10-06
 
-- Fix CAP-CP alert parsing for when the audio element is not truly audio. Some alerts from Alert Ready Canada have been observed to have an attachment that is not audio, but rather something like a suspect/victim image. This caused the listener to fail to parse the alert and not send the audio to the webhooks. The listener now checks the MIME type of the attachment and only processes it if it is audio, otherwise it will ignore it and continue processing the alert as normal (falling back to TTS with no audio present like it should). Thank you to Discord user dom_navaan for reporting this issue.
+- **Fix CAP-CP alert parsing for when the audio element is not truly audio.** Some alerts from Alert Ready Canada have been observed to have an attachment that is not audio, but rather something like a suspect/victim image. This caused the listener to fail to parse the alert and not send the audio to the webhooks. The listener now checks the MIME type of the attachment and only processes it if it is audio, otherwise it will ignore it and continue processing the alert as normal (falling back to TTS with no audio present like it should). Thank you to Discord user dom_navaan for reporting this issue.
 
-- Fix the component fetcher to handle updates better. The component fetcher is responsible for downloading and updating the various components of EAS_Listener, such as TTS engines and voices. Previously, it was quite tedious to update manually, requiring me to update each hash by hand and component link and tag. Now, the component fetcher will automatically check for updates and download them if available with the help of a Python script and GitHub action to open PRs when components are updated outside of this repository. This will make it easier to keep EAS_Listener up to date with the latest components and ensure that users have access to the latest features and improvements.
+- **Fix the component fetcher to handle updates better.** The component fetcher is responsible for downloading and updating the various components of EAS_Listener, such as TTS engines and voices. Previously, it was quite tedious to update manually, requiring me to update each hash by hand and component link and tag. Now, the component fetcher will automatically check for updates and download them if available with the help of a Python script and GitHub action to open PRs when components are updated outside of this repository. This will make it easier to keep EAS_Listener up to date with the latest components and ensure that users have access to the latest features and improvements.
 
 ## v0.41.0: Released 2026-09-26
 

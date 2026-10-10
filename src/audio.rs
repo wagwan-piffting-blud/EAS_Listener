@@ -303,6 +303,11 @@ async fn run_stream_task(
     let mut last_connect_error_log = Instant::now() - Duration::from_secs(61);
     let mut connect_retry_attempt: u32 = 0;
     let mut suppressed_connect_errors: u32 = 0;
+    let mut last_decode_error_log = Instant::now() - Duration::from_secs(61);
+    let mut suppressed_decode_errors: u32 = 0;
+    // A 200 alone proves nothing: servers that answer but never yield decodable audio would
+    // otherwise reconnect (and log) every second forever.
+    const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 
     loop {
         if stop_signal.load(Ordering::Relaxed) {
@@ -352,9 +357,7 @@ async fn run_stream_task(
                     continue;
                 }
 
-                connect_retry_attempt = 0;
-                suppressed_connect_errors = 0;
-                last_connect_error_log = Instant::now() - Duration::from_secs(61);
+                let session_started = Instant::now();
                 monitoring.note_connected(&stream_url);
                 let content_type = response
                     .headers()
@@ -445,20 +448,43 @@ async fn run_stream_task(
                         &monitoring_for_decode,
                     )
                 });
-                if let Err(e) = decoding_task.await? {
-                    if !stop_signal.load(Ordering::Relaxed) {
-                        monitoring.note_error(&stream_url, format!("decode error: {e}"));
-                        error!(
-                            stream = %stream_url,
-                            "Error processing audio stream: {}. Reconnecting...",
-                            e
-                        );
-                    }
-                }
+                let decode_result = decoding_task.await?;
                 if stop_signal.load(Ordering::Relaxed) {
                     break;
                 }
+                let healthy = session_started.elapsed() >= HEALTHY_SESSION;
+                if healthy {
+                    connect_retry_attempt = 0;
+                    suppressed_connect_errors = 0;
+                    last_connect_error_log = Instant::now() - Duration::from_secs(61);
+                } else {
+                    connect_retry_attempt = connect_retry_attempt.saturating_add(1);
+                }
+                let retry_delay_secs = if healthy {
+                    1
+                } else {
+                    (1u64 << connect_retry_attempt.min(6)).min(60)
+                };
+                if let Err(e) = decode_result {
+                    monitoring.note_error(&stream_url, format!("decode error: {e}"));
+                    if last_decode_error_log.elapsed() > Duration::from_secs(60) {
+                        error!(
+                            stream = %stream_url,
+                            retry_in_secs = retry_delay_secs,
+                            attempt = connect_retry_attempt,
+                            suppressed_errors = suppressed_decode_errors,
+                            "Error processing audio stream: {}. Reconnecting...",
+                            e
+                        );
+                        last_decode_error_log = Instant::now();
+                        suppressed_decode_errors = 0;
+                    } else {
+                        suppressed_decode_errors = suppressed_decode_errors.saturating_add(1);
+                    }
+                }
                 monitoring.note_disconnected(&stream_url);
+                tokio::time::sleep(Duration::from_secs(retry_delay_secs)).await;
+                continue;
             }
             Err(e) => {
                 if stop_signal.load(Ordering::Relaxed) {
@@ -486,7 +512,6 @@ async fn run_stream_task(
                 continue;
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     Ok(())
@@ -578,10 +603,7 @@ fn process_stream(
                 continue;
             }
             Err(SymphoniaError::IoError(_)) => break,
-            Err(e) => {
-                error!(stream = %stream_label, "Packet error: {}", e);
-                break;
-            }
+            Err(e) => return Err(anyhow!("Packet error: {e}")),
         };
 
         if packet.track_id() != track_id {
