@@ -241,7 +241,7 @@
             "project_url": "https://github.com/wagwan-piffting-blud/Speechify",
             "source_url": "https://github.com/wagwan-piffting-blud/Speechify",
             "github": "wagwan-piffting-blud/Speechify",
-            "release_tag": "2026.10.21",
+            "release_tag": "2026.10.26",
             "install": "archive",
             "feature": "TTS_ENGINE \"speechify\".",
             "data": [
@@ -250,7 +250,7 @@
             "platforms": {
                 "windows-x86_64": {
                     "asset": "spfy_synth-windows-x86-{tag}.exe",
-                    "sha256": "ebd954804b5de810b2ba1e6e9f74229e405310373f9087a238589818247f2c38",
+                    "sha256": "f4229d1c4bc1c0158ecff3a526169ac4f55ae4192b339fd874290ef9cd31d383",
                     "files": [
                         {
                             "url": "https://raw.githubusercontent.com/{github}/{tag}/en-US/tom/tom.vin",
@@ -281,27 +281,27 @@
                 },
                 "linux-x86_64": {
                     "asset": "spfy-linux-x86_64-{tag}.tar.gz",
-                    "sha256": "27ce1bd1b673d54d1a700d6e7fccd6e8eee732a4b127afd0353e871b1dfe7c87",
+                    "sha256": "757197256253750b6e661d5ec0c4f54b5ce6e8668b362a3a85867b0e412b6bdf",
                     "archive": "tar.gz"
                 },
                 "linux-aarch64": {
                     "asset": "spfy-linux-arm64-{tag}.tar.gz",
-                    "sha256": "2cd6db944f96b08ef94c16f5e74eaab3deac9570b13bc556c49df7684253e89c",
+                    "sha256": "741cce867f1a7c27a2da3f078fae21048a2a5676afc9cef3d754a5d5fceefa22",
                     "archive": "tar.gz"
                 },
                 "linux-armv7": {
                     "asset": "spfy-linux-armv7-{tag}.tar.gz",
-                    "sha256": "8afbee3dea867325df06020b957e3a2a4cba6180b2c3b41f6cfbada957447bc5",
+                    "sha256": "bded70b5697b5f8e6670eb1a1d09e2868743b3734c37d60b65e9c2f1b13ed336",
                     "archive": "tar.gz"
                 },
                 "macos-aarch64": {
                     "asset": "spfy-macos-arm64-{tag}.tar.gz",
-                    "sha256": "640d2168b013ff56058846c25dabafac034dbf5e941aed724fe9eb18b94a2090",
+                    "sha256": "f030206bdbdcdd9bd112beaa20365536cf5c9eca39970d37e25c8f8131bd948e",
                     "archive": "tar.gz"
                 },
                 "macos-x86_64": {
                     "asset": "spfy-macos-x86_64-{tag}.tar.gz",
-                    "sha256": "91c9ccb3130f44c6f984a0e9c2f1315ff59b809862b01c3044984dd88fd8d4d3",
+                    "sha256": "da20cd5b20b19442f6f0ffc3b8d7110fae22a287ccc6bb296b55324c4432d0ea",
                     "archive": "tar.gz"
                 }
             }
