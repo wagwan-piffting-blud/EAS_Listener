@@ -14,8 +14,8 @@
             "github": "BtbN/FFmpeg-Builds",
             "track": "^autobuild-",
             "retained": "month-end",
-            "version": "n8.1.3-9-g29e619e767",
-            "release_tag": "autobuild-2026-09-30-13-08",
+            "version": "n8.1.3-27-g8dca1586f4",
+            "release_tag": "autobuild-2026-10-31-12-59",
             "install": "archive",
             "system_packages": {
                 "apt-get": "ffmpeg",
@@ -28,17 +28,17 @@
             "platforms": {
                 "windows-x86_64": {
                     "asset": "ffmpeg-{version}-win64-lgpl-8.1.zip",
-                    "sha256": "4a7642b2264c03e8a0ce8a3825b933ee5580656f45695a086fe7e294045ffc0a",
+                    "sha256": "d4c2a42673917b4a97104a3e9f082729a9730796b98664e37c0b7eba6c6c613d",
                     "archive": "zip"
                 },
                 "linux-x86_64": {
                     "asset": "ffmpeg-{version}-linux64-lgpl-8.1.tar.xz",
-                    "sha256": "dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e",
+                    "sha256": "a64f3171e6ad1f7d358d28890a907ee478c331d1177ec696a93418f79ac3f1f3",
                     "archive": "tar.xz"
                 },
                 "linux-aarch64": {
                     "asset": "ffmpeg-{version}-linuxarm64-lgpl-8.1.tar.xz",
-                    "sha256": "8463881ca7a25015ca6e00f5c91dd2f1637eb73d33c8230413cb74db760a86b3",
+                    "sha256": "2ea30086a637e3f0ad0f49a1b38db34121422b85e93cc82df2e01d9ee5200809",
                     "archive": "tar.xz"
                 }
             }
