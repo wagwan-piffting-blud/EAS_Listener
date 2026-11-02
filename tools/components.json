@@ -203,33 +203,33 @@
             "project_url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave",
             "source_url": "https://github.com/wagwan-piffting-blud/ENDEC_Dave",
             "github": "wagwan-piffting-blud/ENDEC_Dave",
-            "release_tag": "2026.10.06",
+            "release_tag": "2026.11.01",
             "install": "binary",
             "feature": "TTS_ENGINE \"loquendo\".",
             "platforms": {
                 "windows-x86_64": {
                     "asset": "loqdave-windows-amd64.exe",
-                    "sha256": "2a9a59c6618591072d9354cc990606072947a83c55f0b3a37453f25556292fac"
+                    "sha256": "7978e10221e608528c15fb840b7fefeff9910c663169997e1e5250c9c34933e0"
                 },
                 "linux-x86_64": {
                     "asset": "loqdave-linux-amd64",
-                    "sha256": "6b60f2d5f16411e90f7d2157412303b7531fbcf31dc636c1eafa354bf1d590c7"
+                    "sha256": "0054594198e042072a077e5be3043dc884748b99e667502bc2bfd284f0d03e8f"
                 },
                 "linux-aarch64": {
                     "asset": "loqdave-linux-arm64",
-                    "sha256": "eda712e859befc829d6a4ef2bd0aa4038962a31099195e6bcf04639611c2c1a2"
+                    "sha256": "a37e2675ef842c87689faa19cb0b17c26bb03536879212d5029791c2f94e3d34"
                 },
                 "linux-armv7": {
                     "asset": "loqdave-linux-armv7",
-                    "sha256": "5d689373897ee7648e488d85b375a534ce663eb5c5aebc535cbed6d3fa7349d3"
+                    "sha256": "0d7c4c04477945e938bacb2e8bc5ec4f8c0beb24f95bd4dbc42335009455c2be"
                 },
                 "macos-aarch64": {
                     "asset": "loqdave-macos-universal",
-                    "sha256": "562249eaefa7ab3ce04f1f9a273df4d9c7c75395dbc1c68196e8ce8f1ea2d568"
+                    "sha256": "1c2fb0c0c8883bd6feecea1ab12189482a5bfb8ba9368e3cb8af02869a87e980"
                 },
                 "macos-x86_64": {
                     "asset": "loqdave-macos-universal",
-                    "sha256": "562249eaefa7ab3ce04f1f9a273df4d9c7c75395dbc1c68196e8ce8f1ea2d568"
+                    "sha256": "1c2fb0c0c8883bd6feecea1ab12189482a5bfb8ba9368e3cb8af02869a87e980"
                 }
             }
         },
