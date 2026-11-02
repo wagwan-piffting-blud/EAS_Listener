@@ -377,7 +377,13 @@ jobs:
             echo "::error::Notarization finished as ${STATUS}."
             exit 1
           fi
-          xcrun stapler staple "$DMG"
+          # stapler fetches the ticket from CloudKit, which drops connections now and then and can
+          # lag the Accepted status by a minute or two; both fail with error 68.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler staple "$DMG" && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep $((attempt * 20))
+          done
           xcrun stapler validate "$DMG"
           spctl --assess --type open --context context:primary-signature -vv "$DMG"
 

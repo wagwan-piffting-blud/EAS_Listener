@@ -6,6 +6,8 @@
 
 - **Fix CAP-CP handling of national Alert Ready tests.** The listener now properly handles nation-wide Alert Ready tests, which are sent out as CAP-CP alerts with "event testMessage and status Actual, flagged both Broadcast and Wireless Immediate". Previously, these tests would be reported as DMOs (the primary fallback code for any test), but now they will be recognized and handled appropriately with the EAS/SAME NPT event code. This ensures that users receive the correct notifications for these tests and can distinguish them from actual alerts. Thanks to Discord user @x_dom15 for reporting this issue in preparation for the November 2026 Alert Ready national test.
 
+- **Fix CI.**
+
 ## v0.43.0: Released 2026-10-10
 
 - **Reduce error/log spam in a short window of time.**
