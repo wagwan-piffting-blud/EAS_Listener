@@ -160,6 +160,18 @@ pub fn setup_url(bind_addr: SocketAddr) -> String {
     format!("http://{reachable}/setup.html?token={}", token())
 }
 
+/// The address the default route leaves from. Connecting a UDP socket sends nothing. Inside the
+/// image this would be the container's own address, which is no use to anyone outside it.
+fn lan_address(port: u16) -> Option<SocketAddr> {
+    if std::env::var_os("EAS_IMAGE_VARIANT").is_some() {
+        return None;
+    }
+    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(("192.0.2.1", 9)).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then(|| SocketAddr::new(ip, port))
+}
+
 #[derive(Clone)]
 struct SetupState {
     done: Arc<Notify>,
@@ -198,6 +210,11 @@ fn choose_ports(bind_addr: SocketAddr) -> SocketAddr {
     let mut addr = bind_addr;
     if !in_image && !forced("MONITORING_BIND_PORT") && !forced("MONITORING_BIND_ADDR") {
         addr.set_port(crate::instances::free_port(bind_addr.port(), &taken));
+    }
+    // Every request past the page itself needs the token, so a headless machine can be set up
+    // from elsewhere on the network.
+    if Config::environment_setting("MONITORING_BIND_ADDR").is_none() {
+        addr.set_ip(std::net::Ipv4Addr::UNSPECIFIED.into());
     }
     let mut stream_taken = taken;
     stream_taken.push(addr.port());
@@ -249,10 +266,18 @@ pub async fn run(bind_addr: SocketAddr) -> Result<Handover> {
     println!("Setup token: {}", token());
     println!("{token_note}");
     if bind_addr.ip().is_unspecified() {
-        println!(
-            "The dashboard listens on every interface, so from another machine replace \
-             127.0.0.1 with this machine's address (or the Docker host's)."
-        );
+        match lan_address(bind_addr.port()) {
+            Some(lan) => {
+                println!("From another machine on the network:");
+                println!();
+                println!("    http://{lan}/setup.html?token={}", token());
+                println!();
+            }
+            None => println!(
+                "The dashboard listens on every interface, so from another machine replace \
+                 127.0.0.1 with this machine's address (or the Docker host's)."
+            ),
+        }
     }
     if crate::paths::config_json_is_directory() {
         println!(
@@ -350,16 +375,63 @@ async fn status_handler() -> Json<Value> {
     }))
 }
 
-async fn schema_handler() -> Json<Value> {
+/// Someone setting up from another machine needs the dashboard reachable from there afterwards.
+fn set_up_from_elsewhere(peer: SocketAddr) -> bool {
+    !is_local_peer(peer) && Config::environment_setting("MONITORING_BIND_ADDR").is_none()
+}
+
+async fn schema_handler(ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Json<Value> {
     let mut payload = crate::config_schema::payload();
     if let Some((dashboard, stream)) = OFFERED_PORTS.get().copied() {
-        offer_ports(&mut payload, dashboard, stream);
+        offer_ports(&mut payload, dashboard, stream, set_up_from_elsewhere(peer));
     }
     Json(payload)
 }
 
+/// The page writes only what was changed, so a port or address offered in place of the built-in
+/// default would be shown and then never saved. Appended as text to keep the page's key order.
+fn with_offered_defaults(body: &str, offered: Option<(u16, u16)>, every_interface: bool) -> String {
+    let (Ok(Value::Object(map)), Some((dashboard, stream))) =
+        (serde_json::from_str::<Value>(body), offered)
+    else {
+        return body.to_string();
+    };
+    let defaults = Config::defaults();
+    let mut extra: Vec<(&str, Value)> = Vec::new();
+    // An address the user typed carries its own port, which an added port would override.
+    if dashboard != defaults.monitoring_bind_port
+        && !map.contains_key("MONITORING_BIND_PORT")
+        && !map.contains_key("MONITORING_BIND_ADDR")
+    {
+        extra.push(("MONITORING_BIND_PORT", json!(dashboard)));
+    }
+    if every_interface && !map.contains_key("MONITORING_BIND_ADDR") {
+        let addr = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, dashboard));
+        extra.push(("MONITORING_BIND_ADDR", json!(addr.to_string())));
+    }
+    if stream != defaults.icecast_alert_port && !map.contains_key("ICECAST_ALERT_PORT") {
+        extra.push(("ICECAST_ALERT_PORT", json!(stream)));
+    }
+    if extra.is_empty() {
+        return body.to_string();
+    }
+
+    let Some(head) = body.trim_end().strip_suffix('}') else {
+        return body.to_string();
+    };
+    let mut text = head.trim_end().to_string();
+    for (key, value) in extra {
+        if !text.ends_with('{') {
+            text.push(',');
+        }
+        text.push_str(&format!("\n    \"{key}\": {value}"));
+    }
+    text.push_str("\n}\n");
+    text
+}
+
 /// Makes the ports setup chose the defaults the page shows and saves.
-fn offer_ports(payload: &mut Value, dashboard: u16, stream: u16) {
+fn offer_ports(payload: &mut Value, dashboard: u16, stream: u16, every_interface: bool) {
     let Some(fields) = payload["fields"].as_array_mut() else {
         return;
     };
@@ -372,7 +444,12 @@ fn offer_ports(payload: &mut Value, dashboard: u16, stream: u16) {
                     .as_str()
                     .and_then(|addr| addr.parse::<SocketAddr>().ok())
                 {
-                    field["default"] = json!(SocketAddr::new(addr.ip(), dashboard).to_string());
+                    let ip = if every_interface {
+                        std::net::Ipv4Addr::UNSPECIFIED.into()
+                    } else {
+                        addr.ip()
+                    };
+                    field["default"] = json!(SocketAddr::new(ip, dashboard).to_string());
                 }
             }
             _ => {}
@@ -454,6 +531,11 @@ async fn save_handler(
             "There is nothing to save yet.".to_string(),
         );
     }
+    let body = with_offered_defaults(
+        &body,
+        OFFERED_PORTS.get().copied(),
+        set_up_from_elsewhere(peer),
+    );
 
     let candidate = match backend::check_candidate(&body) {
         Ok(candidate) => candidate,
@@ -639,5 +721,38 @@ mod tests {
             url.starts_with("http://192.168.1.20:9000/setup.html?token="),
             "{url}"
         );
+    }
+
+    #[test]
+    fn offered_defaults_are_saved_only_where_they_differ_and_were_left_alone() {
+        let d = Config::defaults();
+        let parse = |text: &str| serde_json::from_str::<Value>(text).expect("valid json");
+        let body = "{\n    \"TZ\": \"UTC\"\n}\n";
+        let built_in = Some((d.monitoring_bind_port, d.icecast_alert_port));
+
+        assert_eq!(with_offered_defaults(body, built_in, false), body);
+        assert_eq!(with_offered_defaults(body, None, true), body);
+
+        let saved = parse(&with_offered_defaults(body, built_in, true));
+        assert_eq!(
+            saved["MONITORING_BIND_ADDR"],
+            format!("0.0.0.0:{}", d.monitoring_bind_port)
+        );
+        assert!(saved.get("MONITORING_BIND_PORT").is_none());
+        assert_eq!(saved["TZ"], "UTC");
+
+        let moved = Some((d.monitoring_bind_port + 1, d.icecast_alert_port + 1));
+        let saved = parse(&with_offered_defaults(body, moved, false));
+        assert_eq!(saved["MONITORING_BIND_PORT"], d.monitoring_bind_port + 1);
+        assert_eq!(saved["ICECAST_ALERT_PORT"], d.icecast_alert_port + 1);
+        assert!(saved.get("MONITORING_BIND_ADDR").is_none());
+
+        let typed = r#"{ "MONITORING_BIND_ADDR": "192.168.1.20:9000" }"#;
+        let saved = parse(&with_offered_defaults(typed, moved, true));
+        assert_eq!(saved["MONITORING_BIND_ADDR"], "192.168.1.20:9000");
+        assert!(saved.get("MONITORING_BIND_PORT").is_none());
+
+        let saved = parse(&with_offered_defaults("{}", built_in, true));
+        assert_eq!(saved.as_object().map(|map| map.len()), Some(1));
     }
 }

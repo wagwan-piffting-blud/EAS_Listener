@@ -72,6 +72,11 @@ const SOREM_BROADCAST_TEXT: &str = "layer:SOREM:1.0:Broadcast_Text";
 const EC_NEWLY_ACTIVE_AREAS: &str = "layer:EC-MSC-SMC:1.1:Newly_Active_Areas";
 const CAPCP_FALLBACK_EVENT_CODE: &str = "CEM";
 const CAPCP_FALLBACK_ORIGINATOR_CODE: &str = "CIV";
+// Alert Ready's public awareness tests go out as testMessage with status Actual; status Test is
+// NAAD's own system testing, never meant for air, and stays DMO.
+const CAPCP_TEST_EVENT: &str = "testMessage";
+const CAPCP_PUBLIC_TEST_EVENT_CODE: &str = "NPT";
+const CAPCP_PUBLIC_TEST_ORIGINATOR_CODE: &str = "PEP";
 
 #[derive(Debug, Deserialize)]
 struct SameCaResource {
@@ -1262,6 +1267,7 @@ pub(crate) fn parse_capcp_alert(
     let sender = child_text(root, "sender").unwrap_or_else(|| "Unknown sender".to_string());
     let sent = child_text(root, "sent").as_deref().and_then(parse_cap_time);
     let scope = child_text(root, "scope").unwrap_or_else(|| "Public".to_string());
+    let status = child_text(root, "status").unwrap_or_default();
 
     let (info_node, language, language_matched) = select_info_node(root, languages)
         .ok_or_else(|| anyhow!("CAP-CP alert missing <info> section"))?;
@@ -1269,13 +1275,18 @@ pub(crate) fn parse_capcp_alert(
     let sender_name =
         child_text(root, "senderName").or_else(|| child_text(info_node, "senderName"));
 
-    let event_code = capcp_event_code(info_node);
+    let event_code = capcp_event_code(info_node, &status);
     let event_text = capcp_event_title(&event_code)
         .or_else(|| child_text(info_node, "event"))
         .unwrap_or_else(|| "CAP-CP Alert".to_string());
 
-    let originator_code = capcp_originator_code(info_node);
-    let sender_name = sender_name.or_else(|| capcp_originator_name(&originator_code));
+    let originator_code = capcp_originator_code(info_node, &event_code);
+    // The test is the Government of Canada's whoever relays it, so NAAD's senderName gives way.
+    let sender_name = if originator_code == CAPCP_PUBLIC_TEST_ORIGINATOR_CODE {
+        capcp_originator_name(&originator_code).or(sender_name)
+    } else {
+        sender_name.or_else(|| capcp_originator_name(&originator_code))
+    };
 
     let urgency = child_text(info_node, "urgency");
     let severity = child_text(info_node, "severity");
@@ -1389,7 +1400,7 @@ fn info_language(info_node: Node<'_, '_>) -> String {
         .collect()
 }
 
-fn capcp_event_code(info_node: Node<'_, '_>) -> String {
+fn capcp_event_code(info_node: Node<'_, '_>, status: &str) -> String {
     for container in info_node
         .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "eventCode")
@@ -1407,6 +1418,9 @@ fn capcp_event_code(info_node: Node<'_, '_>) -> String {
         .filter(|node| node.is_element() && node.tag_name().name() == "eventCode")
     {
         if let Some(value) = value_for_prefixed_name(container, CAPCP_EVENT_VALUE_PREFIX) {
+            if value.trim() == CAPCP_TEST_EVENT && status.trim().eq_ignore_ascii_case("Actual") {
+                return CAPCP_PUBLIC_TEST_EVENT_CODE.to_string();
+            }
             if let Some(mapped) = CAPCP_EVENT_TO_SAME.get(value.trim()) {
                 return normalize_event_code(mapped);
             }
@@ -1416,9 +1430,12 @@ fn capcp_event_code(info_node: Node<'_, '_>) -> String {
     CAPCP_FALLBACK_EVENT_CODE.to_string()
 }
 
-fn capcp_originator_code(info_node: Node<'_, '_>) -> String {
+fn capcp_originator_code(info_node: Node<'_, '_>, event_code: &str) -> String {
     if let Some(value) = extract_parameter_value(info_node, "EAS-ORG") {
         return normalize_originator_code(&value);
+    }
+    if event_code == CAPCP_PUBLIC_TEST_EVENT_CODE {
+        return CAPCP_PUBLIC_TEST_ORIGINATOR_CODE.to_string();
     }
 
     child_text(info_node, "category")
@@ -2140,6 +2157,49 @@ mod tests {
         let parsed =
             parse_capcp_alert(xml, "naad://test", &languages(&["en"])).expect("parsed alert");
         assert_eq!(parsed.alert.event_code, "WSW");
+    }
+
+    #[test]
+    fn parse_capcp_alert_airs_only_actual_test_messages_as_npt_from_pep() {
+        let xml = |status: &str| {
+            format!(
+                r#"<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>TEST-PUBLIC-TEST</identifier>
+  <sender>NAADS-Feed@pelmorex.com</sender>
+  <status>{status}</status>
+  <msgType>Alert</msgType>
+  <info>
+    <language>en-CA</language>
+    <category>Other</category>
+    <event>test</event>
+    <senderName>Pelmorex Communications Inc</senderName>
+    <eventCode>
+      <valueName>profile:CAP-CP:Event:0.4</valueName>
+      <value>testMessage</value>
+    </eventCode>
+  </info>
+</alert>"#
+            )
+        };
+
+        let public =
+            parse_capcp_alert(&xml("Actual"), "naad://test", &languages(&["en"])).expect("parsed");
+        assert_eq!(public.alert.event_code, "NPT");
+        assert_eq!(public.alert.event_text, "National Periodic Test");
+        assert_eq!(public.alert.originator_code, "PEP");
+        assert_eq!(
+            public.alert.sender_name.as_deref(),
+            Some("The Government of Canada")
+        );
+
+        let system =
+            parse_capcp_alert(&xml("Test"), "naad://test", &languages(&["en"])).expect("parsed");
+        assert_eq!(system.alert.event_code, "DMO");
+        assert_eq!(system.alert.originator_code, "CIV");
+        assert_eq!(
+            system.alert.sender_name.as_deref(),
+            Some("Pelmorex Communications Inc")
+        );
     }
 
     #[test]
