@@ -51,36 +51,36 @@
             "project_url": "https://github.com/unraid/apprise-go",
             "source_url": "https://github.com/{github}/releases/tag/{tag}",
             "github": "unraid/apprise-go",
-            "version": "0.4.0",
-            "release_tag": "v0.4.0",
+            "version": "0.4.1",
+            "release_tag": "v0.4.1",
             "install": "binary",
             "feature": "Notifications to non-Discord targets. Discord webhooks are sent natively by the listener and work without this.",
             "platforms": {
                 "windows-x86_64": {
                     "asset": "apprise-go-windows-amd64.exe",
-                    "sha256": "b0dc77a995c271a49485ff98af7937878d26a60f599127c907437665bac501f3"
+                    "sha256": "2ab0984dad3154d6af63bbc2c124ed77e9396808c93e4234f7c5f44d5693ecd1"
                 },
                 "linux-x86_64": {
                     "asset": "apprise-go-linux-amd64",
-                    "sha256": "c4f4c5657bb76e1bf1cb7fc2e1a465a7407606d72b383a366c248913c3abe777"
+                    "sha256": "48b22ad5d2c25c14fb18ab2ea695028561132af6e4097aa470e440a9b8a033b1"
                 },
                 "linux-aarch64": {
                     "asset": "apprise-go-linux-arm64",
-                    "sha256": "088c35b724743b2ad8f4fff9c93a5eea4757a339034bbd576491b0d408499577"
+                    "sha256": "0e6656ae27992a95a6460500bec8acf05e5858773cb4a372273add832c2557d5"
                 },
                 "linux-armv7": {
                     "asset": "apprise-go-linux-armv7",
-                    "sha256": "c46587257ffbfdc7030f16f8a4859096e876fddc8d6a7915e88de5f71b157a08"
+                    "sha256": "6bd2f94396e8719953cfbe4269b5b9d7b1e7a631d661a74be6d23361f348386b"
                 },
                 "macos-aarch64": {
                     "asset": "apprise-go-darwin-arm64.zip",
-                    "sha256": "16900b252cab4906d232fc0b64221b7581e3261dfca361f9dc5e224dc8a21009",
+                    "sha256": "85e5b210c5c72a799e13923153234f6ada3f9ea73c738fe3c35dfb5f19ee1048",
                     "archive": "zip",
                     "archive_member": "apprise-go-darwin-arm64"
                 },
                 "macos-x86_64": {
                     "asset": "apprise-go-darwin-amd64.zip",
-                    "sha256": "c4c9e1d4979092b7d35b88e0cf82c4948d147455b3862a8a16221b1afdef9253",
+                    "sha256": "8d4e6a4452c6179952b1b6a79412715a0d8e3953f85952534b536deb46ee6110",
                     "archive": "zip",
                     "archive_member": "apprise-go-darwin-amd64"
                 }
